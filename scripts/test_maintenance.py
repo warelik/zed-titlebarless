@@ -814,7 +814,7 @@ class SharedZedReviewTests(unittest.TestCase):
 
     def test_native_history_accepts_reordered_inventory_but_rejects_real_changes(self):
         candidate = {"repository": "owner/zed"}
-        accepted = {"variable": {"value": json.dumps({"publication": {
+        accepted = {"variable": {"value": json.dumps({"repository": "owner/zed", "publication": {
             "published_at": "2026-10-19T10:00:00Z"}})}}
         first = {"number": 7, "state": "closed", "updated_at": "2026-10-19T12:00:00Z",
                  "head": {"sha": "a" * 40, "repo": {"full_name": "owner/zed"}}}
