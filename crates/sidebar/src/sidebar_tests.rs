@@ -17957,7 +17957,7 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
     multi_workspace.update_in(cx, |mw, window, cx| {
         let workspace = cx.new(|cx| workspace::Workspace::new(None, local, params, window, cx));
         mw.activate(workspace, None, window, cx)
-    }).unwrap();
+    });
     assert!(multi_workspace.read_with(cx, |mw, _| {
         mw.is_workspace_retained(&remote_workspace)
             && mw.workspaces().any(|workspace| workspace == &remote_workspace)
