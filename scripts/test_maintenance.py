@@ -127,6 +127,101 @@ class NativeBaselinePublicationTests(unittest.TestCase):
         self.assertEqual(len(updates), 1)
 
 
+    def test_failed_checkpoint_publication_withdraws_and_restores_only_its_own_checkpoint(self):
+        repo = "owner/zed"
+        candidate = {"schema": 1, "repository": repo, "application_sha": "a" * 40,
+                     "configuration_sha": "b" * 40, "upstream_sha": "c" * 40,
+                     "patchset_sha256": "d" * 64, "recipe_sha256": "e" * 64,
+                     "platform": "macos/aarch64"}
+        endpoint = f"repos/{repo}/actions/variables/FORK_ACCEPTED_BASELINE"
+        previous = {"name": "FORK_ACCEPTED_BASELINE", "value": "verified previous checkpoint",
+                    "created_at": "2026-10-18T00:00:00Z", "updated_at": "2026-10-18T00:00:00Z"}
+        publication = {"kind": "github-release", "id": 9, "published_at": "2026-10-20T12:00:00Z",
+                       "metadata_sha256": "f" * 64}
+        encoded = json.dumps({"schema": 1, "repository": repo, "candidate": candidate,
+                              "publication": publication}, sort_keys=True, separators=(",", ":"))
+        env = {"MAINTENANCE_BASELINE": json.dumps({"endpoint": endpoint, "variable": previous}),
+               "MAINTENANCE_CANDIDATE": json.dumps(candidate),
+               "CONFIG_SHA": candidate["configuration_sha"]}
+        for committed, restore_failure in ((False, None), (True, None),
+                                           (True, "before"), (True, "after")):
+            with self.subTest(checkpoint_write_committed=committed, restore_failure=restore_failure):
+                current = dict(previous)
+                events = []
+                draft = True
+                restore_writes = 0
+
+                def native(route, *, method="GET", data=None, token=None):
+                    nonlocal draft, restore_writes
+                    if route == f"repos/{repo}/releases/9":
+                        if method == "PATCH":
+                            draft = data["draft"]
+                            events.append(("release", draft))
+                            return {}
+                        return {"id": 9, "draft": draft}
+                    self.assertEqual(route, endpoint)
+                    self.assertEqual(token, "owner-token")
+                    if method == "PATCH":
+                        restore_writes += 1
+                        events.append(("checkpoint", data["value"]))
+                        if restore_writes == 1 and restore_failure == "before":
+                            raise RuntimeError("restore request timed out before commit")
+                        current["value"] = data["value"]
+                        current["updated_at"] = "2026-10-20T12:00:01Z"
+                        if restore_writes == 1 and restore_failure == "after":
+                            raise RuntimeError("restore response lost after commit")
+                        return {}
+                    return dict(current)
+
+                def advance():
+                    if committed:
+                        current["value"] = encoded
+                    raise RuntimeError("lost checkpoint response")
+
+                def validate(published):
+                    if published:
+                        advance()
+
+                with (patch.dict(os.environ, env, clear=True),
+                      patch.object(release, "owner_token", return_value="owner-token"),
+                      patch.object(maintenance, "load", return_value=Mock()),
+                      patch.object(release, "api", side_effect=native),
+                      self.assertRaisesRegex(RuntimeError, "lost checkpoint response")):
+                    release.publish_checked_draft(repo, 9, "notes", validate)
+                self.assertTrue(draft)
+                self.assertEqual(current["value"], previous["value"])
+                self.assertEqual(events[:2], [("release", False), ("release", True)])
+                expected_writes = (2 if restore_failure == "before" else 1) if committed else 0
+                self.assertEqual(restore_writes, expected_writes)
+                self.assertEqual(events[2:], [("checkpoint", previous["value"])] * expected_writes)
+
+    def test_checkpoint_recovery_refuses_a_concurrent_publication(self):
+        repo = "owner/zed"
+        candidate = {"schema": 1, "repository": repo, "application_sha": "a" * 40,
+                     "configuration_sha": "b" * 40, "upstream_sha": "c" * 40,
+                     "patchset_sha256": "d" * 64, "recipe_sha256": "e" * 64,
+                     "platform": "macos/aarch64"}
+        endpoint = f"repos/{repo}/actions/variables/FORK_ACCEPTED_BASELINE"
+        current = {"name": "FORK_ACCEPTED_BASELINE", "created_at": "2026-10-20T00:00:00Z",
+                   "updated_at": "2026-10-20T00:00:00Z",
+                   "value": json.dumps({"schema": 1, "repository": repo,
+                       "candidate": {**candidate, "application_sha": "9" * 40},
+                       "publication": {"kind": "github-release", "id": 10,
+                           "published_at": "2026-10-20T12:00:00Z", "metadata_sha256": "f" * 64}})}
+        env = {"MAINTENANCE_CANDIDATE": json.dumps(candidate),
+               "MAINTENANCE_BASELINE": json.dumps({"endpoint": endpoint,
+                   "variable": {"name": "FORK_ACCEPTED_BASELINE", "value": "previous"}}),
+               "CONFIG_SHA": candidate["configuration_sha"]}
+        with (patch.dict(os.environ, env, clear=True),
+              patch.object(release, "owner_token", return_value="owner-token"),
+              patch.object(maintenance, "load", return_value=Mock()),
+              patch.object(release, "api", return_value=current) as native,
+              self.assertRaisesRegex(ValueError, "concurrently changed checkpoint")):
+            release.restore_publication_baseline(repo, 9)
+        native.assert_called_once_with(endpoint, token="owner-token")
+
+
+
 class SharedZedReviewTests(unittest.TestCase):
     def test_dismissed_review_passes_native_dismissal_events_without_inventing_its_time(self):
         repo, source = "owner/zed", "c" * 40
