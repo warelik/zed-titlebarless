@@ -1,4 +1,4 @@
-From 3ba87d4985e0cba1f3197d040a4aded1bb2dbb2a Mon Sep 17 00:00:00 2001
+From 19b02b61bfcbf979aef6ec4e7dbcb4b06efdcc48 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 09:20:00 +0000
@@ -6,15 +6,15 @@ Subject: [PATCH] Preserve terminal directory and reversible workspace close
  consent
 
 ---
- crates/project/src/terminals.rs               | 81 +++++++++++++++++--
+ crates/project/src/terminals.rs               | 87 ++++++++++++++++---
  crates/sidebar/src/sidebar.rs                 |  6 +-
  crates/workspace/src/multi_workspace.rs       | 31 ++++---
  crates/workspace/src/multi_workspace_tests.rs | 21 +++--
  crates/workspace/src/workspace.rs             | 21 ++++-
- 5 files changed, 127 insertions(+), 33 deletions(-)
+ 5 files changed, 128 insertions(+), 38 deletions(-)
 
 diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
-index d60f5e1b8b..c29d7dfa85 100644
+index d60f5e1b8b..9f3c03299c 100644
 --- a/crates/project/src/terminals.rs
 +++ b/crates/project/src/terminals.rs
 @@ -819,9 +819,9 @@ impl Project {
@@ -30,27 +30,36 @@ index d60f5e1b8b..c29d7dfa85 100644
          };
          let is_local = self.remote_client.is_none();
          cx.spawn(async move |project, cx| {
-@@ -1174,7 +1174,18 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
-         allow_daemon_start: bool,
-         cx: &mut Context<Self>,
-     ) -> Task<Result<Option<ShpoolProbe>>> {
--        let probe = self.probe_shpool_unbounded(context, allow_daemon_start, cx);
-+        let cwd = self.first_project_directory(cx);
-+        self.probe_shpool_in_context_at(context, allow_daemon_start, cwd, cx)
-+    }
-+
-+    fn probe_shpool_in_context_at(
+@@ -1164,17 +1164,24 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
+     /// Finds shpool and its sessions on the host the project's shells run on.
+     /// `shpool list` starts the daemon when none runs, so a reachable daemon is
+     /// what makes shpool available, not only the binary.
+-    fn probe_shpool(&mut self, cx: &mut Context<Self>) -> Task<Result<Option<ShpoolProbe>>> {
+-        self.probe_shpool_in_context(None, true, cx)
++    fn probe_shpool_in_context(
 +        &mut self,
 +        context: Option<ShpoolSessionContext>,
 +        allow_daemon_start: bool,
-+        cwd: Option<PathBuf>,
 +        cx: &mut Context<Self>,
 +    ) -> Task<Result<Option<ShpoolProbe>>> {
++        let cwd = self.first_project_directory(cx);
++        self.probe_shpool_in_context_at(context, allow_daemon_start, cwd, cx)
+     }
+ 
+-    fn probe_shpool_in_context(
++    fn probe_shpool_in_context_at(
+         &mut self,
+         context: Option<ShpoolSessionContext>,
+         allow_daemon_start: bool,
++        cwd: Option<PathBuf>,
+         cx: &mut Context<Self>,
+     ) -> Task<Result<Option<ShpoolProbe>>> {
+-        let probe = self.probe_shpool_unbounded(context, allow_daemon_start, cx);
 +        let probe = self.probe_shpool_unbounded(context, allow_daemon_start, cwd, cx);
          let executor = cx.background_executor().clone();
          cx.background_spawn(async move {
              let timeout = executor.timer(SHPOOL_PROBE_TIMEOUT);
-@@ -1199,6 +1210,7 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
+@@ -1199,6 +1206,7 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
          &mut self,
          context: Option<ShpoolSessionContext>,
          allow_daemon_start: bool,
@@ -58,7 +67,7 @@ index d60f5e1b8b..c29d7dfa85 100644
          cx: &mut Context<Self>,
      ) -> Task<Result<Option<ShpoolProbe>>> {
          if let Some(context) = &context {
-@@ -1243,9 +1255,9 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
+@@ -1243,9 +1251,9 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
                  Ok(script) => self.exec_shpool_context_script(script, cx),
                  Err(error) => return Task::ready(Err(error)),
              },
@@ -70,7 +79,7 @@ index d60f5e1b8b..c29d7dfa85 100644
              ),
          };
          cx.background_spawn(async move {
-@@ -1597,12 +1609,21 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
+@@ -1597,12 +1605,21 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
          &self,
          script: String,
          cx: &mut Context<Self>,
@@ -93,7 +102,25 @@ index d60f5e1b8b..c29d7dfa85 100644
          let remote_client = self.remote_client.clone();
          let settings = self.terminal_settings(&path, cx).clone();
          let program = "/bin/sh".to_string();
-@@ -2747,6 +2768,52 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
+@@ -2011,7 +2028,7 @@ mod tests {
+         let project = Project::test(fs, [], cx).await;
+ 
+         let probe = project
+-            .update(cx, |p, cx| p.probe_shpool(cx))
++            .update(cx, |p, cx| p.probe_shpool_in_context(None, true, cx))
+             .await
+             .expect("probe should succeed");
+         assert!(probe.is_none());
+@@ -2021,7 +2038,7 @@ mod tests {
+         });
+ 
+         let probe = project
+-            .update(cx, |p, cx| p.probe_shpool(cx))
++            .update(cx, |p, cx| p.probe_shpool_in_context(None, true, cx))
+             .await
+             .expect("probe should succeed")
+             .expect("fake shpool should be available");
+@@ -2747,6 +2764,52 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
          assert!(stdout.contains("posix_item2"));
      }
  
