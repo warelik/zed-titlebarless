@@ -1,0 +1,148 @@
+From 76ef22a6929725b8fe90a88dc5c082300c115f92 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 06:00:00 +0000
+Subject: [PATCH] Do not report the shpool client's working directory
+
+---
+ crates/project/src/terminals.rs |  1 +
+ crates/terminal/src/terminal.rs | 44 +++++++++++++++++++++++++++------
+ 2 files changed, 37 insertions(+), 8 deletions(-)
+
+diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
+index 9f3c03299cc8a5a534527d29fcd9491ba8464c7c..4ed73e9967e8606d0c81b518a71945817a7e0cfa 100644
+--- a/crates/project/src/terminals.rs
++++ b/crates/project/src/terminals.rs
+@@ -874,6 +874,7 @@ impl Project {
+             let pty_startup = PtyStartup {
+                 bounds,
+                 hold_resize_until_output: command.is_some(),
++                session_owned_shell: command.is_some(),
+             };
+             if let Some(context) = &context {
+                 if let Some(reserve) = reserve_context.take() {
+diff --git a/crates/terminal/src/terminal.rs b/crates/terminal/src/terminal.rs
+index c9d147822c6827ab95472003f6dffb47f2bb7f1f..4473b32855184792b2a56ae959f64cbf104ec782 100644
+--- a/crates/terminal/src/terminal.rs
++++ b/crates/terminal/src/terminal.rs
+@@ -843,6 +843,9 @@ pub struct PtyStartup {
+     /// that arrive while it attaches its session, so the session would keep the
+     /// opening size while the terminal shows another one.
+     pub hold_resize_until_output: bool,
++    /// The shell lives in a session on a daemon, so the PTY's foreground process
++    /// is a client and its working directory is not the shell's.
++    pub session_owned_shell: bool,
+ }
+ 
+ /// See [`PtyStartup::hold_resize_until_output`].
+@@ -1085,6 +1088,7 @@ impl TerminalBuilder {
+             hyperlink_regex_searches: RegexSearches::default(),
+             vi_mode_enabled: false,
+             is_remote_terminal: false,
++            pty_cwd_is_shell_cwd: true,
+             last_mouse_move_time: Instant::now(),
+             last_hyperlink_search_position: None,
+             mouse_down_hyperlink: None,
+@@ -1407,6 +1411,7 @@ impl TerminalBuilder {
+                 ),
+                 vi_mode_enabled: false,
+                 is_remote_terminal,
++                pty_cwd_is_shell_cwd: !is_remote_terminal && !pty_startup.session_owned_shell,
+                 last_mouse_move_time: Instant::now(),
+                 last_hyperlink_search_position: None,
+                 mouse_down_hyperlink: None,
+@@ -1432,7 +1437,7 @@ impl TerminalBuilder {
+                 event_loop_task: Task::ready(Ok(())),
+                 background_executor,
+                 path_style,
+-                cwd_history: if is_remote_terminal {
++                cwd_history: if is_remote_terminal || pty_startup.session_owned_shell {
+                     Vec::new()
+                 } else {
+                     working_directory
+@@ -1628,6 +1633,7 @@ pub struct Terminal {
+     task: Option<TaskState>,
+     vi_mode_enabled: bool,
+     is_remote_terminal: bool,
++    pty_cwd_is_shell_cwd: bool,
+     last_mouse_move_time: Instant,
+     last_hyperlink_search_position: Option<GpuiPoint<Pixels>>,
+     mouse_down_hyperlink: Option<HyperlinkMatch>,
+@@ -2480,7 +2486,7 @@ impl Terminal {
+ 
+     fn write_input(&mut self, input: impl Into<Cow<'static, [u8]>>) {
+         let input = input.into();
+-        if !self.is_remote_terminal && input.contains(&b'\r') {
++        if self.pty_cwd_is_shell_cwd && input.contains(&b'\r') {
+             let term = self.term.lock_unfair();
+             self.pending_cwd_boundary = Some(Self::scrollback_position(
+                 term.grid().cursor.point.line.0,
+@@ -3132,10 +3138,11 @@ impl Terminal {
+     }
+ 
+     pub fn working_directory(&self) -> Option<PathBuf> {
+-        if self.is_remote_terminal {
+-            // We can't yet reliably detect the working directory of a shell on the
+-            // SSH host. Until we can do that, it doesn't make sense to display
+-            // the working directory on the client and persist that.
++        if !self.pty_cwd_is_shell_cwd {
++            // We can't yet reliably detect the working directory of a shell that
++            // runs on the SSH host or in a session on a daemon. Until we can do
++            // that, it doesn't make sense to display the working directory of the
++            // local client process and persist that.
+             None
+         } else {
+             self.client_side_working_directory()
+@@ -3172,7 +3179,7 @@ impl Terminal {
+     }
+ 
+     pub(crate) fn record_cwd_change(&mut self, new_working_directory: PathBuf) {
+-        if self.is_remote_terminal {
++        if !self.pty_cwd_is_shell_cwd {
+             return;
+         }
+ 
+@@ -3202,7 +3209,7 @@ impl Terminal {
+     fn cwd_at_line(&self, line: i32, history_size: usize) -> Option<PathBuf> {
+         // Once the scrollback cap is reached, evictions move retained lines without changing
+         // `history_size`, so stored row offsets no longer identify their original lines.
+-        if self.is_remote_terminal
++        if !self.pty_cwd_is_shell_cwd
+             || self.cwd_history.is_empty()
+             || history_size >= self.term_config.scrolling_history
+         {
+@@ -6703,6 +6710,7 @@ mod tests {
+     fn test_remote_terminal_does_not_record_local_cwd() {
+         let mut terminal = make_display_only_terminal();
+         terminal.is_remote_terminal = true;
++        terminal.pty_cwd_is_shell_cwd = false;
+         terminal.write_input(b"\r".to_vec());
+         terminal.record_cwd_change(PathBuf::from("/local/ssh/cwd"));
+ 
+@@ -6711,6 +6719,26 @@ mod tests {
+         assert_eq!(terminal.cwd_at_line(0, 0), None);
+     }
+ 
++    #[test]
++    fn test_session_owned_shell_does_not_report_client_cwd() {
++        let mut terminal = make_display_only_terminal();
++        terminal.pty_cwd_is_shell_cwd = false;
++        terminal.write_input(b"\r".to_vec());
++        terminal.record_cwd_change(PathBuf::from("/client/cwd"));
++
++        assert_eq!(terminal.pending_cwd_boundary, None);
++        assert!(terminal.cwd_history.is_empty());
++        assert_eq!(terminal.working_directory(), None);
++        assert_eq!(terminal.cwd_at_line(0, 0), None);
++
++        let mut local_terminal = make_display_only_terminal();
++        local_terminal.record_cwd_change(PathBuf::from("/client/cwd"));
++        assert_eq!(
++            local_terminal.cwd_at_line(0, 0),
++            Some(PathBuf::from("/client/cwd"))
++        );
++    }
++
+     #[test]
+     fn test_reset_cwd_history_discards_stale_coordinates() {
+         let mut terminal = make_display_only_terminal();
