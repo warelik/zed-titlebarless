@@ -2110,3 +2110,30 @@ class UnfinishedSourceSnapshotTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+class NativePagingSnapshotTests(unittest.TestCase):
+    def test_new_callback_restarts_reads_without_returning_partial_history(self):
+        first = [{"id": i} for i in range(100)]
+        with patch.object(release, "api", side_effect=[
+            {"total_count": 101, "workflow_runs": first},
+            {"total_count": 102, "workflow_runs": [{"id": 100}, {"id": 101}]},
+            {"total_count": 102, "workflow_runs": first},
+            {"total_count": 102, "workflow_runs": [{"id": 100}, {"id": 101}]},
+        ]) as api, patch.object(release.time, "sleep") as sleep:
+            result = release.maintenance_pages("repos/fixture/actions/runs", "workflow_runs")
+        self.assertEqual([v["id"] for v in result], list(range(102)))
+        self.assertEqual([c.args[0].rsplit("=", 1)[1] for c in api.call_args_list], ["1", "2", "1", "2"])
+        sleep.assert_called_once_with(1)
+
+    def test_persistent_drift_and_malformed_records_still_block(self):
+        with patch.object(release, "api", side_effect=[
+            {"total_count": 101, "workflow_runs": [{}] * 100},
+            {"total_count": 102, "workflow_runs": [{}] * 2},
+        ] * 3) as api, patch.object(release.time, "sleep") as sleep:
+            with self.assertRaisesRegex(ValueError, "history changed while paging"):
+                release.maintenance_pages("repos/fixture/actions/runs", "workflow_runs")
+        self.assertEqual(api.call_count, 6)
+        self.assertEqual(sleep.call_count, 2)
+        with patch.object(release, "api", return_value={"total_count": "bad", "workflow_runs": []}) as api:
+            with self.assertRaisesRegex(ValueError, "Incomplete native lifecycle history"):
+                release.maintenance_pages("repos/fixture/actions/runs", "workflow_runs")
+        self.assertEqual(api.call_count, 1)

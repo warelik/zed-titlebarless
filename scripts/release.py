@@ -1407,6 +1407,18 @@ def check_shared_execution():
 
 
 def maintenance_pages(path, field):
+    # New metadata-only callbacks may arrive between pages. Discard the partial
+    # snapshot and repeat GETs only; no reservation, test or build is retried.
+    for attempt in range(3):
+        try:
+            return _maintenance_pages_snapshot(path, field)
+        except ValueError as error:
+            if str(error) != "Native lifecycle history changed while paging" or attempt == 2:
+                raise
+            time.sleep(attempt + 1)
+
+
+def _maintenance_pages_snapshot(path, field):
     result, expected = [], None
     separator = "&" if "?" in path else "?"
     for page in range(1, 1001):
