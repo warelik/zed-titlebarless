@@ -1,0 +1,26 @@
+From 4eae95c98319b87e45513b34150876b281ce859a Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sat, 1 Jan 2000 00:00:00 +0000
+Subject: [PATCH] Match sidebar regression to unit-returning workspace
+ activation
+
+---
+ crates/sidebar/src/sidebar_tests.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
+index 768e3b422f..d038c9c9cb 100644
+--- a/crates/sidebar/src/sidebar_tests.rs
++++ b/crates/sidebar/src/sidebar_tests.rs
+@@ -17957,7 +17957,7 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
+     multi_workspace.update_in(cx, |mw, window, cx| {
+         let workspace = cx.new(|cx| workspace::Workspace::new(None, local, params, window, cx));
+         mw.activate(workspace, None, window, cx)
+-    }).unwrap();
++    });
+     assert!(multi_workspace.read_with(cx, |mw, _| {
+         mw.is_workspace_retained(&remote_workspace)
+             && mw.workspaces().any(|workspace| workspace == &remote_workspace)
+-- 
+2.43.0
