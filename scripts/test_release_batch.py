@@ -199,7 +199,7 @@ class BatchedReviewTests(unittest.TestCase):
         for scope, sha, base, stamps in (
                 ("full", "c" * 40, "b" * 40,
                  ("2026-10-19T10:01:00Z", "2026-10-19T10:04:00Z")),
-                ("delta", "e" * 40, "a" * 40,
+                ("delta", "a" * 40, "e" * 40,
                  ("2026-10-19T10:05:00Z", "2026-10-19T10:02:00Z"))):
             marker = "<!-- fork-review:v1 " + json.dumps({
                 "schema": 1, "candidate_id": "f" * 64, "scope": scope,
@@ -223,7 +223,7 @@ class BatchedReviewTests(unittest.TestCase):
         requests = {}
         for scope, sha, base, stamp in (
                 ("full", "c" * 40, "b" * 40, "2026-10-19T10:01:00Z"),
-                ("delta", "e" * 40, "a" * 40, "2026-10-19T10:02:00Z")):
+                ("delta", "a" * 40, "e" * 40, "2026-10-19T10:02:00Z")):
             marker = "<!-- fork-review:v1 " + json.dumps({
                 "schema": 1, "candidate_id": "f" * 64, "scope": scope,
                 "review_sha": sha, "base_sha": base},
@@ -252,7 +252,7 @@ class BatchedReviewTests(unittest.TestCase):
                 requests = {}
                 for scope, sha, base in (
                         ("full", "c" * 40, "b" * 40),
-                        ("delta", "e" * 40, "a" * 40)):
+                        ("delta", "a" * 40, "e" * 40)):
                     marker = "<!-- fork-review:v1 " + json.dumps({
                         "schema": 1, "candidate_id": "f" * 64, "scope": scope,
                         "review_sha": sha, "base_sha": base},
@@ -277,7 +277,7 @@ class BatchedReviewTests(unittest.TestCase):
                     requests = {}
                     for scope, sha, base in (
                             ("full", "c" * 40, "b" * 40),
-                            ("delta", "e" * 40, "a" * 40)):
+                            ("delta", "a" * 40, "e" * 40)):
                         marker = "<!-- fork-review:v1 " + json.dumps({
                             "schema": 1, "candidate_id": "f" * 64, "scope": scope,
                             "review_sha": sha, "base_sha": base},
