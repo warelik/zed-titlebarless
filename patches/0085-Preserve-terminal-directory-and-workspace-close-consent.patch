@@ -1,4 +1,4 @@
-From ef17c37fb18c71e5c4dbd3a4906eef8ad1e51b25 Mon Sep 17 00:00:00 2001
+From 3ba87d4985e0cba1f3197d040a4aded1bb2dbb2a Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 09:20:00 +0000
@@ -6,15 +6,15 @@ Subject: [PATCH] Preserve terminal directory and reversible workspace close
  consent
 
 ---
- crates/project/src/terminals.rs               | 80 +++++++++++++++++--
+ crates/project/src/terminals.rs               | 81 +++++++++++++++++--
  crates/sidebar/src/sidebar.rs                 |  6 +-
  crates/workspace/src/multi_workspace.rs       | 31 ++++---
  crates/workspace/src/multi_workspace_tests.rs | 21 +++--
  crates/workspace/src/workspace.rs             | 21 ++++-
- 5 files changed, 126 insertions(+), 33 deletions(-)
+ 5 files changed, 127 insertions(+), 33 deletions(-)
 
 diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
-index d60f5e1b8b..6f55fff126 100644
+index d60f5e1b8b..c29d7dfa85 100644
 --- a/crates/project/src/terminals.rs
 +++ b/crates/project/src/terminals.rs
 @@ -819,9 +819,9 @@ impl Project {
@@ -93,7 +93,7 @@ index d60f5e1b8b..6f55fff126 100644
          let remote_client = self.remote_client.clone();
          let settings = self.terminal_settings(&path, cx).clone();
          let program = "/bin/sh".to_string();
-@@ -2747,6 +2768,51 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
+@@ -2747,6 +2768,52 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
          assert!(stdout.contains("posix_item2"));
      }
  
@@ -138,7 +138,8 @@ index d60f5e1b8b..6f55fff126 100644
 +            }).await.unwrap();
 +            let output = command.output().await.unwrap();
 +            assert!(output.status.success());
-+            assert_eq!(String::from_utf8(output.stdout).unwrap(), format!("{}|{value}", path.display()));
++            assert_eq!(String::from_utf8(output.stdout).unwrap(),
++                format!("{}|{value}", std::fs::canonicalize(path).unwrap().display()));
 +        }
 +    }
 +
