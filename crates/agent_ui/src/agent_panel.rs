@@ -7666,7 +7666,17 @@ impl Render for AgentPanel {
                         })
                         .child(terminal_view.clone())
                         .when_some(exited_terminal_id, |this, terminal_id| {
-                            this.capture_key_down(cx.listener(
+                            this.capture_action(cx.listener(
+                                move |this, action: &terminal_view::SendKeystroke, window, cx| {
+                                    if action.keystroke() == "enter" {
+                                        cx.stop_propagation();
+                                        this.restart_terminal(terminal_id, true, true, window, cx);
+                                    } else {
+                                        cx.propagate();
+                                    }
+                                },
+                            ))
+                            .capture_key_down(cx.listener(
                                 move |this, event: &KeyDownEvent, window, cx| {
                                     if event.keystroke.key == "enter"
                                         && !event.keystroke.modifiers.modified()
@@ -17002,6 +17012,8 @@ mod tests {
     async fn test_process_exited_keeps_thread_and_enter_restart(cx: &mut TestAppContext) {
         init_test(cx);
         cx.update(|cx| {
+            let keys = settings::KeymapFile::load_asset_allow_partial_failure("keymaps/default-macos.json", cx).unwrap();
+            cx.bind_keys(keys);
             agent::ThreadStore::init_global(cx);
             TerminalThreadMetadataStore::init_global(cx);
             language_model::LanguageModelRegistry::test(cx);

@@ -768,13 +768,22 @@ fn apply_worktree_label_mode(
 /// an SSH connection. Suitable for passing to
 /// [`MultiWorkspace::find_or_create_workspace`] as the `connect_remote`
 /// argument.
+fn restore_remote_options(mut options: RemoteConnectionOptions, cx: &App) -> RemoteConnectionOptions {
+    if let RemoteConnectionOptions::Ssh(ssh) = &mut options {
+        if ssh.args.is_none() {
+            recent_projects::RemoteSettings::get_global(cx).fill_connection_options_from_settings(ssh);
+        }
+    }
+    options
+}
+
 fn connect_remote(
     modal_workspace: Entity<Workspace>,
     connection_options: RemoteConnectionOptions,
     window: &mut Window,
     cx: &mut Context<MultiWorkspace>,
 ) -> gpui::Task<anyhow::Result<Option<Entity<remote::RemoteClient>>>> {
-    remote_connection::connect_with_modal(&modal_workspace, connection_options, window, cx)
+    remote_connection::connect_with_modal(&modal_workspace, restore_remote_options(connection_options, cx), window, cx)
 }
 
 // Per-project-group cache of the remote default branch, used to populate the
@@ -1367,7 +1376,7 @@ impl Sidebar {
             return;
         };
         let path_list = project_group_key.path_list().clone();
-        let host = project_group_key.host();
+        let host = project_group_key.host().map(|options| restore_remote_options(options, cx));
         let provisional_key = Some(project_group_key.clone());
         let active_workspace = multi_workspace.read(cx).workspace().clone();
         let modal_workspace = active_workspace.clone();
@@ -1412,7 +1421,7 @@ impl Sidebar {
         };
 
         let path_list = project_group_key.path_list().clone();
-        let host = project_group_key.host();
+        let host = project_group_key.host().map(|options| restore_remote_options(options, cx));
         let provisional_key = Some(project_group_key.clone());
         let active_workspace = multi_workspace.read(cx).workspace().clone();
 
@@ -1593,7 +1602,7 @@ impl Sidebar {
 
             let mut terminals = Vec::new();
             let terminal_store = TerminalThreadMetadataStore::global(cx);
-            let group_host = group_key.host();
+            let group_host = group_key.host().map(|options| restore_remote_options(options, cx));
             let mut push_terminal_metadata =
                 |metadata: TerminalThreadMetadata, workspace: ThreadEntryWorkspace| {
                     if !seen_terminal_ids.insert(metadata.terminal_id) {
@@ -1685,7 +1694,7 @@ impl Sidebar {
             let mut threads: Vec<Arc<ThreadEntry>> = Vec::new();
             let mut has_running_threads = false;
             let mut waiting_thread_count: usize = 0;
-            let group_host = group_key.host();
+            let group_host = group_key.host().map(|options| restore_remote_options(options, cx));
 
             if should_load_threads {
                 let thread_store = ThreadMetadataStore::global(cx);
@@ -2423,7 +2432,7 @@ impl Sidebar {
         has_threads: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let host = key.host();
+        let host = key.host().map(|options| restore_remote_options(options, cx));
 
         let has_filter = self.has_filter_query(cx);
 
@@ -4250,7 +4259,7 @@ impl Sidebar {
         // reconciliation cannot synthesize an empty fallback draft.
         self.pending_thread_activation = Some(pending_thread_id);
 
-        let host = project_group_key.host();
+        let host = project_group_key.host().map(|options| restore_remote_options(options, cx));
         let provisional_key = Some(project_group_key.clone());
         let active_workspace = multi_workspace.read(cx).workspace().clone();
         let modal_workspace = active_workspace.clone();
@@ -4883,7 +4892,7 @@ impl Sidebar {
             return;
         };
 
-        let host = project_group_key.host();
+        let host = project_group_key.host().map(|options| restore_remote_options(options, cx));
         let provisional_key = Some(project_group_key.clone());
         let active_workspace = multi_workspace.read(cx).workspace().clone();
         let modal_workspace = active_workspace.clone();
@@ -5199,7 +5208,7 @@ impl Sidebar {
             return;
         };
 
-        let host = project_group_key.host();
+        let host = project_group_key.host().map(|options| restore_remote_options(options, cx));
         let active_workspace = multi_workspace.read(cx).workspace().clone();
         let modal_workspace = active_workspace.clone();
 

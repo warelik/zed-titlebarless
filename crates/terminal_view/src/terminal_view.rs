@@ -93,6 +93,13 @@ pub struct SendText(String);
 #[action(namespace = terminal)]
 pub struct SendKeystroke(String);
 
+impl SendKeystroke {
+    pub fn keystroke(&self) -> &str {
+        &self.0
+    }
+}
+
+
 actions!(
     terminal,
     [
