@@ -1340,6 +1340,11 @@ def check_shared_publication(repo, config, sha, upstream, patchset, *, allow_clo
         fresh, _, _ = accepted_baseline(repo)
         if fresh != accepted:
             raise ValueError("Accepted baseline changed after the exact-source review pair")
+    return _shared_pair_from_environment(candidate, accepted, allow_closed=allow_closed)
+
+
+def _shared_pair_from_environment(candidate, accepted, *, allow_closed=False):
+    repo = candidate["repository"]
     baseline_value = strict_json(accepted["variable"]["value"], "Accepted baseline")
     published_at = baseline_value["publication"]["published_at"]
     prior_comments = current_review_comments(repo, current_prs=(
@@ -1407,6 +1412,18 @@ def check_shared_execution():
 
 
 def maintenance_pages(path, field):
+    # New metadata-only callbacks may arrive between pages. Discard the partial
+    # snapshot and repeat GETs only; no reservation, test or build is retried.
+    for attempt in range(3):
+        try:
+            return _maintenance_pages_snapshot(path, field)
+        except ValueError as error:
+            if str(error) != "Native lifecycle history changed while paging" or attempt == 2:
+                raise
+            time.sleep(attempt + 1)
+
+
+def _maintenance_pages_snapshot(path, field):
     result, expected = [], None
     separator = "&" if "?" in path else "?"
     for page in range(1, 1001):
@@ -1709,6 +1726,12 @@ def final_reservation_identity(comment):
     user = comment["user"]
     return (comment["id"], comment["body"], comment.get("created_at"),
             comment.get("updated_at"), user.get("id"), user.get("login"), user.get("type"))
+
+
+def verify_executing_product_recipe(candidate, workflow_sha):
+    actual = product_recipe_sha256(candidate["repository"], workflow_sha, candidate["upstream_sha"])
+    if actual != candidate["recipe_sha256"]:
+        raise ValueError("Executing workflow recipe differs from the reviewed candidate; adopt the checked policy before building")
 
 
 def authorize_shared_final(candidate, baseline_proof, *, allow_reuse=False, full_pr=None):
@@ -2507,10 +2530,41 @@ def check_delta_for_publication(repo, config, *, allow_closed=False):
         proof = strict_json(frozen_baseline, "Frozen accepted baseline proof")
         value = strict_json(proof["variable"]["value"], "Accepted baseline")
         published_at = value["publication"]["published_at"]
-    ready, reason = check_review(repo, int(number), commit, base,
+    ready, reason = publication_review_status(repo, int(number), commit, base,
                                  allow_closed=allow_closed, published_at=published_at)
-    if not ready or minor_findings(repo, int(number), commit):
+    if not ready or publication_minor_findings(repo, int(number), commit):
         raise ValueError(f"Delta review has outstanding findings: {reason}")
+
+def publication_review_status(repo, pr, sha, upstream, *, allow_closed=False, published_at=None):
+    if not os.environ.get("MAINTENANCE_CANDIDATE"):
+        return check_review(repo, pr, sha, upstream, allow_closed=allow_closed, published_at=published_at)
+    candidate = strict_json(os.environ["MAINTENANCE_CANDIDATE"], "Frozen maintenance candidate")
+    accepted = strict_json(os.environ["MAINTENANCE_BASELINE"], "Frozen accepted baseline proof")
+    contexts = {
+        int(os.environ["CANDIDATE_PR"]): (os.environ["FULL_REVIEW_SHA"], candidate["upstream_sha"]),
+        int(os.environ["DELTA_PR"]): (os.environ["DELTA_SHA"], os.environ["DELTA_BASE"]),
+    }
+    if candidate["repository"] != repo or contexts.get(pr) != (sha, upstream):
+        return False, "Publication review differs from the exact frozen shared context"
+    result = _shared_pair_from_environment(candidate, accepted, allow_closed=allow_closed)
+    return result.get("state") == "ready", result.get("reason", "Exact shared review pair checked")
+
+
+def publication_minor_findings(repo, pr, sha):
+    if not os.environ.get("MAINTENANCE_CANDIDATE"):
+        return minor_findings(repo, pr, sha)
+    candidate = strict_json(os.environ["MAINTENANCE_CANDIDATE"], "Frozen maintenance candidate")
+    accepted = strict_json(os.environ["MAINTENANCE_BASELINE"], "Frozen accepted baseline proof")
+    if repo != candidate["repository"] or (pr, sha) not in {
+        (int(os.environ["CANDIDATE_PR"]), os.environ["FULL_REVIEW_SHA"]),
+        (int(os.environ["DELTA_PR"]), os.environ["DELTA_SHA"]),
+    }:
+        raise ValueError("Finding query differs from the exact frozen shared context")
+    result = _shared_pair_from_environment(candidate, accepted, allow_closed=True)
+    if result.get("state") != "ready":
+        raise ValueError(result.get("reason", "Shared publication review has unresolved findings"))
+    return []
+
 
 def copy_patch_series(commit, directory):
     directory.mkdir(parents=True)
@@ -4144,6 +4198,7 @@ def prepare(app, *, shared=False):
                 raise ValueError("Verified bootstrap bundle could not be revalidated for the exact candidate")
             bundle_verified = True
             policy_verified = True
+        verify_executing_product_recipe(shared_candidate, os.environ["GITHUB_SHA"])
         decision = authorize_shared_final(
             shared_candidate, accepted_proof, allow_reuse=bool(bootstrap_candidate), full_pr=pr)
         if decision.get("decision") == "wait":
@@ -4750,11 +4805,11 @@ def publish(directory):
     check_delta_for_publication(repo, config, allow_closed=not release["draft"])
     if not release["draft"]:
         verify_published_release(repo, release, sha, upstream, patchset, version)
-        ready, reason = check_review(repo, int(os.environ["CANDIDATE_PR"]), review_sha, upstream,
+        ready, reason = publication_review_status(repo, int(os.environ["CANDIDATE_PR"]), review_sha, upstream,
                                      allow_closed=True, published_at=published_at)
         if not ready:
             raise ValueError(reason)
-        minor = bool(minor_findings(repo, int(os.environ["CANDIDATE_PR"]), review_sha))
+        minor = bool(publication_minor_findings(repo, int(os.environ["CANDIDATE_PR"]), review_sha))
         if minor:
             raise ValueError("Published candidate now has unresolved review findings")
         # The verified release remains public during recovery. Its checkpoint
@@ -4770,7 +4825,7 @@ def publish(directory):
         return
     if api(f"repos/{repo}/commits/downstream")["sha"] != config:
         raise ValueError("Configuration changed during the build; do not publish a stale candidate")
-    ready, reason = check_review(repo, int(os.environ["CANDIDATE_PR"]), review_sha, upstream,
+    ready, reason = publication_review_status(repo, int(os.environ["CANDIDATE_PR"]), review_sha, upstream,
                                  published_at=published_at)
     if not ready:
         raise ValueError(reason)
@@ -4813,12 +4868,12 @@ def publish(directory):
     reference = api(f"repos/{repo}/git/ref/tags/{tag}")["object"]
     if reference.get("type") != "commit" or reference.get("sha") != sha:
         raise ValueError("Release tag is not the exact reviewed application commit")
-    ready, reason = check_review(repo, int(os.environ["CANDIDATE_PR"]), review_sha, upstream,
+    ready, reason = publication_review_status(repo, int(os.environ["CANDIDATE_PR"]), review_sha, upstream,
                                  published_at=published_at)
     if not ready or api(f"repos/{repo}/commits/downstream")["sha"] != config:
         raise ValueError(f"Publication was invalidated after upload: {reason}")
     check_delta_for_publication(repo, config)
-    if minor_findings(repo, int(os.environ["CANDIDATE_PR"]), review_sha):
+    if publication_minor_findings(repo, int(os.environ["CANDIDATE_PR"]), review_sha):
         raise ValueError("The full-project review has unresolved findings")
     notes = (
         f"Upstream `{UPSTREAM}@{upstream}`; application `{sha}`; "
@@ -4836,12 +4891,12 @@ def publish(directory):
         if shared:
             check_shared_publication(repo, config, sha, upstream, patchset,
                                      after_publication=published)
-        ready, reason = check_review(repo, int(os.environ["CANDIDATE_PR"]), review_sha, upstream,
+        ready, reason = publication_review_status(repo, int(os.environ["CANDIDATE_PR"]), review_sha, upstream,
                                      published_at=published_at)
         if not ready:
             raise ValueError(f"Publication review was invalidated: {reason}")
         check_delta_for_publication(repo, config)
-        if minor_findings(repo, int(os.environ["CANDIDATE_PR"]), review_sha):
+        if publication_minor_findings(repo, int(os.environ["CANDIDATE_PR"]), review_sha):
             raise ValueError("Publication full-project review has unresolved findings")
         if api(f"repos/{repo}/commits/downstream")["sha"] != config:
             raise ValueError("Publication configuration was invalidated")
@@ -4916,13 +4971,13 @@ def land_repair(directory):
         proof = strict_json(os.environ["MAINTENANCE_BASELINE"], "Frozen accepted baseline proof")
         accepted_value = strict_json(proof["variable"]["value"], "Accepted baseline")
         published_at = accepted_value["publication"]["published_at"]
-    ready, reason = check_review(repo, int(os.environ["CANDIDATE_PR"]), review_sha,
+    ready, reason = publication_review_status(repo, int(os.environ["CANDIDATE_PR"]), review_sha,
                                  state["upstream"], published_at=published_at)
     if not ready:
         raise ValueError(reason)
     finding_pr = int(os.environ["CANDIDATE_PR"])
     finding_sha = review_sha
-    followup = minor_findings(repo, finding_pr, finding_sha)
+    followup = publication_minor_findings(repo, finding_pr, finding_sha)
     if followup:
         raise ValueError(f"Outstanding review batch on PR #{finding_pr} at {finding_sha}:\n"
                          + "\n\n".join(f"{item.get('path')}:{item.get('line')}\n{item['body']}"

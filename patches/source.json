@@ -705,6 +705,10 @@
     ],
     [
       "sidebar",
+      "test_restored_ssh_group_rehydrates_execution_options_before_terminal_matching"
+    ],
+    [
+      "sidebar",
       "test_rootless_remote_history_is_visible_without_open_project"
     ],
     [

@@ -2110,3 +2110,64 @@ class UnfinishedSourceSnapshotTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+class NativePagingSnapshotTests(unittest.TestCase):
+    def test_new_callback_restarts_reads_without_returning_partial_history(self):
+        first = [{"id": i} for i in range(100)]
+        with patch.object(release, "api", side_effect=[
+            {"total_count": 101, "workflow_runs": first},
+            {"total_count": 102, "workflow_runs": [{"id": 100}, {"id": 101}]},
+            {"total_count": 102, "workflow_runs": first},
+            {"total_count": 102, "workflow_runs": [{"id": 100}, {"id": 101}]},
+        ]) as api, patch.object(release.time, "sleep") as sleep:
+            result = release.maintenance_pages("repos/fixture/actions/runs", "workflow_runs")
+        self.assertEqual([v["id"] for v in result], list(range(102)))
+        self.assertEqual([c.args[0].rsplit("=", 1)[1] for c in api.call_args_list], ["1", "2", "1", "2"])
+        sleep.assert_called_once_with(1)
+
+    def test_persistent_drift_and_malformed_records_still_block(self):
+        with patch.object(release, "api", side_effect=[
+            {"total_count": 101, "workflow_runs": [{}] * 100},
+            {"total_count": 102, "workflow_runs": [{}] * 2},
+        ] * 3) as api, patch.object(release.time, "sleep") as sleep:
+            with self.assertRaisesRegex(ValueError, "history changed while paging"):
+                release.maintenance_pages("repos/fixture/actions/runs", "workflow_runs")
+        self.assertEqual(api.call_count, 6)
+        self.assertEqual(sleep.call_count, 2)
+        with patch.object(release, "api", return_value={"total_count": "bad", "workflow_runs": []}) as api:
+            with self.assertRaisesRegex(ValueError, "Incomplete native lifecycle history"):
+                release.maintenance_pages("repos/fixture/actions/runs", "workflow_runs")
+        self.assertEqual(api.call_count, 1)
+class SharedPublicationBoundaryTests(unittest.TestCase):
+    def test_shared_publication_uses_disposition_aware_pair_and_exact_scope(self):
+        candidate = {"repository": "owner/zed", "upstream_sha": "a" * 40}
+        env = {"MAINTENANCE_CANDIDATE": json.dumps(candidate), "MAINTENANCE_BASELINE": "{}",
+               "CANDIDATE_PR": "1", "FULL_REVIEW_SHA": "b" * 40,
+               "DELTA_PR": "2", "DELTA_SHA": "c" * 40, "DELTA_BASE": "d" * 40}
+        with patch.dict(os.environ, env, clear=True), \
+                patch.object(release, "_shared_pair_from_environment", return_value={"state": "ready"}), \
+                patch.object(release, "check_review", side_effect=AssertionError("legacy gate must not re-reject a shared disposition")), \
+                patch.object(release, "minor_findings", side_effect=AssertionError("legacy minor gate must not run")):
+            self.assertTrue(release.publication_review_status("owner/zed", 1, "b" * 40, "a" * 40)[0])
+            self.assertEqual(release.publication_minor_findings("owner/zed", 1, "b" * 40), [])
+            self.assertFalse(release.publication_review_status("owner/zed", 1, "e" * 40, "a" * 40)[0])
+            with patch.object(release, "_shared_pair_from_environment", side_effect=ValueError("unresolved")):
+                with self.assertRaisesRegex(ValueError, "unresolved"):
+                    release.publication_minor_findings("owner/zed", 1, "b" * 40)
+
+    def test_executing_recipe_is_checked_instead_of_the_proposed_recipe(self):
+        candidate = {"repository": "owner/zed", "upstream_sha": "a" * 40, "recipe_sha256": "b" * 64}
+        with patch.object(release, "product_recipe_sha256", return_value="b" * 64) as recipe:
+            release.verify_executing_product_recipe(candidate, "c" * 40)
+            recipe.assert_called_once_with("owner/zed", "c" * 40, "a" * 40)
+        with patch.object(release, "product_recipe_sha256", return_value="d" * 64):
+            with self.assertRaisesRegex(ValueError, "Executing workflow recipe differs"):
+                release.verify_executing_product_recipe(candidate, "c" * 40)
+
+    def test_bootstrap_loader_and_lock_are_from_the_independently_pinned_gate(self):
+        workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
+        verifier = workflow.split("\n  verify-bootstrap-bundle:\n", 1)[1]
+        self.assertIn("ref: c621547cc93d751d7110791049ee748befdd8831", verifier)
+        self.assertIn('"gate/scripts/maintenance.lock.json"', verifier)
+        self.assertIn('"gate/scripts/maintenance.py"', verifier)
+        self.assertIn("workflow_scripts = pathlib.Path('gate/scripts').resolve()", verifier)
+        self.assertNotIn("workflow_scripts = workflow_source / 'scripts'", verifier)

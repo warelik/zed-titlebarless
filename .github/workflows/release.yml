@@ -829,15 +829,15 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          ref: dbf40ff4bd626082e0ad3d9873c5b6ad5fa7f941
+          ref: c621547cc93d751d7110791049ee748befdd8831
           path: gate
           persist-credentials: false
       - name: Read The Exact Private Maintenance Lock
         id: maintenance
         run: |
           python3 -B - "candidate/scripts/maintenance.lock.json" \
-            "workflow-source/scripts/maintenance.lock.json" \
-            "candidate/scripts/maintenance.py" "workflow-source/scripts/maintenance.py" >> "$GITHUB_OUTPUT" <<'PY'
+            "gate/scripts/maintenance.lock.json" \
+            "candidate/scripts/maintenance.py" "gate/scripts/maintenance.py" >> "$GITHUB_OUTPUT" <<'PY'
           import json, pathlib, re, sys
           candidate_lock, workflow_lock, candidate_loader, workflow_loader = map(pathlib.Path, sys.argv[1:])
           paths = (candidate_lock, workflow_lock, candidate_loader, workflow_loader)
@@ -936,7 +936,7 @@ jobs:
           delta_pr = str(target['delta']['pr'])
           if os.environ['DELTA_PR'] and os.environ['DELTA_PR'] != delta_pr:
               raise SystemExit('Dispatched delta PR differs from the private manifest')
-          workflow_scripts = workflow_source / 'scripts'
+          workflow_scripts = pathlib.Path('gate/scripts').resolve()
           if pathlib.Path('candidate/scripts/maintenance.py').read_bytes() != (
                   workflow_scripts / 'maintenance.py').read_bytes():
               raise SystemExit('Candidate loader changed after its native workflow-source comparison')
