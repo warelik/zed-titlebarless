@@ -1,7 +1,7 @@
 {
   "api_version": 1,
-  "module_sha256": "25eaa625d921ff40000a845c653f499209a3b0e3582a45f0e5a2693c4b330444",
+  "module_sha256": "ece50564559288e83fa0c529d58f65b4edb1f6ddcf4d33b0d37872c7be5c9901",
   "repository": "warelik/machine-maintenance",
-  "revision": "0aa42767377feed24c43f05706b9cadfab2e492f",
+  "revision": "1b17e1fa12535df2beccb082793fb02f236c347c",
   "schema": 1
 }
