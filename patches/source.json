@@ -405,6 +405,10 @@
     ],
     [
       "agent_ui",
+      "test_remote_windows_working_directory_uses_project_path_style"
+    ],
+    [
+      "agent_ui",
       "test_ssh_routing_arguments_scope_terminal_project_assignment"
     ],
     [
@@ -798,6 +802,10 @@
     [
       "workspace",
       "test_cancel_project_close_preserves_transient_retention"
+    ],
+    [
+      "workspace",
+      "test_initial_agent_panel_retains_nonempty_active_workspace"
     ],
     [
       "workspace",
