@@ -2137,3 +2137,37 @@ class NativePagingSnapshotTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Incomplete native lifecycle history"):
                 release.maintenance_pages("repos/fixture/actions/runs", "workflow_runs")
         self.assertEqual(api.call_count, 1)
+class SharedPublicationBoundaryTests(unittest.TestCase):
+    def test_shared_publication_uses_disposition_aware_pair_and_exact_scope(self):
+        candidate = {"repository": "owner/zed", "upstream_sha": "a" * 40}
+        env = {"MAINTENANCE_CANDIDATE": json.dumps(candidate), "MAINTENANCE_BASELINE": "{}",
+               "CANDIDATE_PR": "1", "FULL_REVIEW_SHA": "b" * 40,
+               "DELTA_PR": "2", "DELTA_SHA": "c" * 40, "DELTA_BASE": "d" * 40}
+        with patch.dict(os.environ, env, clear=True), \
+                patch.object(release, "_shared_pair_from_environment", return_value={"state": "ready"}), \
+                patch.object(release, "check_review", side_effect=AssertionError("legacy gate must not re-reject a shared disposition")), \
+                patch.object(release, "minor_findings", side_effect=AssertionError("legacy minor gate must not run")):
+            self.assertTrue(release.publication_review_status("owner/zed", 1, "b" * 40, "a" * 40)[0])
+            self.assertEqual(release.publication_minor_findings("owner/zed", 1, "b" * 40), [])
+            self.assertFalse(release.publication_review_status("owner/zed", 1, "e" * 40, "a" * 40)[0])
+            with patch.object(release, "_shared_pair_from_environment", side_effect=ValueError("unresolved")):
+                with self.assertRaisesRegex(ValueError, "unresolved"):
+                    release.publication_minor_findings("owner/zed", 1, "b" * 40)
+
+    def test_executing_recipe_is_checked_instead_of_the_proposed_recipe(self):
+        candidate = {"repository": "owner/zed", "upstream_sha": "a" * 40, "recipe_sha256": "b" * 64}
+        with patch.object(release, "product_recipe_sha256", return_value="b" * 64) as recipe:
+            release.verify_executing_product_recipe(candidate, "c" * 40)
+            recipe.assert_called_once_with("owner/zed", "c" * 40, "a" * 40)
+        with patch.object(release, "product_recipe_sha256", return_value="d" * 64):
+            with self.assertRaisesRegex(ValueError, "Executing workflow recipe differs"):
+                release.verify_executing_product_recipe(candidate, "c" * 40)
+
+    def test_bootstrap_loader_and_lock_are_from_the_independently_pinned_gate(self):
+        workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
+        verifier = workflow.split("\n  verify-bootstrap-bundle:\n", 1)[1]
+        self.assertIn("ref: c621547cc93d751d7110791049ee748befdd8831", verifier)
+        self.assertIn('"gate/scripts/maintenance.lock.json"', verifier)
+        self.assertIn('"gate/scripts/maintenance.py"', verifier)
+        self.assertIn("workflow_scripts = pathlib.Path('gate/scripts').resolve()", verifier)
+        self.assertNotIn("workflow_scripts = workflow_source / 'scripts'", verifier)
