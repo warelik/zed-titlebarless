@@ -3829,7 +3829,8 @@ def prepare(app, *, shared=False):
     if api(f"repos/{repo}/commits/downstream")["sha"] != config:
         output(reason="Superseded configuration; a newer cycle owns the update", mode="waiting")
         return
-    mirror_main(repo)
+    # Source selection fetches the exact upstream directly. Mirror housekeeping
+    # must not block a release or trigger unrelated upstream workflows.
     state = proposal(repo, config, app.parent, shared=shared)
     if state and state["waiting"]:
         return

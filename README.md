@@ -140,3 +140,8 @@ Actions installation token can reject upstream commits containing workflows
 with `Resource not accessible by integration`. Read operations retain their
 existing credentials. The mirror contract regression verifies the write token
 and preserves the refusal of divergent history; application inputs are unchanged.
+
+Source preparation fetches the selected upstream directly and does not update
+the optional `main` mirror. A denied mirror write therefore cannot stop a
+reviewed release, and preparing a release does not trigger upstream workflows
+on `main`. Mirror housekeeping is separate from the one final release sequence.

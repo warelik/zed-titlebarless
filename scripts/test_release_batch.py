@@ -21,7 +21,7 @@ class BatchedReviewTests(unittest.TestCase):
                           bootstrap=False, mismatched_bootstrap=False, adopted_config=None,
                           reuse_artifact=False, bootstrap_decision="reuse",
                           bootstrap_bundle_verified=True, bootstrap_bundle_malformed=False,
-                          cleanup_failure=False, published_config=None):
+                          cleanup_failure=False, published_config=None, mirror_failure=False):
         config, upstream, candidate = "a" * 40, "b" * 40, "c" * 40
         shared_candidate = {"schema": 1, "repository": "maintainer/zed-fork",
                             "upstream_sha": upstream, "application_sha": candidate,
@@ -94,6 +94,9 @@ class BatchedReviewTests(unittest.TestCase):
                 "verify_published_release": None,
             }.items():
                 stack.enter_context(patch.object(release, name, return_value=value))
+            if mirror_failure:
+                stack.enter_context(patch.object(release, "mirror_main", side_effect=PermissionError(
+                    "Mirror write denied; pinned source remains available")))
             if shared:
                 private = type("PrivateLifecycle", (), {})()
                 private._maintenance_lock_identity = {
@@ -207,6 +210,14 @@ class BatchedReviewTests(unittest.TestCase):
         self.assertIn("P1 first bug", failure)
         self.assertIn("P2 second bug", failure)
         self.assertEqual((final, reserve), (0, 0))
+
+    def test_source_preparation_does_not_require_upstream_mirror_write(self):
+        outputs, final, reserve, failure = self.prepare_candidate(
+            (True, "complete"), (True, "complete"), mirror_failure=True)
+        self.assertIsNone(failure)
+        self.assertTrue(outputs["ready"])
+        self.assertEqual(outputs["upstream"], "b" * 40)
+        self.assertEqual((final, reserve), (1, 1))
 
     def test_only_two_clean_complete_reports_start_one_final_sequence(self):
         outputs, final, reserve, failure = self.prepare_candidate(
