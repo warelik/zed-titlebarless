@@ -339,34 +339,62 @@ class BatchedReviewTests(unittest.TestCase):
     def test_credentialed_preparation_imports_the_pinned_controller_only(self):
         workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
         preparation = workflow.split("\n  prepare:\n", 1)[1].split("\n  policy-check:\n", 1)[0]
+        self.assertNotIn("  bootstrap-policy:", workflow)
+        self.assertNotIn("needs.bootstrap-policy", workflow)
+        self.assertIn("needs: [verify-bootstrap-bundle]", preparation)
+        self.assertIn("needs.verify-bootstrap-bundle.result == 'success'", preparation)
         self.assertIn("steps.control.outputs.policy_ref", preparation)
         self.assertIn("pathlib.Path('trusted/scripts')", preparation)
         self.assertIn("release.ROOT = pathlib.Path('configuration')", preparation)
+        policy_selection = next(line for line in preparation.splitlines() if "TRUSTED_POLICY:" in line)
+        self.assertIn("needs.verify-bootstrap-bundle.outputs.policy_ref", policy_selection)
+        self.assertNotIn("bootstrap-policy", policy_selection)
         self.assertNotIn("python3 scripts/release.py prepare", preparation)
         self.assertLess(preparation.index("Require The Trusted Default Branch"),
                         preparation.index("Record A Successful Read-Only Bootstrap"))
-        bootstrap = workflow.split("\n  bootstrap-policy:\n", 1)[1].split("\n  prepare:\n", 1)[0]
-        self.assertNotIn("secrets.", bootstrap)
-        self.assertLess(bootstrap.index("Require The Trusted Default Branch"),
-                        bootstrap.index("Run The Final Approved Policy Suite Once"))
-        self.assertIn("Require Both Complete Exact-Source Reviews Before Any Tests", bootstrap)
-        self.assertIn("ref: dbf40ff4bd626082e0ad3d9873c5b6ad5fa7f941", bootstrap)
-        self.assertNotIn("ref: ${{ vars.ZED_TRUSTED_POLICY", bootstrap)
-        self.assertIn("for directory in ['gate/scripts', 'baseline/scripts']:", bootstrap)
-        self.assertIn("if policy != os.environ['GITHUB_SHA']:", bootstrap)
-        self.assertIn("if base != shipped_config:", bootstrap)
-        self.assertIn("gate.asset_bytes(repo, assets['provenance.json'])", bootstrap)
-        self.assertRegex(bootstrap, r"ref: [0-9a-f]{40}\n\s+path: baseline")
-        self.assertIn("/baseline/scripts /candidate/scripts", bootstrap)
-        self.assertIn("target=/baseline,readonly", bootstrap)
-        self.assertIn('sys.path.insert(0,"/candidate/scripts");import release', bootstrap)
+        verifier = workflow.split("\n  verify-bootstrap-bundle:\n", 1)[1]
+        self.assertIn("if: github.event_name == 'workflow_dispatch' && inputs.policy_bootstrap", verifier)
+        self.assertIn("ref: ${{ github.workflow_sha }}", verifier)
+        self.assertIn("path: workflow-source", verifier)
+        self.assertIn("candidate_loader.read_bytes() != workflow_loader.read_bytes()", verifier)
+        self.assertIn("candidate_lock.read_bytes() != workflow_lock.read_bytes()", verifier)
+        self.assertIn("workflow_sha != os.environ['GITHUB_SHA']", verifier)
+        self.assertIn("default_head != workflow_sha", verifier)
+        self.assertIn("pathlib.Path('candidate/scripts/maintenance.py').read_bytes()", verifier)
+        self.assertIn("sys.path.insert(0, str(workflow_scripts))", verifier)
+        self.assertIn("proof = maintenance.validated_bundle(candidate, comments, read_native)", verifier)
+        self.assertIn(r"contents/(?:fork_lifecycle\.py|bootstrap\.py|bundle_runner\.py|", verifier)
+        self.assertIn(r"\.github/workflows/policy\.yml)\?ref=[0-9a-f]{40}", verifier)
+        self.assertIn("if private_route.fullmatch(route):", verifier)
+        self.assertNotIn("contents/.*", verifier)
+        self.assertNotIn("sys.path.insert(0, str(pathlib.Path('candidate/scripts').resolve()))", verifier)
+        self.assertNotIn("importlib.import_module('maintenance')", verifier)
+        self.assertNotIn("importlib.import_module('release')", verifier)
+        self.assertIn("proof.get('decision') != 'reuse-policy-validation'", verifier)
+        self.assertIn("proof.get('application_artifact_verified') is not False", verifier)
+        self.assertIn("BOOTSTRAP_MAINTENANCE_CANDIDATE: ${{ needs.verify-bootstrap-bundle.outputs.maintenance_candidate }}",
+                      preparation)
         policy = workflow.split("\n  policy-check:\n", 1)[1].split("\n  test:\n", 1)[0]
         self.assertIn("always() && needs.prepare.result == 'success'", policy)
+        self.assertIn("needs: [prepare]", policy)
+        self.assertNotIn("bootstrap-policy", policy)
         repair = workflow.split("\n  repair:\n", 1)[1]
         self.assertIn("ref: ${{ needs.activate-policy.outputs.policy_ref ||", repair)
-        self.assertIn("needs.bootstrap-policy.result == 'failure' && 'dbf40ff4bd626082e0ad3d9873c5b6ad5fa7f941'", repair)
+        self.assertIn("needs.verify-bootstrap-bundle.outputs.policy_ref", repair)
+        self.assertIn("needs.verify-bootstrap-bundle.result == 'failure'", repair)
+        self.assertIn("BOOTSTRAP_BUNDLE_FAILED", repair)
         self.assertIn("github.ref == 'refs/heads/downstream'", repair)
-        self.assertIn("(vars.ZED_TRUSTED_POLICY != '' || needs.bootstrap-policy.result == 'success')", repair)
+        activation = workflow.split("\n  activate-policy:\n", 1)[1].split("\n  repair:\n", 1)[0]
+        self.assertIn("needs: [prepare, policy-check, verify-bootstrap-bundle]", activation)
+        self.assertNotIn("bootstrap-policy", activation)
+
+    def test_bootstrap_receipt_reuse_survives_advancing_the_policy_pin(self):
+        workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
+        verifier = workflow.split("\n  verify-bootstrap-bundle:\n", 1)[1]
+        self.assertIn("candidate.get('configuration_sha') == policy", verifier)
+        self.assertNotIn("target.get('trusted_policy_sha') == policy", verifier)
+        self.assertIn("proof = maintenance.validated_bundle(candidate, comments, read_native)", verifier)
+        self.assertIn("proof.get('decision') != 'reuse-policy-validation'", verifier)
 
     def test_current_adoption_receipt_advances_the_authenticated_history_cutoff(self):
         commit = "a" * 40
@@ -380,7 +408,7 @@ class BatchedReviewTests(unittest.TestCase):
             cutoff = release.adoption_time("maintainer/zed-fork", {"state": "closed", "number": 1}, commit)
         self.assertEqual(cutoff, datetime(2026, 10, 18, 1, tzinfo=timezone.utc))
 
-    def test_missing_pin_bootstrap_failure_uses_verified_escalation_not_a_coding_task(self):
+    def test_missing_pin_bundle_verifier_failure_uses_verified_escalation_not_a_coding_task(self):
         import ast
         import textwrap
         from types import SimpleNamespace
@@ -388,17 +416,25 @@ class BatchedReviewTests(unittest.TestCase):
 
         workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
         repair = workflow.split("\n  repair:\n", 1)[1]
-        self.assertIn("needs.bootstrap-policy.outputs.validation_started == 'true'", repair)
-        self.assertIn("needs.bootstrap-policy.result == 'failure' && 'dbf40ff4bd626082e0ad3d9873c5b6ad5fa7f941'", repair)
-        script = textwrap.dedent(repair.split("python3 -B - <<'PY'\n", 1)[1].rsplit("\n          PY", 1)[0])
+        self.assertNotIn("bootstrap-policy", repair)
+        self.assertIn("needs.verify-bootstrap-bundle.result == 'failure'", repair)
+        actual_repair = repair.split("      - name: Repair The Actual Failure Without Publishing Or Disrupting Editors\n", 1)[1]
+        script = textwrap.dedent(actual_repair.split("python3 -B - <<'PY'\n", 1)[1].rsplit("\n          PY", 1)[0])
         guard = next(node for node in ast.parse(script).body if isinstance(node, ast.If))
         controller = SimpleNamespace(
             SHA=release.SHA, failure_evidence=Mock(return_value="actual bootstrap failure"),
+            api=Mock(return_value={
+                "number": 1,
+                "head": {"repo": {"full_name": "maintainer/zed-fork"}, "ref": "review/" + "b" * 40},
+                "base": {"repo": {"full_name": "maintainer/zed-fork"},
+                         "ref": "review-base/" + "b" * 40, "sha": "b" * 40},
+            }),
             escalation=Mock(side_effect=ValueError("protected escalation")),
-            request_repair=Mock(side_effect=AssertionError("old fallback must not start a coding task")),
+            request_repair=Mock(side_effect=AssertionError("a missing private receipt must not start a coding task")),
         )
-        environment = {"BOOTSTRAP_VALIDATION_FAILED": "true", "GITHUB_REPOSITORY": "maintainer/zed-fork",
-                       "UPSTREAM_SHA": "b" * 40, "CONFIG_SHA": "a" * 40, "GITHUB_RUN_ID": "123",
+        environment = {"BOOTSTRAP_BUNDLE_FAILED": "true", "GITHUB_REPOSITORY": "maintainer/zed-fork",
+                       "UPSTREAM_SHA": "", "CONFIG_SHA": "a" * 40,
+                       "GITHUB_RUN_ID": "123",
                        "BOOTSTRAP_FULL_PR": "1", "BOOTSTRAP_DELTA_PR": "2"}
         with patch.dict(os.environ, environment, clear=True), self.assertRaisesRegex(ValueError, "protected escalation"):
             exec(compile(ast.fix_missing_locations(ast.Module(body=[guard], type_ignores=[])),
@@ -408,6 +444,7 @@ class BatchedReviewTests(unittest.TestCase):
         self.assertEqual(controller.escalation.call_args.args[:3],
                          ("maintainer/zed-fork", "a" * 40, "b" * 40))
         self.assertIn("/actions/runs/123", controller.escalation.call_args.args[3])
+        self.assertIn("private native policy bundle could not be verified", controller.escalation.call_args.args[3])
         self.assertIn("actual bootstrap failure", controller.escalation.call_args.args[3])
 
     def test_inflight_snapshot_is_not_replaced_by_new_upstream_discovery(self):
@@ -421,6 +458,44 @@ class BatchedReviewTests(unittest.TestCase):
             self.assertEqual(release.active_snapshot("maintainer/zed-fork", patchset), sha)
 
 
+
+
+class NativeReviewDispositionAdapterTests(unittest.TestCase):
+    def candidate(self):
+        return {"repository": "owner/zed", "configuration_sha": "a" * 40}
+
+    def test_normalized_disposition_keeps_exact_native_owner_comment_identity(self):
+        candidate = self.candidate()
+        native = {"id": 31, "created_at": "2026-10-19T12:00:00Z",
+                  "updated_at": "2026-10-19T12:00:00Z",
+                  "user": {"login": "owner", "type": "User", "id": 7}}
+        payload = {"schema": 1, "candidate_id": "b" * 64,
+                   "source_sha": candidate["configuration_sha"],
+                   "findings": [{"finding_id": "review:10:9", "status": "disproved",
+                                  "evidence": "Current code and regression prove the finding false."}]}
+        comment = {**native, "body": "<!-- fork-review-disposition:v1 "
+                                  + json.dumps(payload, separators=(",", ":")) + " -->"}
+        with patch.object(release.maintenance, "load") as load:
+            load.return_value.candidate_identity.return_value = payload["candidate_id"]
+            result = release.review_dispositions_from_comments([comment], candidate)
+        self.assertEqual(result, [{"finding_id": "review:10:9", "candidate_id": payload["candidate_id"],
+                                  "source_sha": candidate["configuration_sha"], "status": "disproved",
+                                  "evidence": payload["findings"][0]["evidence"],
+                                  "native_comment": native}])
+
+    def test_edited_native_owner_disposition_is_rejected(self):
+        candidate = self.candidate()
+        payload = {"schema": 1, "candidate_id": "b" * 64,
+                   "source_sha": candidate["configuration_sha"], "findings": []}
+        comment = {"id": 31, "created_at": "2026-10-19T12:00:00Z",
+                   "updated_at": "2026-10-19T12:01:00Z",
+                   "user": {"login": "owner", "type": "User"},
+                   "body": "<!-- fork-review-disposition:v1 "
+                           + json.dumps(payload, separators=(",", ":")) + " -->"}
+        with (patch.object(release.maintenance, "load") as load,
+              self.assertRaisesRegex(ValueError, "duplicated or edited")):
+            load.return_value.candidate_identity.return_value = payload["candidate_id"]
+            release.review_dispositions_from_comments([comment], candidate)
 
 
 class FinalRetryAuthorizationTests(unittest.TestCase):
@@ -682,26 +757,57 @@ class CrossApplicationFinalHistoryTests(unittest.TestCase):
                 if consumed:
                     self.assertIn("<!-- zed-final-retry-used:100 -->", consumed[0]["body"])
 
-    def test_legacy_policy_cannot_reserve_before_the_checked_bootstrap_guard(self):
+    def test_old_policy_cannot_reserve_before_the_checked_bundle_guard(self):
         workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
+        self.assertNotIn("  bootstrap-policy:", workflow)
+        self.assertNotIn("needs.bootstrap-policy", workflow)
         preparation = workflow.split("\n  prepare:\n", 1)[1].split("\n  policy-check:\n", 1)[0]
         guard = preparation.index('callable(getattr(release, "check_final_history", None))')
         self.assertLess(guard, preparation.index("release.prepare("))
         self.assertIn("release.output(final_failed=True)", preparation[:preparation.index("release.prepare(")])
         self.assertIn("existing reviewed read-only bootstrap", preparation)
         selection = next(line for line in preparation.splitlines() if "TRUSTED_POLICY:" in line)
-        self.assertIn("needs.bootstrap-policy.result == 'success'", selection)
-        self.assertLess(selection.index("needs.bootstrap-policy.outputs.policy_ref"),
+        self.assertIn("needs.verify-bootstrap-bundle.result == 'success'", selection)
+        self.assertLess(selection.index("needs.verify-bootstrap-bundle.outputs.policy_ref"),
                         selection.index("vars.ZED_TRUSTED_POLICY"))
 
     def test_checked_linux_history_gate_blocks_macos_before_pin_or_adoption(self):
         workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
         activation = workflow.split("\n  activate-policy:\n", 1)[1].split("\n  repair:\n", 1)[0]
-        history = activation.index("release.check_final_history(")
+        history_step = activation.split(
+            "\n      - name: Recheck The Exact Shared Reviews And Current Attempt Reservation\n",
+            1)[1].split("\n      - name: Pin The Checked Controller For Subsequent Runs\n", 1)[0]
+        publication_check = history_step.index("release.check_shared_publication(")
+        final_reauthorization = history_step.index("release.reauthorize_reserved_final(")
         pin = activation.index("Pin The Checked Controller For Subsequent Runs")
-        self.assertLess(history, pin)
-        self.assertIn("CONFIG_SHA: ${{ needs.prepare.outputs.candidate_config }}", activation)
-        self.assertIn("CANDIDATE_PR: ${{ needs.prepare.outputs.pr }}", activation)
+        self.assertLess(publication_check, final_reauthorization)
+        self.assertLess(activation.index("release.reauthorize_reserved_final("), pin)
+        for identity in (
+            "CANDIDATE_PR: ${{ needs.prepare.outputs.pr }}",
+            "CANDIDATE_SHA: ${{ needs.prepare.outputs.sha }}",
+            "UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream }}",
+            "PATCHSET_SHA256: ${{ needs.prepare.outputs.patchset }}",
+            "REVIEW_CONFIG_SHA: ${{ needs.prepare.outputs.candidate_config }}",
+            "MAINTENANCE_CANDIDATE: ${{ needs.prepare.outputs.maintenance_candidate }}",
+            "MAINTENANCE_BASELINE: ${{ needs.prepare.outputs.maintenance_baseline }}",
+            "FULL_REVIEW_SHA: ${{ needs.prepare.outputs.full_review_sha }}",
+            "DELTA_PR: ${{ needs.prepare.outputs.delta_pr }}",
+            "DELTA_BASE: ${{ needs.prepare.outputs.delta_base }}",
+            "DELTA_SHA: ${{ needs.prepare.outputs.delta_sha }}",
+            "REPAIR_PR: ${{ needs.prepare.outputs.repair_pr }}",
+            "FORK_FINAL_CANDIDATE: ${{ needs.prepare.outputs.final_candidate }}",
+            "FORK_FINAL_RUN_ID: ${{ needs.prepare.outputs.final_run_id }}",
+            "FORK_FINAL_ATTEMPT: ${{ needs.prepare.outputs.final_attempt }}",
+            "FORK_FINAL_WORKFLOW_SHA: ${{ needs.prepare.outputs.final_workflow_sha }}",
+        ):
+            self.assertIn(identity, history_step)
+        self.assertNotIn("\n          CONFIG_SHA:", history_step)
+        self.assertIn("if os.environ['FORK_FINAL_CANDIDATE']:", history_step)
+        self.assertIn("except Exception:", history_step)
+        failure_output = history_step.index("release.output(final_failed=True)")
+        self.assertLess(failure_output, history_step.index("raise", failure_output))
+        self.assertIn("final_failed: ${{ steps.history.outputs.final_failed }}", activation)
+        self.assertLess(pin, activation.index("Finish Policy-Only Maintenance Without Rebuilding"))
         application = workflow.split("\n  test:\n", 1)[1].split("\n  publish:\n", 1)[0]
         self.assertIn("needs.activate-policy.result == 'success'", application)
         self.assertIn("needs.activate-policy.outputs.final_failed == 'true'", workflow)
