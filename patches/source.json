@@ -906,6 +906,10 @@
     [
       "workspace",
       "test_workspace_close_keeps_edits_made_during_another_consent_prompt"
+    ],
+    [
+      "project",
+      "test_shpool_discovery_uses_requested_root_environment"
     ]
   ]
 }

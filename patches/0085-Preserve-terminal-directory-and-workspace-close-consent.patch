@@ -1,0 +1,380 @@
+From ef17c37fb18c71e5c4dbd3a4906eef8ad1e51b25 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 09:20:00 +0000
+Subject: [PATCH] Preserve terminal directory and reversible workspace close
+ consent
+
+---
+ crates/project/src/terminals.rs               | 80 +++++++++++++++++--
+ crates/sidebar/src/sidebar.rs                 |  6 +-
+ crates/workspace/src/multi_workspace.rs       | 31 ++++---
+ crates/workspace/src/multi_workspace_tests.rs | 21 +++--
+ crates/workspace/src/workspace.rs             | 21 ++++-
+ 5 files changed, 126 insertions(+), 33 deletions(-)
+
+diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
+index d60f5e1b8b..6f55fff126 100644
+--- a/crates/project/src/terminals.rs
++++ b/crates/project/src/terminals.rs
+@@ -819,9 +819,9 @@ impl Project {
+         let legacy_restore = restoring_existing && context.is_none();
+         let pinned = context.is_some();
+         let probe = match context {
+-            Some(context) => self.probe_shpool_in_context(Some(context), true, cx),
+-            None if legacy_restore => self.probe_shpool_in_context(None, false, cx),
+-            None => self.probe_shpool(cx),
++            Some(context) => self.probe_shpool_in_context_at(Some(context), true, cwd.clone(), cx),
++            None if legacy_restore => self.probe_shpool_in_context_at(None, false, cwd.clone(), cx),
++            None => self.probe_shpool_in_context_at(None, true, cwd.clone(), cx),
+         };
+         let is_local = self.remote_client.is_none();
+         cx.spawn(async move |project, cx| {
+@@ -1174,7 +1174,18 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
+         allow_daemon_start: bool,
+         cx: &mut Context<Self>,
+     ) -> Task<Result<Option<ShpoolProbe>>> {
+-        let probe = self.probe_shpool_unbounded(context, allow_daemon_start, cx);
++        let cwd = self.first_project_directory(cx);
++        self.probe_shpool_in_context_at(context, allow_daemon_start, cwd, cx)
++    }
++
++    fn probe_shpool_in_context_at(
++        &mut self,
++        context: Option<ShpoolSessionContext>,
++        allow_daemon_start: bool,
++        cwd: Option<PathBuf>,
++        cx: &mut Context<Self>,
++    ) -> Task<Result<Option<ShpoolProbe>>> {
++        let probe = self.probe_shpool_unbounded(context, allow_daemon_start, cwd, cx);
+         let executor = cx.background_executor().clone();
+         cx.background_spawn(async move {
+             let timeout = executor.timer(SHPOOL_PROBE_TIMEOUT);
+@@ -1199,6 +1210,7 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
+         &mut self,
+         context: Option<ShpoolSessionContext>,
+         allow_daemon_start: bool,
++        cwd: Option<PathBuf>,
+         cx: &mut Context<Self>,
+     ) -> Task<Result<Option<ShpoolProbe>>> {
+         if let Some(context) = &context {
+@@ -1243,9 +1255,9 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
+                 Ok(script) => self.exec_shpool_context_script(script, cx),
+                 Err(error) => return Task::ready(Err(error)),
+             },
+-            None => self.exec_script_in_sh(
++            None => self.exec_script_in_sh_at(
+                 if allow_daemon_start { SHPOOL_PROBE_SCRIPT } else { SHPOOL_EXISTING_PROBE_SCRIPT }
+-                    .to_string(), cx,
++                    .to_string(), cwd, cx,
+             ),
+         };
+         cx.background_spawn(async move {
+@@ -1597,12 +1609,21 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
+         &self,
+         script: String,
+         cx: &mut Context<Self>,
++    ) -> Task<Result<smol::process::Command>> {
++        let path = self.first_project_directory(cx);
++        self.exec_script_in_sh_at(script, path, cx)
++    }
++
++    fn exec_script_in_sh_at(
++        &self,
++        script: String,
++        path: Option<PathBuf>,
++        cx: &mut Context<Self>,
+     ) -> Task<Result<smol::process::Command>> {
+         if self.path_style(cx).is_windows() {
+             return Task::ready(Err(anyhow::anyhow!("POSIX sh is not supported on Windows")));
+         }
+ 
+-        let path = self.first_project_directory(cx);
+         let remote_client = self.remote_client.clone();
+         let settings = self.terminal_settings(&path, cx).clone();
+         let program = "/bin/sh".to_string();
+@@ -2747,6 +2768,51 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
+         assert!(stdout.contains("posix_item2"));
+     }
+ 
++    #[gpui::test]
++    #[cfg(unix)]
++    async fn test_shpool_discovery_uses_requested_root_environment(cx: &mut gpui::TestAppContext) {
++        cx.executor().allow_parking();
++        cx.update(|cx| {
++            let store = settings::SettingsStore::test(cx);
++            cx.set_global(store);
++            terminal::terminal_settings::TerminalSettings::register(cx);
++        });
++        let directory = tempfile::TempDir::new().unwrap();
++        let first = directory.path().join("first");
++        let second = directory.path().join("second");
++        std::fs::create_dir(&first).unwrap();
++        std::fs::create_dir(&second).unwrap();
++        let fs = fs::FakeFs::new(cx.executor());
++        fs.insert_tree(directory.path(), serde_json::json!({
++            "first": {"file": ""}, "second": {"file": ""}
++        })).await;
++        let project = Project::test(fs, [first.as_path(), second.as_path()], cx).await;
++        project.update(cx, |project, cx| {
++            for (path, value) in [(&first, "first"), (&second, "second")] {
++                let worktree = project.find_worktree(path, cx).unwrap().0.read(cx).id();
++                cx.update_global::<settings::SettingsStore, _>(|store, cx| {
++                    store.set_local_settings(worktree,
++                        settings::LocalSettingsPath::InWorktree(RelPath::empty().into()),
++                        settings::LocalSettingsKind::Settings,
++                        Some(&serde_json::json!({"terminal": {"env": {"SHPOOL_TEST_ROOT": value}}}).to_string()),
++                        cx,
++                    ).unwrap();
++                });
++            }
++        });
++        for (path, value) in [(&first, "first"), (&second, "second")] {
++            let mut command = project.update(cx, |project, cx| {
++                project.exec_script_in_sh_at(
++                    "printf '%s|%s' \"$PWD\" \"$SHPOOL_TEST_ROOT\"".to_string(),
++                    Some(path.clone()), cx,
++                )
++            }).await.unwrap();
++            let output = command.output().await.unwrap();
++            assert!(output.status.success());
++            assert_eq!(String::from_utf8(output.stdout).unwrap(), format!("{}|{value}", path.display()));
++        }
++    }
++
+     #[test]
+     fn test_shpool_kill_ignores_only_requested_session_not_found() {
+         assert!(Project::shpool_session_not_found(
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index 53fdc61928..e194179d2d 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -5679,7 +5679,7 @@ impl Sidebar {
+             multi_workspace.remove_with_pre_remove(
+                 workspaces_to_remove,
+                 RemovalIntent::KeepProject,
+-                async move |cx| {
++                async move |cx, workspaces_unchanged| {
+                     if !Self::consent_to_close_archived_worktree_items(&consent_targets, cx)
+                         .await?
+                     {
+@@ -5714,7 +5714,9 @@ impl Sidebar {
+                     let safe_to_stop = gpui::AsyncApp::update(cx, |cx| {
+                         let guard = callback_close_guard.borrow();
+                         let Some((guard, item_ids)) = guard.as_ref() else { return false };
+-                        !guard.changed(cx) && Self::archived_worktree_item_membership_matches(item_ids, cx)
++                        workspaces_unchanged(cx)
++                            && !guard.changed(cx)
++                            && Self::archived_worktree_item_membership_matches(item_ids, cx)
+                     });
+                     if !safe_to_stop {
+                         gpui::AsyncApp::update(cx, |cx| complete_terminal_close_metadata(terminal_id, false, cx));
+diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
+index cac2ad12a1..759d835406 100644
+--- a/crates/workspace/src/multi_workspace.rs
++++ b/crates/workspace/src/multi_workspace.rs
+@@ -1905,14 +1905,14 @@ impl MultiWorkspace {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) -> Task<Result<bool>> {
+-        self.remove_with_pre_remove(workspaces, intent, async |_| Ok(true), window, cx)
++        self.remove_with_pre_remove(workspaces, intent, async |_, _| Ok(true), window, cx)
+     }
+ 
+     pub fn remove_with_pre_remove(
+         &mut self,
+         workspaces: impl IntoIterator<Item = Entity<Workspace>>,
+         intent: RemovalIntent,
+-        before_remove: impl AsyncFnOnce(&mut gpui::AsyncWindowContext) -> Result<bool> + 'static,
++        before_remove: impl AsyncFnOnce(&mut gpui::AsyncWindowContext, Rc<dyn Fn(&App) -> bool>) -> Result<bool> + 'static,
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) -> Task<Result<bool>> {
+@@ -1980,7 +1980,7 @@ impl MultiWorkspace {
+             for workspace in &workspaces {
+                 let should_continue = workspace
+                     .update_in(cx, |workspace, window, cx| {
+-                        workspace.prepare_to_close(CloseIntent::ReplaceWindow, window, cx)
++                        workspace.prepare_to_remove(window, cx)
+                     })?
+                     .await?;
+ 
+@@ -2000,25 +2000,24 @@ impl MultiWorkspace {
+                 return Ok(false);
+             }
+ 
+-            if !before_remove(cx).await? {
++            let guarded_workspaces = workspaces.clone();
++            let expected_item_ids = item_ids.clone();
++            let workspaces_unchanged: Rc<dyn Fn(&App) -> bool> = Rc::new(move |cx| {
++                let current_item_ids = guarded_workspaces.iter().map(|workspace| {
++                    workspace.read(cx).panes().iter().flat_map(|pane| {
++                        pane.read(cx).items().map(|item| item.item_id()).collect::<Vec<_>>()
++                    }).collect::<Vec<_>>()
++                }).collect::<Vec<_>>();
++                !guard.changed(cx) && current_item_ids == expected_item_ids
++            });
++            if !before_remove(cx, workspaces_unchanged.clone()).await? {
+                 return Ok(false);
+             }
+ 
+             // Edit phase: one synchronous update. Delete the rows, then pick
+             // the replacement from the rows that actually remain.
+             let (removed_any, reopen_key) = this.update_in(cx, |this, window, cx| {
+-                let current_item_ids = workspaces
+-                    .iter()
+-                    .map(|workspace| {
+-                        workspace
+-                            .read(cx)
+-                            .panes()
+-                            .iter()
+-                            .flat_map(|pane| pane.read(cx).items().map(|item| item.item_id()))
+-                            .collect::<Vec<_>>()
+-                    })
+-                    .collect::<Vec<_>>();
+-                if guard.changed(cx) || current_item_ids != item_ids {
++                if !workspaces_unchanged(cx) {
+                     return (false, None);
+                 }
+                 let mut removed_any = false;
+diff --git a/crates/workspace/src/multi_workspace_tests.rs b/crates/workspace/src/multi_workspace_tests.rs
+index 199ae9ddeb..a1fab56fd4 100644
+--- a/crates/workspace/src/multi_workspace_tests.rs
++++ b/crates/workspace/src/multi_workspace_tests.rs
+@@ -813,6 +813,8 @@ async fn test_remove_with_pre_remove_runs_guard_after_consent_before_detach(
+         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+     let workspace =
+         multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
++    let original_session = workspace.read_with(cx, |workspace, _| workspace.session_id());
++    assert!(original_session.is_some());
+     let dirty_item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
+     workspace.update_in(cx, |workspace, window, cx| {
+         workspace.add_item_to_active_pane(Box::new(dirty_item.clone()), None, true, window, cx);
+@@ -824,7 +826,7 @@ async fn test_remove_with_pre_remove_runs_guard_after_consent_before_detach(
+         multi_workspace.remove_with_pre_remove(
+             [workspace.clone()],
+             RemovalIntent::CloseProject,
+-            async move |_| {
++            async move |_, _| {
+                 guard_calls.set(guard_calls.get() + 1);
+                 Ok(true)
+             },
+@@ -857,12 +859,13 @@ async fn test_remove_with_pre_remove_runs_guard_after_consent_before_detach(
+         multi_workspace.remove_with_pre_remove(
+             [workspace.clone()],
+             RemovalIntent::CloseProject,
+-            async |_| anyhow::bail!("guard refused removal"),
++            async |_, _| anyhow::bail!("guard refused removal"),
+             window,
+             cx,
+         )
+     });
+     assert!(remove_task.await.is_err());
++    assert_eq!(workspace.read_with(cx, |workspace, _| workspace.session_id()), original_session);
+     assert!(multi_workspace.read_with(cx, |multi_workspace, _| {
+         multi_workspace
+             .workspaces()
+@@ -873,12 +876,13 @@ async fn test_remove_with_pre_remove_runs_guard_after_consent_before_detach(
+         multi_workspace.remove_with_pre_remove(
+             [workspace.clone()],
+             RemovalIntent::CloseProject,
+-            async |_| Ok(false),
++            async |_, _| Ok(false),
+             window,
+             cx,
+         )
+     });
+     assert!(!remove_task.await.expect("refused removal should succeed"));
++    assert_eq!(workspace.read_with(cx, |workspace, _| workspace.session_id()), original_session);
+     assert!(multi_workspace.read_with(cx, |multi_workspace, _| {
+         multi_workspace
+             .workspaces()
+@@ -893,7 +897,7 @@ async fn test_remove_with_pre_remove_runs_guard_after_consent_before_detach(
+         multi_workspace.remove_with_pre_remove(
+             [workspace.clone()],
+             RemovalIntent::CloseProject,
+-            async move |cx| {
++            async move |cx, _workspaces_unchanged| {
+                 assert!(weak_multi_workspace.read_with(cx, |multi_workspace, _| {
+                     multi_workspace
+                         .workspaces()
+@@ -907,6 +911,7 @@ async fn test_remove_with_pre_remove_runs_guard_after_consent_before_detach(
+         )
+     });
+     assert!(remove_task.await.expect("guarded removal should succeed"));
++    assert_eq!(workspace.read_with(cx, |workspace, _| workspace.session_id()), None);
+     assert_eq!(guard_calls.get(), 1);
+     assert!(!multi_workspace.read_with(cx, |multi_workspace, _| {
+         multi_workspace
+@@ -2012,7 +2017,7 @@ async fn test_workspace_close_keeps_edits_made_during_another_consent_prompt(cx:
+     let task = multi_workspace.update_in(cx, |mw, window, cx| {
+         let called = callback_called.clone();
+         mw.remove_with_pre_remove(workspaces.clone(), RemovalIntent::CloseProject,
+-            async move |_| { called.set(true); Ok(true) }, window, cx)
++            async move |_, _| { called.set(true); Ok(true) }, window, cx)
+     });
+     cx.run_until_parked();
+     assert!(cx.has_pending_prompt());
+@@ -2063,9 +2068,11 @@ async fn test_remove_with_pre_remove_keeps_edits_made_during_guard(cx: &mut Test
+         multi_workspace.remove_with_pre_remove(
+             [workspace.clone()],
+             RemovalIntent::CloseProject,
+-            async move |_| {
++            async move |cx, workspaces_unchanged| {
+                 let _ = started_tx.send(());
+                 let _ = release_rx.await;
++                assert!(!gpui::AsyncApp::update(cx, |cx| workspaces_unchanged(cx)),
++                    "the destructive callback must see edits to the whole workspace before stopping a session");
+                 Ok(true)
+             },
+             window,
+@@ -2129,7 +2136,7 @@ async fn test_remove_with_pre_remove_keeps_edits_made_during_guard(cx: &mut Test
+         multi_workspace.remove_with_pre_remove(
+             [workspace.clone()],
+             RemovalIntent::CloseProject,
+-            async move |_| {
++            async move |_, _| {
+                 let _ = started_tx.send(());
+                 let _ = release_rx.await;
+                 Ok(true)
+diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
+index 3896df60f4..2e84b77eb9 100644
+--- a/crates/workspace/src/workspace.rs
++++ b/crates/workspace/src/workspace.rs
+@@ -3775,6 +3775,24 @@ impl Workspace {
+         close_intent: CloseIntent,
+         window: &mut Window,
+         cx: &mut Context<Self>,
++    ) -> Task<Result<bool>> {
++        self.prepare_to_close_internal(close_intent, true, window, cx)
++    }
++
++    pub(crate) fn prepare_to_remove(
++        &mut self,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) -> Task<Result<bool>> {
++        self.prepare_to_close_internal(CloseIntent::ReplaceWindow, false, window, cx)
++    }
++
++    fn prepare_to_close_internal(
++        &mut self,
++        close_intent: CloseIntent,
++        remove_session: bool,
++        window: &mut Window,
++        cx: &mut Context<Self>,
+     ) -> Task<Result<bool>> {
+         let active_call = self.active_global_call();
+ 
+@@ -3891,7 +3909,8 @@ impl Workspace {
+ 
+             // If we're not quitting, but closing, we remove the workspace from
+             // the current session.
+-            if close_intent != CloseIntent::Quit
++            if remove_session
++                && close_intent != CloseIntent::Quit
+                 && !save_last_workspace
+                 && save_result.as_ref().is_ok_and(|&res| res)
+             {
+-- 
+2.43.0
