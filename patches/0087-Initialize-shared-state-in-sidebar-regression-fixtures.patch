@@ -1,4 +1,4 @@
-From 3babd14af45ab4dce2a83872d273e1ab3fc8b3d9 Mon Sep 17 00:00:00 2001
+From 2183fbfba32563c12f5db86bc70d3e553c8ed4c9 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 11:05:00 +0000
@@ -10,7 +10,7 @@ Subject: [PATCH] Initialize shared application state in cross-window sidebar
  1 file changed, 38 insertions(+), 9 deletions(-)
 
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 4ba3a68ed0..4518adc4a3 100644
+index 4ba3a68ed0..cff74beabb 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
 @@ -10064,14 +10064,26 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window(cx: &m
@@ -89,7 +89,7 @@ index 4ba3a68ed0..4518adc4a3 100644
          assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.has_open_projects));
      }
 -    let local = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
-+    let local = cx.update(|cx| project::Project::local(
++    let local = cx.update(|_, cx| project::Project::local(
 +        params.client.clone(), params.node_runtime.clone(), params.user_store.clone(),
 +        params.languages.clone(), params.fs.clone(), None, project::LocalProjectFlags::default(), cx,
 +    ));
