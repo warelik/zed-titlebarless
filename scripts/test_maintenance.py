@@ -799,7 +799,7 @@ class SharedZedReviewTests(unittest.TestCase):
         with (patch.object(release.maintenance, "load", return_value=module),
               patch.object(release, "api", side_effect=native_api) as read_native,
               patch.object(release, "pages", side_effect=native_pages)):
-            self.assertEqual(release.native_review_history(candidate, accepted),
+            self.assertEqual(release.native_review_history(candidate, accepted, current_prs=(7,)),
                              {"findings": [], "dispositions": []})
 
         records = module.review_history.call_args.args[1]
@@ -911,13 +911,13 @@ class SharedZedReviewTests(unittest.TestCase):
                       patch.object(release, "api", side_effect=native_api),
                       patch.object(release, "pages", side_effect=native_pages)):
                     if outcome == "valid":
-                        self.assertEqual(release.native_review_history(candidate, accepted),
+                        self.assertEqual(release.native_review_history(candidate, accepted, current_prs=(7,)),
                                          {"findings": [], "dispositions": []})
                         records = module.review_history.call_args.args[1]
                         self.assertEqual(records[0]["resolved_commits"], {source: source})
                     else:
                         with self.assertRaises(ValueError):
-                            release.native_review_history(candidate, accepted)
+                            release.native_review_history(candidate, accepted, current_prs=(7,))
                         module.review_history.assert_not_called()
                 self.assertEqual(reads.count(endpoint), 1)
 
