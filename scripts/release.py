@@ -1700,7 +1700,7 @@ def _successful_product_attempt_under_other_config(candidate, history):
     return False
 
 
-def authorize_shared_final(candidate, baseline_proof, *, allow_reuse=False):
+def authorize_shared_final(candidate, baseline_proof, *, allow_reuse=False, full_pr=None):
     history, comments = final_attempt_history(candidate, baseline_proof)
     current_key = (int(os.environ["GITHUB_RUN_ID"]), int(os.environ["GITHUB_RUN_ATTEMPT"]))
     if any((record.get("run_id"), record.get("run_attempt")) == current_key
@@ -1721,7 +1721,10 @@ def authorize_shared_final(candidate, baseline_proof, *, allow_reuse=False):
             "repair configuration; require its exact native blob-preserving adoption proof and reuse "
             "that attempt instead of starting another macOS build")
     if decision["decision"] == "allow":
-        full_pr = int(os.environ["CANDIDATE_PR"])
+        if full_pr is None:
+            full_pr = int(os.environ["CANDIDATE_PR"])
+        if type(full_pr) is not int or full_pr <= 0:
+            raise ValueError("Final reservation requires the exact full-review PR number")
         run_id, run_attempt = current_key
         run_record = api(f"repos/{candidate['repository']}/actions/runs/{run_id}/attempts/{run_attempt}")
         if run_record.get("id") != run_id or run_record.get("run_attempt") != run_attempt:
@@ -4123,7 +4126,7 @@ def prepare(app, *, shared=False):
             bundle_verified = True
             policy_verified = True
         decision = authorize_shared_final(
-            shared_candidate, accepted_proof, allow_reuse=bool(bootstrap_candidate))
+            shared_candidate, accepted_proof, allow_reuse=bool(bootstrap_candidate), full_pr=pr)
         if decision.get("decision") == "wait":
             output(ready=False, followup=False, pr=pr,
                    reason=decision.get("reason", "Waiting for the active final workflow"))

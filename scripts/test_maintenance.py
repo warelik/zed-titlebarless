@@ -1170,6 +1170,56 @@ class SharedFinalArtifactReuseTests(unittest.TestCase):
         self.assertEqual(result["artifact_workflow_sha"], "9" * 40)
         self.assertIn("fork-final:v1", created["body"])
 
+    def test_preparation_reserves_with_explicit_pr_without_candidate_environment(self):
+        candidate = {"schema": 1, "repository": "owner/zed", "upstream_sha": "a" * 40,
+                     "application_sha": "b" * 40, "configuration_sha": "c" * 40,
+                     "patchset_sha256": "d" * 64, "recipe_sha256": "e" * 64,
+                     "platform": "macos/aarch64"}
+        prior = {**candidate, "configuration_sha": "f" * 40}
+        step = {"status": "completed", "conclusion": "success", "started_at": "2026-10-19T12:02:00Z"}
+        successful = {"candidate": prior,
+                      "run": {"status": "completed", "conclusion": "success"},
+                      "jobs": [{"name": release.FINAL_HEAVY_JOB, "status": "completed",
+                                "conclusion": "success", "started_at": "2026-10-19T12:01:00Z",
+                                "steps": [step]}]}
+        failed = {"candidate": candidate,
+                  "run": {"status": "completed", "conclusion": "failure"},
+                  "jobs": [{"name": release.FINAL_HEAVY_JOB, "status": "completed",
+                            "conclusion": "failure", "started_at": "2026-10-19T13:01:00Z",
+                            "steps": [{"status": "completed", "conclusion": "failure",
+                                       "started_at": "2026-10-19T13:02:00Z"}]}]}
+        history = {"complete": True, "baseline": {"publication": {
+                       "published_at": "2026-10-19T10:00:00Z"}},
+                   "required_heavy_jobs": [release.FINAL_HEAVY_JOB],
+                   "attempts": [successful, failed]}
+        decision = {"decision": "allow", "candidate_id": "1" * 64, "grant_id": 41}
+        module = Mock()
+        module.authorize_final.return_value = decision
+        created = {}
+
+        def native_api(path, *, method="GET", data=None, token=None):
+            if path.endswith("/actions/runs/90/attempts/1"):
+                return {"id": 90, "run_attempt": 1}
+            self.assertEqual(path, "repos/owner/zed/issues/7/comments")
+            self.assertEqual(method, "POST")
+            created.update({"id": 7, "body": data["body"],
+                            "user": {"login": "owner", "type": "User"}})
+            return created
+
+        with (patch.dict(os.environ, {"GITHUB_REPOSITORY": "owner/zed", "GITHUB_SHA": "9" * 40,
+                                     "GITHUB_RUN_ID": "90", "GITHUB_RUN_ATTEMPT": "1"}, clear=True),
+              patch.object(release, "final_attempt_history", return_value=(history, [])),
+              patch.object(release, "reservations_from_history_comments", return_value=[]),
+              patch.object(release.maintenance, "load", return_value=module),
+              patch.object(release, "native_workflow_source", return_value={"verified": True}),
+              patch.object(release, "owner_token", return_value="owner-token"),
+              patch.object(release, "api", side_effect=native_api),
+              patch.object(release, "pages", side_effect=lambda _path: [created])):
+            result = release.authorize_shared_final(candidate, {}, full_pr=7)
+        self.assertEqual(result["grant_id"], 41)
+        self.assertEqual(result["artifact_workflow_sha"], "9" * 40)
+        self.assertIn("fork-final:v1", created["body"])
+
     def test_a_changed_product_does_not_match_the_prior_repair_attempt(self):
         candidate = {"schema": 1, "repository": "owner/zed", "upstream_sha": "a" * 40,
                      "application_sha": "b" * 40, "configuration_sha": "c" * 40,
