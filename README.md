@@ -147,3 +147,5 @@ reviewed release, and preparing a release does not trigger upstream workflows
 on `main`. Mirror housekeeping is separate from the one final release sequence.
 
 Native review inventories are read through the final bounded page and compared in PR-number order. API ordering changes do not invalidate unchanged sources; duplicate numbers and actual source/state changes remain errors.
+
+Maintenance reads current exact review scopes and open carried work. Closed archived discussions are excluded. Before retiring a superseded pair, preserve its unresolved findings through the existing review-history snapshot; resolved findings are not reopened. Closed exact receipt pairs remain verifiable by their explicit PR numbers.

@@ -812,14 +812,30 @@ class SharedZedReviewTests(unittest.TestCase):
         self.assertEqual(records[0]["inline"], [])
         self.assertEqual(records[0]["resolved_commits"], {"abcdef1": source})
 
+    def test_current_snapshot_reads_no_repository_wide_comment_archive(self):
+        repo = "owner/zed"
+        pulls = [{"number": 7, "head": {"repo": {"full_name": repo}}}]
+        def read(route):
+            if route == f"repos/{repo}/pulls?state=open":
+                return pulls
+            if route in {f"repos/{repo}/issues/7/comments", f"repos/{repo}/issues/8/comments"}:
+                return [{"route": route}]
+            raise AssertionError("Archived or repository-wide comment read: " + route)
+        with patch.object(release, "pages", side_effect=read):
+            self.assertEqual(release.current_review_comments(repo, current_prs=(8,)),
+                [{"route": f"repos/{repo}/issues/7/comments"},
+                 {"route": f"repos/{repo}/issues/8/comments"}])
+
     def test_native_history_accepts_reordered_inventory_but_rejects_real_changes(self):
         candidate = {"repository": "owner/zed"}
         accepted = {"variable": {"value": json.dumps({"repository": "owner/zed", "publication": {
             "published_at": "2026-10-19T10:00:00Z"}})}}
-        first = {"number": 7, "state": "closed", "updated_at": "2026-10-19T12:00:00Z",
+        first = {"number": 7, "state": "open", "updated_at": "2026-10-19T12:00:00Z",
                  "head": {"sha": "a" * 40, "repo": {"full_name": "owner/zed"}}}
-        second = {"number": 8, "state": "closed", "updated_at": "2026-10-19T11:00:00Z",
+        second = {"number": 8, "state": "open", "updated_at": "2026-10-19T11:00:00Z",
                   "head": {"sha": "b" * 40, "repo": {"full_name": "owner/zed"}}}
+        archived = {**first, "number": 99, "state": "closed",
+                    "updated_at": "2026-10-21T12:00:00Z"}
         for mode in ("reorder", "changed", "duplicate"):
             module = Mock()
             module.review_history.return_value = {"findings": [], "dispositions": []}
@@ -830,9 +846,11 @@ class SharedZedReviewTests(unittest.TestCase):
                     if mode == "duplicate":
                         return [first, first]
                     if len(inventories) == 1:
-                        return [second, first]
+                        return [second, first, archived]
                     moved = {**first, "head": {**first["head"], "sha": "c" * 40}}
-                    return [moved if mode == "changed" else first, second]
+                    return [moved if mode == "changed" else first, second, archived]
+                if "/99" in route:
+                    raise AssertionError("Archived review discussion must not be read")
                 return first if route.endswith("/7") else second
             with (self.subTest(mode=mode),
                   patch.object(release.maintenance, "load", return_value=module),

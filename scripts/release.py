@@ -657,7 +657,17 @@ def review_history_from_comments(comments, *, published_at=None):
     return [findings[key] for key in sorted(findings)], origins
 
 
-def native_review_history(candidate, accepted):
+def current_review_comments(repo, *, current_prs=()):
+    """Read carried state from open work and explicitly selected receipt scopes."""
+    numbers = set(current_prs)
+    for pull in pages(f"repos/{repo}/pulls?state=open"):
+        if (pull.get("head", {}).get("repo") or {}).get("full_name") == repo:
+            numbers.add(pull["number"])
+    return [comment for number in sorted(numbers)
+            for comment in pages(f"repos/{repo}/issues/{number}/comments")]
+
+
+def native_review_history(candidate, accepted, *, current_prs=()):
     """Normalize complete native PR evidence after the verified release cutoff."""
     repo = candidate["repository"]
     try:
@@ -710,7 +720,7 @@ def native_review_history(candidate, accepted):
                     raise ValueError("Native pull-request inventory repeated a pull request")
                 seen.add(number)
                 timestamp = datetime.fromisoformat(pull["updated_at"].replace("Z", "+00:00"))
-                if timestamp >= cutoff:
+                if timestamp >= cutoff and (pull.get("state") == "open" or number in current_prs):
                     result.append(pull)
             if len(batch) < 100:
                 return sorted(result, key=lambda pull: pull["number"])
@@ -1268,7 +1278,7 @@ def maintenance_pair(candidate, full_pr, full_sha, accepted, delta_pr, delta_sha
     delta = maintenance_review(candidate, "delta", delta_pr, delta_sha, delta_base,
                                accepted=accepted, allow_closed=allow_closed,
                                published_at=published_at)
-    native_history = native_review_history(candidate, accepted)
+    native_history = native_review_history(candidate, accepted, current_prs=(full_pr, delta_pr))
     known_findings = merge_history_items(native_history["findings"], known_findings,
                                          "Native review history", native_authoritative=True)
     dispositions = merge_history_items(native_history["dispositions"], dispositions,
@@ -1331,8 +1341,8 @@ def check_shared_publication(repo, config, sha, upstream, patchset, *, allow_clo
             raise ValueError("Accepted baseline changed after the exact-source review pair")
     baseline_value = strict_json(accepted["variable"]["value"], "Accepted baseline")
     published_at = baseline_value["publication"]["published_at"]
-    prior_comments = pages(f"repos/{repo}/issues/comments?"
-                           + urlencode({"since": published_at}))
+    prior_comments = current_review_comments(repo, current_prs=(
+        int(os.environ["CANDIDATE_PR"]), int(os.environ["DELTA_PR"])))
     known, _ = review_history_from_comments(prior_comments, published_at=published_at)
     repair_number = os.environ.get("REPAIR_PR", "")
     repair_comments = (pages(f"repos/{repo}/issues/{repair_number}/comments")
@@ -3994,7 +4004,8 @@ def prepare(app, *, shared=False):
             allow_closed=closed_bundle_reuse)
     else:
         delta_pr, delta_base, delta_sha, delta_ready, delta_reason = delta_review(repo, review_config, sha)
-    retire_superseded_reviews(repo, {pr, delta_pr}, shared=shared)
+    if not shared:
+        retire_superseded_reviews(repo, {pr, delta_pr}, shared=False)
     output(delta_pr=delta_pr, delta_base=delta_base, delta_sha=delta_sha)
     # Wait for both complete lists before any repair. A callback from the first
     # reviewer must not dispatch a partial fix or start expensive validation.
@@ -4017,8 +4028,7 @@ def prepare(app, *, shared=False):
         raise ValueError("Consolidated review batch:\n" + "\n\n".join(dict.fromkeys(details)))
     if shared:
         baseline_value = strict_json(accepted_proof["variable"]["value"], "Accepted baseline")
-        prior_comments = pages(f"repos/{repo}/issues/comments?"
-                               + urlencode({"since": published_at}))
+        prior_comments = current_review_comments(repo, current_prs=(pr, delta_pr))
         known, origins = review_history_from_comments(prior_comments, published_at=published_at)
         current_repair_comments = (pages(f"repos/{repo}/issues/{state['number']}/comments")
                                    if state else [])
@@ -4075,6 +4085,9 @@ def prepare(app, *, shared=False):
                     api(f"repos/{repo}/issues/{pr}/comments", method="POST",
                         data={"body": "Complete carried native review finding history.\n" + history_marker},
                         token=owner_token(repo))
+            if not pair.get("findings") or history_marker:
+                # Only retire old input after unresolved state is durably carried.
+                retire_superseded_reviews(repo, {pr, delta_pr}, shared=True)
         if pair.get("state") == "waiting":
             output(ready=False, reason="Waiting for both complete native review lists", pr=pr)
             requested_at = []
