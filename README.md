@@ -145,3 +145,5 @@ Source preparation fetches the selected upstream directly and does not update
 the optional `main` mirror. A denied mirror write therefore cannot stop a
 reviewed release, and preparing a release does not trigger upstream workflows
 on `main`. Mirror housekeeping is separate from the one final release sequence.
+
+Native review inventories are read through the final bounded page and compared in PR-number order. API ordering changes do not invalidate unchanged sources; duplicate numbers and actual source/state changes remain errors.

@@ -812,6 +812,41 @@ class SharedZedReviewTests(unittest.TestCase):
         self.assertEqual(records[0]["inline"], [])
         self.assertEqual(records[0]["resolved_commits"], {"abcdef1": source})
 
+    def test_native_history_accepts_reordered_inventory_but_rejects_real_changes(self):
+        candidate = {"repository": "owner/zed"}
+        accepted = {"variable": {"value": json.dumps({"publication": {
+            "published_at": "2026-10-19T10:00:00Z"}})}}
+        first = {"number": 7, "state": "closed", "updated_at": "2026-10-19T12:00:00Z",
+                 "head": {"sha": "a" * 40, "repo": {"full_name": "owner/zed"}}}
+        second = {"number": 8, "state": "closed", "updated_at": "2026-10-19T11:00:00Z",
+                  "head": {"sha": "b" * 40, "repo": {"full_name": "owner/zed"}}}
+        for mode in ("reorder", "changed", "duplicate"):
+            module = Mock()
+            module.review_history.return_value = {"findings": [], "dispositions": []}
+            inventories = []
+            def native_api(route):
+                if "/pulls?" in route:
+                    inventories.append(route)
+                    if mode == "duplicate":
+                        return [first, first]
+                    if len(inventories) == 1:
+                        return [second, first]
+                    moved = {**first, "head": {**first["head"], "sha": "c" * 40}}
+                    return [moved if mode == "changed" else first, second]
+                return first if route.endswith("/7") else second
+            with (self.subTest(mode=mode),
+                  patch.object(release.maintenance, "load", return_value=module),
+                  patch.object(release, "api", side_effect=native_api),
+                  patch.object(release, "pages", return_value=[])):
+                if mode == "reorder":
+                    release.native_review_history(candidate, accepted)
+                    self.assertEqual([x["pull"]["number"] for x in
+                                      module.review_history.call_args.args[1]], [7, 8])
+                else:
+                    with self.assertRaises(ValueError):
+                        release.native_review_history(candidate, accepted)
+                    module.review_history.assert_not_called()
+
     def test_full_review_sources_require_existing_matching_repository_commits(self):
         source = "abcdef1" + "b" * 33
         candidate = {"schema": 1, "repository": "owner/zed", "upstream_sha": "a" * 40,

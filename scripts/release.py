@@ -695,29 +695,25 @@ def native_review_history(candidate, accepted):
         return signature
 
     def recent_pull_inventory():
-        # GitHub orders these by native updated_at, so records before the
-        # accepted publication cutoff cannot contain post-publication review
-        # evidence. Validate ordering and bound pagination instead of fetching
-        # every historical PR in a large upstream repository.
+        # API presentation order is not a freshness proof. Read every page and
+        # compare canonical exact identities before and after collection.
         route = f"repos/{repo}/pulls?state=all&sort=updated&direction=desc"
-        result, previous = [], None
+        result, seen = [], set()
         for page in range(1, 1001):
             batch = api(f"{route}&per_page=100&page={page}")
             if not isinstance(batch, list):
                 raise ValueError("Native pull-request history is not a complete list")
-            timestamps = []
             for pull in batch:
-                if not isinstance(pull, dict) or not isinstance(pull.get("updated_at"), str):
-                    raise ValueError("Native pull-request history omitted update timestamps")
+                inventory_signature([pull])
+                number = pull["number"]
+                if number in seen:
+                    raise ValueError("Native pull-request inventory repeated a pull request")
+                seen.add(number)
                 timestamp = datetime.fromisoformat(pull["updated_at"].replace("Z", "+00:00"))
-                if timestamp.tzinfo is None or (previous is not None and timestamp > previous):
-                    raise ValueError("Native pull-request history is not in stable updated order")
-                previous = timestamp
-                timestamps.append(timestamp)
                 if timestamp >= cutoff:
                     result.append(pull)
-            if any(timestamp < cutoff for timestamp in timestamps) or len(batch) < 100:
-                return result
+            if len(batch) < 100:
+                return sorted(result, key=lambda pull: pull["number"])
         raise ValueError("Native pull-request history exceeded the pagination bound")
 
     pulls = recent_pull_inventory()
