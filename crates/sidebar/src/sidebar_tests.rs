@@ -18427,3 +18427,32 @@ async fn test_sidebar_close_waits_for_pending_terminal_startup(cx: &mut TestAppC
     assert!(!fake.has_session(&terminal_id.session_name()));
     cx.update(|_, cx| assert!(TerminalThreadMetadataStore::global(cx).read(cx).entry(terminal_id).is_none()));
 }
+
+#[gpui::test]
+fn test_restored_ssh_group_rehydrates_execution_options_before_terminal_matching(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(|cx| {
+        let current = recent_projects::RemoteSettings::get_global(cx);
+        let configured = recent_projects::RemoteSettings {
+            ssh_connections: settings::ExtendingVec(vec![settings::SshConnection {
+                host: "fixture-host".into(),
+                args: vec!["-i".into(), "/fixture/private-key".into()],
+                ..Default::default()
+            }]),
+            wsl_connections: current.wsl_connections.clone(),
+            read_ssh_config: current.read_ssh_config,
+        };
+        recent_projects::RemoteSettings::override_global(configured, cx);
+        let restored = RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+            host: "fixture-host".into(), ..Default::default()
+        });
+        let metadata = RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+            host: "fixture-host".into(),
+            args: Some(vec!["-i".into(), "/fixture/private-key".into()]),
+            ..Default::default()
+        });
+        assert!(!same_terminal_remote_connection(Some(&restored), Some(&metadata)));
+        let hydrated = restore_remote_options(restored, cx);
+        assert!(same_terminal_remote_connection(Some(&hydrated), Some(&metadata)));
+    });
+}
