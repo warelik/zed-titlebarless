@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import tomllib
 import maintenance
 from urllib.parse import urlencode
@@ -1700,6 +1701,16 @@ def _successful_product_attempt_under_other_config(candidate, history):
     return False
 
 
+def final_reservation_identity(comment):
+    if (not isinstance(comment, dict) or type(comment.get("id")) is not int
+            or comment["id"] <= 0 or not isinstance(comment.get("body"), str)
+            or not isinstance(comment.get("user"), dict)):
+        return None
+    user = comment["user"]
+    return (comment["id"], comment["body"], comment.get("created_at"),
+            comment.get("updated_at"), user.get("id"), user.get("login"), user.get("type"))
+
+
 def authorize_shared_final(candidate, baseline_proof, *, allow_reuse=False, full_pr=None):
     history, comments = final_attempt_history(candidate, baseline_proof)
     current_key = (int(os.environ["GITHUB_RUN_ID"]), int(os.environ["GITHUB_RUN_ATTEMPT"]))
@@ -1741,8 +1752,16 @@ def authorize_shared_final(candidate, baseline_proof, *, allow_reuse=False, full
                 + json.dumps(marker, sort_keys=True, separators=(",", ":")) + " -->")
         created = api(f"repos/{candidate['repository']}/issues/{full_pr}/comments",
                       method="POST", data={"body": body}, token=owner_token(candidate["repository"]))
-        reread = pages(f"repos/{candidate['repository']}/issues/{full_pr}/comments")
-        if not any(item.get("id") == created.get("id") and item == created for item in reread):
+        expected = final_reservation_identity(created)
+        if expected is None or created["body"] != body:
+            raise ValueError("Final candidate reservation response has no exact protocol identity")
+        for attempt in range(3):
+            reread = pages(f"repos/{candidate['repository']}/issues/{full_pr}/comments")
+            if any(final_reservation_identity(item) == expected for item in reread):
+                break
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+        else:
             raise ValueError("Final candidate reservation was not read back exactly")
         decision["artifact_workflow_sha"] = os.environ["GITHUB_SHA"]
     elif decision["decision"] == "already-validated":

@@ -975,6 +975,17 @@ class SharedZedReviewTests(unittest.TestCase):
 
 
 class SharedFinalArtifactReuseTests(unittest.TestCase):
+    def test_final_reservation_readback_ignores_cosmetic_views_but_not_protocol_mutation(self):
+        record = {"id": 7, "body": "exact protocol", "created_at": "2026-10-23T10:00:00Z",
+                  "updated_at": "2026-10-23T10:00:00Z", "user": {"id": 8, "login": "owner", "type": "User"}}
+        cosmetic = {**record, "reactions": {"total_count": 1},
+                    "user": {**record["user"], "avatar_url": "changed"}}
+        self.assertEqual(release.final_reservation_identity(record), release.final_reservation_identity(cosmetic))
+        for mutation in ({"body": "changed"}, {"id": 9}, {"updated_at": "2026-10-23T10:00:01Z"},
+                         {"user": {**record["user"], "login": "foreign"}}):
+            self.assertNotEqual(release.final_reservation_identity(record),
+                                release.final_reservation_identity({**record, **mutation}))
+
     def test_active_final_workflow_waits_without_a_new_reservation(self):
         candidate = {"schema": 1, "repository": "owner/zed", "upstream_sha": "a" * 40,
                      "application_sha": "b" * 40, "configuration_sha": "c" * 40,
@@ -1196,12 +1207,20 @@ class SharedFinalArtifactReuseTests(unittest.TestCase):
         module = Mock()
         module.authorize_final.return_value = decision
         created = {}
+        posts = []
+        reads = []
+        def readback(path):
+            reads.append(path)
+            return [] if len(reads) == 1 else [{**created,
+                "reactions": {"total_count": 1},
+                "user": {**created["user"], "avatar_url": "changed-view"}}]
 
         def native_api(path, *, method="GET", data=None, token=None):
             if path.endswith("/actions/runs/90/attempts/1"):
                 return {"id": 90, "run_attempt": 1}
             self.assertEqual(path, "repos/owner/zed/issues/7/comments")
             self.assertEqual(method, "POST")
+            posts.append(path)
             created.update({"id": 7, "body": data["body"],
                             "user": {"login": "owner", "type": "User"}})
             return created
@@ -1214,11 +1233,15 @@ class SharedFinalArtifactReuseTests(unittest.TestCase):
               patch.object(release, "native_workflow_source", return_value={"verified": True}),
               patch.object(release, "owner_token", return_value="owner-token"),
               patch.object(release, "api", side_effect=native_api),
-              patch.object(release, "pages", side_effect=lambda _path: [created])):
+              patch.object(release, "pages", side_effect=readback),
+              patch.object(release.time, "sleep") as pause):
             result = release.authorize_shared_final(candidate, {}, full_pr=7)
         self.assertEqual(result["grant_id"], 41)
         self.assertEqual(result["artifact_workflow_sha"], "9" * 40)
         self.assertIn("fork-final:v1", created["body"])
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(len(reads), 2)
+        pause.assert_called_once_with(1)
 
     def test_a_changed_product_does_not_match_the_prior_repair_attempt(self):
         candidate = {"schema": 1, "repository": "owner/zed", "upstream_sha": "a" * 40,
