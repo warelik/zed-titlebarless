@@ -98,6 +98,7 @@ class BatchedReviewTests(unittest.TestCase):
                 stack.enter_context(patch.object(release, "mirror_main", side_effect=PermissionError(
                     "Mirror write denied; pinned source remains available")))
             if shared:
+                stack.enter_context(patch.object(release, "product_recipe_sha256", return_value=shared_candidate["recipe_sha256"]))
                 private = type("PrivateLifecycle", (), {})()
                 private._maintenance_lock_identity = {
                     "repository": "warelik/machine-maintenance", "revision": "a" * 40,
@@ -1186,8 +1187,8 @@ class PublishedRecoveryCheckpointTests(unittest.TestCase):
                       patch.object(release, "api", return_value={"draft": False}),
                       patch.object(release, "check_delta_for_publication"),
                       patch.object(release, "verify_published_release"),
-                      patch.object(release, "check_review", side_effect=lambda *a, **k: (events.append("review") or (ready, "review rejected"))),
-                      patch.object(release, "minor_findings", side_effect=lambda *a: (events.append("minor") or ([{}] if minor else []))),
+                      patch.object(release, "publication_review_status", side_effect=lambda *a, **k: (events.append("review") or (ready, "review rejected"))),
+                      patch.object(release, "publication_minor_findings", side_effect=lambda *a: (events.append("minor") or ([{}] if minor else []))),
                       patch.object(release, "advance_published_baseline", side_effect=lambda *a: events.append("advance")) as advance,
                       patch.object(release, "restore_publication_baseline", side_effect=lambda *a: events.append("restore")) as restore,
                       patch.object(release, "close_published_reviews", side_effect=RuntimeError("cleanup failed") if cleanup_failure == "review" else None),
