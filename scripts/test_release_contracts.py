@@ -133,10 +133,11 @@ class UpstreamSelectionTests(unittest.TestCase):
                 {"status": "ahead", "merge_base_commit": {"sha": "a" * 40}},
                 {"object": {"sha": upstream}},
             ],
-        ) as api:
+        ) as api, patch.dict(os.environ, {"CODEX_REQUEST_TOKEN": "fixture-owner"}):
             release.mirror_main("maintainer/zed-fork")
         self.assertEqual(api.call_args.kwargs["method"], "PATCH")
         self.assertEqual(api.call_args.kwargs["data"], {"sha": upstream, "force": False})
+        self.assertEqual(api.call_args.kwargs["token"], "fixture-owner")
 
     def test_main_mirror_rejects_divergence_without_writing(self):
         with patch.object(

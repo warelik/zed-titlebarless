@@ -3782,7 +3782,8 @@ def mirror_main(repo):
             or comparison["merge_base_commit"]["sha"] != current):
         raise ValueError("main is not an unmodified upstream mirror")
     updated = api(f"repos/{repo}/git/refs/heads/main", method="PATCH",
-                  data={"sha": upstream, "force": False})
+                  data={"sha": upstream, "force": False},
+                  token=os.environ.get("CODEX_REQUEST_TOKEN"))
     if updated["object"]["sha"] != upstream:
         raise ValueError("Upstream mirror did not reach the selected commit")
 

@@ -131,3 +131,12 @@ Symbols can also be loaded into LLDB, which demangles names automatically:
 ```sh
 lldb -o "add-dsym zed.dwarf" /Applications/Zed.app
 ```
+
+### Native mirror authorization
+
+The `main` mirror advances only by the existing exact upstream fast-forward
+check. Its ref write uses the already provisioned `CODEX_REQUEST_TOKEN`: the
+Actions installation token can reject upstream commits containing workflows
+with `Resource not accessible by integration`. Read operations retain their
+existing credentials. The mirror contract regression verifies the write token
+and preserves the refusal of divergent history; application inputs are unchanged.
