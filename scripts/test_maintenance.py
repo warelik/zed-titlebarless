@@ -1,6 +1,7 @@
 """Public adapter boundary checks; private lifecycle decisions have their own suite."""
 
 from contextlib import ExitStack
+import base64
 import hashlib
 import io
 import json
@@ -127,6 +128,101 @@ class NativeBaselinePublicationTests(unittest.TestCase):
         self.assertEqual(len(updates), 1)
 
 
+    def test_failed_checkpoint_publication_withdraws_and_restores_only_its_own_checkpoint(self):
+        repo = "owner/zed"
+        candidate = {"schema": 1, "repository": repo, "application_sha": "a" * 40,
+                     "configuration_sha": "b" * 40, "upstream_sha": "c" * 40,
+                     "patchset_sha256": "d" * 64, "recipe_sha256": "e" * 64,
+                     "platform": "macos/aarch64"}
+        endpoint = f"repos/{repo}/actions/variables/FORK_ACCEPTED_BASELINE"
+        previous = {"name": "FORK_ACCEPTED_BASELINE", "value": "verified previous checkpoint",
+                    "created_at": "2026-10-18T00:00:00Z", "updated_at": "2026-10-18T00:00:00Z"}
+        publication = {"kind": "github-release", "id": 9, "published_at": "2026-10-20T12:00:00Z",
+                       "metadata_sha256": "f" * 64}
+        encoded = json.dumps({"schema": 1, "repository": repo, "candidate": candidate,
+                              "publication": publication}, sort_keys=True, separators=(",", ":"))
+        env = {"MAINTENANCE_BASELINE": json.dumps({"endpoint": endpoint, "variable": previous}),
+               "MAINTENANCE_CANDIDATE": json.dumps(candidate),
+               "CONFIG_SHA": candidate["configuration_sha"]}
+        for committed, restore_failure in ((False, None), (True, None),
+                                           (True, "before"), (True, "after")):
+            with self.subTest(checkpoint_write_committed=committed, restore_failure=restore_failure):
+                current = dict(previous)
+                events = []
+                draft = True
+                restore_writes = 0
+
+                def native(route, *, method="GET", data=None, token=None):
+                    nonlocal draft, restore_writes
+                    if route == f"repos/{repo}/releases/9":
+                        if method == "PATCH":
+                            draft = data["draft"]
+                            events.append(("release", draft))
+                            return {}
+                        return {"id": 9, "draft": draft}
+                    self.assertEqual(route, endpoint)
+                    self.assertEqual(token, "owner-token")
+                    if method == "PATCH":
+                        restore_writes += 1
+                        events.append(("checkpoint", data["value"]))
+                        if restore_writes == 1 and restore_failure == "before":
+                            raise RuntimeError("restore request timed out before commit")
+                        current["value"] = data["value"]
+                        current["updated_at"] = "2026-10-20T12:00:01Z"
+                        if restore_writes == 1 and restore_failure == "after":
+                            raise RuntimeError("restore response lost after commit")
+                        return {}
+                    return dict(current)
+
+                def advance():
+                    if committed:
+                        current["value"] = encoded
+                    raise RuntimeError("lost checkpoint response")
+
+                def validate(published):
+                    if published:
+                        advance()
+
+                with (patch.dict(os.environ, env, clear=True),
+                      patch.object(release, "owner_token", return_value="owner-token"),
+                      patch.object(maintenance, "load", return_value=Mock()),
+                      patch.object(release, "api", side_effect=native),
+                      self.assertRaisesRegex(RuntimeError, "lost checkpoint response")):
+                    release.publish_checked_draft(repo, 9, "notes", validate)
+                self.assertTrue(draft)
+                self.assertEqual(current["value"], previous["value"])
+                self.assertEqual(events[:2], [("release", False), ("release", True)])
+                expected_writes = (2 if restore_failure == "before" else 1) if committed else 0
+                self.assertEqual(restore_writes, expected_writes)
+                self.assertEqual(events[2:], [("checkpoint", previous["value"])] * expected_writes)
+
+    def test_checkpoint_recovery_refuses_a_concurrent_publication(self):
+        repo = "owner/zed"
+        candidate = {"schema": 1, "repository": repo, "application_sha": "a" * 40,
+                     "configuration_sha": "b" * 40, "upstream_sha": "c" * 40,
+                     "patchset_sha256": "d" * 64, "recipe_sha256": "e" * 64,
+                     "platform": "macos/aarch64"}
+        endpoint = f"repos/{repo}/actions/variables/FORK_ACCEPTED_BASELINE"
+        current = {"name": "FORK_ACCEPTED_BASELINE", "created_at": "2026-10-20T00:00:00Z",
+                   "updated_at": "2026-10-20T00:00:00Z",
+                   "value": json.dumps({"schema": 1, "repository": repo,
+                       "candidate": {**candidate, "application_sha": "9" * 40},
+                       "publication": {"kind": "github-release", "id": 10,
+                           "published_at": "2026-10-20T12:00:00Z", "metadata_sha256": "f" * 64}})}
+        env = {"MAINTENANCE_CANDIDATE": json.dumps(candidate),
+               "MAINTENANCE_BASELINE": json.dumps({"endpoint": endpoint,
+                   "variable": {"name": "FORK_ACCEPTED_BASELINE", "value": "previous"}}),
+               "CONFIG_SHA": candidate["configuration_sha"]}
+        with (patch.dict(os.environ, env, clear=True),
+              patch.object(release, "owner_token", return_value="owner-token"),
+              patch.object(maintenance, "load", return_value=Mock()),
+              patch.object(release, "api", return_value=current) as native,
+              self.assertRaisesRegex(ValueError, "concurrently changed checkpoint")):
+            release.restore_publication_baseline(repo, 9)
+        native.assert_called_once_with(endpoint, token="owner-token")
+
+
+
 class SharedZedReviewTests(unittest.TestCase):
     def test_dismissed_review_passes_native_dismissal_events_without_inventing_its_time(self):
         repo, source = "owner/zed", "c" * 40
@@ -227,6 +323,32 @@ class SharedZedReviewTests(unittest.TestCase):
         self.assertNotEqual(first["configuration_sha"], changed["configuration_sha"])
         self.assertEqual(first["recipe_sha256"], changed["recipe_sha256"])
         self.assertEqual(first["recipe_sha256"], source["recipe_sha256"])
+
+    def test_recipe_sources_use_authenticated_api_for_local_and_upstream_blobs(self):
+        data = b"immutable recipe bytes\n"
+        record = {"type": "file", "encoding": "base64", "size": len(data),
+                  "content": base64.b64encode(data).decode("ascii"),
+                  "sha": hashlib.sha1(b"blob " + str(len(data)).encode("ascii")
+                                      + b"\0" + data).hexdigest()}
+        revision, path = "a" * 40, "Cargo.toml"
+        for repo in ("owner/zed", release.UPSTREAM):
+            with (self.subTest(repo=repo),
+                  patch.dict(os.environ, {"GITHUB_REPOSITORY": "owner/zed"}),
+                  patch.object(release, "api", return_value=record) as authenticated,
+                  patch.object(release, "urlopen", side_effect=AssertionError("Unauthenticated read"))):
+                self.assertEqual(release.native_source_file(repo, revision, path), data)
+                authenticated.assert_called_once_with(
+                    f"repos/{repo}/contents/{path}?ref={revision}")
+
+    def test_recipe_source_api_failure_never_falls_back_to_unauthenticated_reads(self):
+        failure = subprocess.CalledProcessError(1, ["gh", "api"])
+        with (patch.object(release, "api", side_effect=failure) as authenticated,
+              patch.object(release, "urlopen", side_effect=AssertionError("Unauthenticated fallback")),
+              self.assertRaises(subprocess.CalledProcessError) as raised):
+            release.native_source_file(release.UPSTREAM, "a" * 40, "Cargo.toml")
+        self.assertIs(raised.exception, failure)
+        authenticated.assert_called_once_with(
+            f"repos/{release.UPSTREAM}/contents/Cargo.toml?ref={'a' * 40}")
 
     def test_recipe_hash_tracks_product_code_but_ignores_policy_only_helpers(self):
         root = Path(release.__file__).resolve().parent.parent
@@ -684,6 +806,61 @@ class SharedZedReviewTests(unittest.TestCase):
         self.assertEqual(records[0]["inline"], [])
         self.assertEqual(records[0]["resolved_commits"], {"abcdef1": source})
 
+    def test_full_review_sources_require_existing_matching_repository_commits(self):
+        source = "abcdef1" + "b" * 33
+        candidate = {"schema": 1, "repository": "owner/zed", "upstream_sha": "a" * 40,
+                     "application_sha": "b" * 40, "configuration_sha": "c" * 40,
+                     "patchset_sha256": "d" * 64, "recipe_sha256": "e" * 64,
+                     "platform": "macos/aarch64"}
+        accepted = {"variable": {"value": json.dumps({
+            "publication": {"published_at": "2026-10-19T10:00:00Z"}})}}
+        pull = {"number": 7, "state": "closed", "updated_at": "2026-10-19T11:00:00Z",
+                "head": {"sha": source, "repo": {"full_name": "owner/zed"}}}
+        completion = {"id": 8, "created_at": "2026-10-19T10:30:00Z",
+                      "updated_at": "2026-10-19T10:30:00Z",
+                      "user": {"login": release.BOT, "type": "Bot"},
+                      "performed_via_github_app": {"slug": release.APP},
+                      "body": f"**Reviewed commit:** `{source}`"}
+        endpoint = f"repos/owner/zed/commits/{source}"
+        for outcome in ("valid", "missing", "mismatched"):
+            with self.subTest(outcome=outcome):
+                module = Mock()
+                module.review_history.return_value = {"findings": [], "dispositions": []}
+                reads = []
+
+                def native_api(route):
+                    reads.append(route)
+                    if "/pulls?" in route:
+                        return [pull]
+                    if route == "repos/owner/zed/pulls/7":
+                        return pull
+                    if route == endpoint:
+                        if outcome == "missing":
+                            raise ValueError("Native commit is missing")
+                        return {"sha": source if outcome == "valid" else "f" * 40}
+                    self.fail(f"Unexpected native read: {route}")
+
+                def native_pages(route):
+                    if route == "repos/owner/zed/issues/7/comments":
+                        return [completion]
+                    if route in {"repos/owner/zed/pulls/7/reviews", "repos/owner/zed/pulls/7/comments"}:
+                        return []
+                    self.fail(f"Unexpected native list: {route}")
+
+                with (patch.object(release.maintenance, "load", return_value=module),
+                      patch.object(release, "api", side_effect=native_api),
+                      patch.object(release, "pages", side_effect=native_pages)):
+                    if outcome == "valid":
+                        self.assertEqual(release.native_review_history(candidate, accepted),
+                                         {"findings": [], "dispositions": []})
+                        records = module.review_history.call_args.args[1]
+                        self.assertEqual(records[0]["resolved_commits"], {source: source})
+                    else:
+                        with self.assertRaises(ValueError):
+                            release.native_review_history(candidate, accepted)
+                        module.review_history.assert_not_called()
+                self.assertEqual(reads.count(endpoint), 1)
+
     def test_native_findings_and_snapshot_findings_both_reach_the_pair_evaluator(self):
         with patch.object(release, "product_recipe_sha256", return_value="e" * 64):
             candidate = release.maintenance_candidate(
@@ -738,6 +915,30 @@ class SharedZedReviewTests(unittest.TestCase):
 
 
 class SharedFinalArtifactReuseTests(unittest.TestCase):
+    def test_active_final_workflow_waits_without_a_new_reservation(self):
+        candidate = {"schema": 1, "repository": "owner/zed", "upstream_sha": "a" * 40,
+                     "application_sha": "b" * 40, "configuration_sha": "c" * 40,
+                     "patchset_sha256": "d" * 64, "recipe_sha256": "e" * 64,
+                     "platform": "macos/aarch64"}
+        history = {"complete": True, "baseline": {"publication": {
+                       "published_at": "2026-10-19T10:00:00Z"}}, "attempts": []}
+        decision = {"decision": "wait", "allowed": False,
+                    "reason": "An exact native final workflow is still active; do not overlap"}
+        module = Mock()
+        module.authorize_final.return_value = decision
+        with (patch.dict(os.environ, {"GITHUB_RUN_ID": "90", "GITHUB_RUN_ATTEMPT": "1"},
+                         clear=True),
+              patch.object(release, "final_attempt_history", return_value=(history, [])),
+              patch.object(release.maintenance, "load", return_value=module),
+              patch.object(release, "api") as native):
+            for allow_reuse in (False, True):
+                with self.subTest(allow_reuse=allow_reuse):
+                    self.assertEqual(release.authorize_shared_final(
+                        candidate, {}, allow_reuse=allow_reuse), decision)
+            native.assert_not_called()
+        self.assertEqual(module.authorize_final.call_count, 2)
+        module.authorize_final.assert_called_with(candidate, history)
+
     def test_repair_workflow_source_uses_exact_native_files_and_cached_source_keys(self):
         repo, head, base = "owner/zed", "a" * 40, "b" * 40
         run = {"id": 99, "run_attempt": 1, "head_sha": head,
@@ -777,11 +978,10 @@ class SharedFinalArtifactReuseTests(unittest.TestCase):
 
     def test_unproved_current_workflow_cannot_create_a_final_reservation(self):
         repo, sha = "owner/zed", "a" * 40
-        history = {"complete": True, "baseline": {"publication": {
-                       "published_at": "2026-10-19T10:00:00Z"}}, "attempts": []}
         module = Mock()
         module.authorize_final.return_value = {"decision": "allow", "candidate_id": "f" * 64}
         current = {"id": 99, "run_attempt": 1, "head_sha": "b" * 40}
+        history = {"baseline": {"publication": {"published_at": "2026-10-19T10:00:00Z"}}}
         with (patch.dict(os.environ, {"GITHUB_RUN_ID": "99", "GITHUB_RUN_ATTEMPT": "1",
                                      "GITHUB_SHA": sha, "CANDIDATE_PR": "7"}, clear=True),
               patch.object(release.maintenance, "load", return_value=module),
@@ -961,6 +1161,38 @@ class SharedFinalArtifactReuseTests(unittest.TestCase):
         self.assertEqual(result["artifact_names"], names)
         self.assertEqual(result["artifact_ids"], {name: index for index, name in enumerate(names.values(), 1)})
         module.authorize_final.assert_called_once()
+
+    def test_logical_artifact_keys_do_not_stand_in_for_exact_native_artifacts(self):
+        candidate = {"schema": 1, "repository": "owner/zed", "upstream_sha": "a" * 40,
+                     "application_sha": "b" * 40, "configuration_sha": "c" * 40,
+                     "patchset_sha256": "d" * 64, "recipe_sha256": "e" * 64,
+                     "platform": "macos/aarch64"}
+        candidate_id, run_id, attempt = "f" * 64, 12, 3
+        names = release.candidate_artifact_names(candidate["application_sha"], run_id, attempt)
+        final = {"schema": 1, "candidate_id": candidate_id, "run_id": run_id,
+                 "run_attempt": attempt, "workflow_sha": "9" * 40}
+        comment = {"id": 7, "created_at": "2026-10-19T11:00:00Z", "updated_at": "2026-10-19T11:00:00Z",
+                   "user": {"login": "owner", "type": "User"}, "body": "<!-- fork-candidate:v1 "
+                   + json.dumps(candidate, sort_keys=True, separators=(",", ":"))
+                   + " -->\n<!-- fork-final:v1 "
+                   + json.dumps(final, sort_keys=True, separators=(",", ":")) + " -->"}
+        artifacts = [{"id": index, "name": role, "expired": False, "size_in_bytes": 100,
+                      "digest": "sha256:" + "a" * 64,
+                      "workflow_run": {"id": run_id}}
+                     for index, role in enumerate(names, start=1)]
+        module = Mock()
+        module.candidate_identity.return_value = candidate_id
+        module.authorize_final.return_value = {"decision": "already-validated", "candidate_id": candidate_id,
+            "validated_run": {"id": run_id, "run_attempt": attempt}}
+        with (patch.dict(os.environ, {"GITHUB_RUN_ID": "90", "GITHUB_RUN_ATTEMPT": "1"}, clear=True),
+              patch.object(release, "final_attempt_history", return_value=(
+                  {"complete": True, "baseline": {"publication": {"published_at": "2026-10-19T10:00:00Z"}}},
+                  [comment])),
+              patch.object(release, "reservations_from_history_comments", return_value=[]),
+              patch.object(release.maintenance, "load", return_value=module),
+              patch.object(release, "api", return_value={"total_count": 2, "artifacts": artifacts}),
+              self.assertRaisesRegex(ValueError, "missing one exact artifact")):
+            release.authorize_shared_final(candidate, {})
 
     def test_adopted_repair_receipt_keeps_the_runtime_config_and_all_asset_blobs_bound(self):
         repo, version = "owner/zed", "1.2.3"
@@ -1615,6 +1847,111 @@ class FrozenPublicExecutionTests(unittest.TestCase):
                         {**owner, "updated_at": "2026-10-19T11:00:01Z"}):
             with self.subTest(comment=invalid), self.assertRaises(ValueError):
                 release.reservations_from_history_comments([invalid], owner="owner")
+
+
+class UnfinishedSourceSnapshotTests(unittest.TestCase):
+    def fixture(self):
+        repo, config, application, upstream, context = (
+            "owner/zed", "a" * 40, "b" * 40, "c" * 40, "d" * 40)
+        candidate = {"schema": 1, "repository": repo, "configuration_sha": config,
+                     "application_sha": application, "upstream_sha": upstream,
+                     "patchset_sha256": "e" * 64, "recipe_sha256": "9" * 64,
+                     "platform": "macos/aarch64"}
+        refs = [{"ref": f"refs/heads/review/{context}",
+                 "object": {"type": "commit", "sha": context}}]
+        commits = {
+            f"repos/{repo}/git/commits/{context}": {
+                "sha": context, "message": "fork-review-context:v1 " + "f" * 64,
+                "parents": [{"sha": application}], "tree": {"sha": "8" * 40}},
+            f"repos/{repo}/git/commits/{application}": {
+                "sha": application, "tree": {"sha": "8" * 40}},
+            f"repos/{release.UPSTREAM}/commits/v1.2.3": {"sha": upstream},
+            f"repos/{repo}/git/matching-refs/heads/review/": refs,
+        }
+        return repo, candidate, context, refs, commits
+
+    def selector(self, *, claimed=(), mutate=None, identity=None):
+        repo, candidate, context, refs, commits = self.fixture()
+        if mutate is not None:
+            mutate(refs, commits)
+        module = Mock()
+        module.candidate_identity.return_value = identity or "f" * 64
+
+        def native_pages(route):
+            if route == f"repos/{repo}/pulls?state=all":
+                return list(claimed)
+            self.fail(f"Unexpected native inventory: {route}")
+
+        with (patch.object(release, "pages", side_effect=native_pages),
+              patch.object(release, "api", side_effect=lambda route: commits[route]) as native,
+              patch.object(release.maintenance, "load", return_value=module),
+              patch.object(release, "maintenance_candidate", return_value=candidate) as build,
+              patch.object(release, "native_source_file",
+                           return_value=b'[package]\nversion = "1.2.3"\n') as cargo,
+              patch.object(release, "run") as command):
+            result = release.pending_source_snapshot(
+                repo, candidate["configuration_sha"], candidate["patchset_sha256"])
+            command.assert_not_called()
+        return result, candidate, context, native, build, cargo
+
+    def test_unposted_context_pins_exact_official_source_without_writing_refs(self):
+        result, candidate, context, _, build, cargo = self.selector()
+        self.assertEqual(result, {"candidate": candidate, "review_sha": context})
+        build.assert_called_once_with(
+            candidate["repository"], candidate["configuration_sha"],
+            candidate["application_sha"], candidate["upstream_sha"],
+            candidate["patchset_sha256"])
+        cargo.assert_called_once_with(candidate["repository"], candidate["application_sha"],
+                                      "crates/zed/Cargo.toml")
+
+    def test_archived_pr_and_different_configuration_do_not_become_pending_work(self):
+        repo, _, context, _, _ = self.fixture()
+        archived = {"state": "closed", "head": {
+            "ref": f"review/{context}", "repo": {"full_name": repo}}}
+        result, _, _, native, _, _ = self.selector(claimed=[archived])
+        self.assertIsNone(result)
+        native.assert_called_once_with(f"repos/{repo}/git/matching-refs/heads/review/")
+        self.assertIsNone(self.selector(identity="0" * 64)[0])
+
+    def test_inconsistent_and_ambiguous_contexts_fail_before_any_mutation(self):
+        repo, _, context, _, _ = self.fixture()
+        route = f"repos/{repo}/git/commits/{context}"
+        for change in ({"parents": []}, {"tree": {"sha": "0" * 40}}):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "context"):
+                self.selector(mutate=lambda refs, commits: commits[route].update(change))
+
+        def duplicate(refs, commits):
+            other = "7" * 40
+            refs.append({"ref": f"refs/heads/review/{other}",
+                         "object": {"type": "commit", "sha": other}})
+            commits[f"repos/{repo}/git/commits/{other}"] = {
+                **commits[route], "sha": other}
+
+        with self.assertRaisesRegex(ValueError, "Multiple unfinished"):
+            self.selector(mutate=duplicate)
+
+    def test_prepare_requires_actual_patch_reproduction_before_requesting_a_pr(self):
+        repo, candidate, context, _, _ = self.fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            with (patch.dict(os.environ, {"GITHUB_REPOSITORY": repo,
+                                         "GITHUB_SHA": candidate["configuration_sha"]}),
+                  patch.object(release, "output"),
+                  patch.object(release, "mirror_main"),
+                  patch.object(release, "api", return_value={"sha": candidate["configuration_sha"]}) as native,
+                  patch.object(release, "proposal", return_value=None),
+                  patch.object(release, "patch_identity",
+                               return_value=([Path(temporary) / "patch"], candidate["patchset_sha256"])),
+                  patch.object(release, "active_snapshot", return_value=None),
+                  patch.object(release, "pending_source_snapshot",
+                               return_value={"candidate": candidate, "review_sha": context}),
+                  patch.object(release, "select_upstream") as latest,
+                  patch.object(release, "policy_snapshot", return_value={}),
+                  patch.object(release, "run", side_effect=lambda *args, **kwargs:
+                               "0" * 40 if args == ("git", "rev-parse", "HEAD") else ""),
+                  self.assertRaisesRegex(ValueError, "did not reproduce")):
+                release.prepare(Path(temporary) / "application", shared=True)
+            latest.assert_not_called()
+            native.assert_called_once_with(f"repos/{repo}/commits/downstream")
 
 
 if __name__ == "__main__":
