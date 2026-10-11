@@ -65,6 +65,7 @@ pub struct ThreadItem {
     on_hover: Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>,
     action_slot: Option<AnyElement>,
     base_bg: Option<Hsla>,
+    compact: bool,
 }
 
 impl ThreadItem {
@@ -100,6 +101,7 @@ impl ThreadItem {
             on_hover: Box::new(|_, _, _| {}),
             action_slot: None,
             base_bg: None,
+            compact: false,
         }
     }
 
@@ -247,10 +249,18 @@ impl ThreadItem {
         self.base_bg = Some(color);
         self
     }
+
+    /// Renders a single line at the height of the tab bar; the metadata appears on hover.
+    pub fn compact(mut self, compact: bool) -> Self {
+        self.compact = compact;
+        self
+    }
 }
 
 impl RenderOnce for ThreadItem {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let compact = self.compact;
+        let hovered = self.hovered;
         let color = cx.theme().colors();
         let raw_bg = self.base_bg.unwrap_or(color.surface_background);
         // The fade gradient paints a solid color over the title to blend it into
@@ -426,6 +436,35 @@ impl RenderOnce for ThreadItem {
             || has_worktree
             || has_diff_stats
             || has_timestamp;
+        // A compact row has room for one line: on hover it trades the always visible title
+        // for the metadata a regular row shows on its second line.
+        let show_title = !(compact && hovered && has_metadata);
+
+        let action_slot = self.action_slot.filter(|_| hovered).map(|slot| {
+            h_flex()
+                .relative()
+                // In compact mode the metadata sits right before the actions; the fade would hide it.
+                .when(opaque_window && !compact, |this| {
+                    this.child(
+                        GradientFade::new(base_bg, hover_bg, active_bg)
+                            .width(px(120.0))
+                            .right(px(8.))
+                            .gradient_stop(0.90)
+                            .group_name("thread-item"),
+                    )
+                })
+                .child(
+                    h_flex()
+                        .pr_1p5()
+                        .child(slot)
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
+                )
+        });
+        let (title_row_action_slot, trailing_action_slot) = if compact {
+            (None, action_slot.map(|slot| slot.flex_none()))
+        } else {
+            (action_slot, None)
+        };
 
         v_flex()
             .id(self.id.clone())
@@ -435,8 +474,17 @@ impl RenderOnce for ThreadItem {
             .flex_shrink_0()
             .overflow_hidden()
             .w_full()
-            .py_1()
             .px_1p5()
+            .map(|this| {
+                if compact {
+                    this.flex_row()
+                        .items_center()
+                        .gap_2()
+                        .h(crate::Tab::container_height(cx))
+                } else {
+                    this.py_1()
+                }
+            })
             .when(self.selected, |s| s.bg(color.ghost_element_selected))
             .border_1()
             .border_r_2()
@@ -450,6 +498,13 @@ impl RenderOnce for ThreadItem {
                 h_flex()
                     .min_w_0()
                     .w_full()
+                    .when(compact, |this| {
+                        if show_title {
+                            this.w_auto().flex_auto().relative()
+                        } else {
+                            this.w_auto().flex_none()
+                        }
+                    })
                     .h_6()
                     .gap_2()
                     .justify_between()
@@ -458,44 +513,22 @@ impl RenderOnce for ThreadItem {
                             .id("content")
                             .min_w_0()
                             .flex_1()
+                            .when(compact, |this| this.overflow_hidden())
                             .gap_1p5()
                             .child(icon)
-                            .child(title_label),
+                            .when(show_title, |this| this.child(title_label)),
                     )
-                    .when(self.is_truncated && opaque_window, |this| {
+                    .when(self.is_truncated && opaque_window && show_title, |this| {
                         this.child(gradient_overlay)
                     })
-                    .when(self.hovered, |this| {
-                        this.when_some(self.action_slot, |this, slot| {
-                            this.child(
-                                h_flex()
-                                    .relative()
-                                    .when(opaque_window, |this| {
-                                        this.child(
-                                            GradientFade::new(base_bg, hover_bg, active_bg)
-                                                .width(px(120.0))
-                                                .right(px(8.))
-                                                .gradient_stop(0.90)
-                                                .group_name("thread-item"),
-                                        )
-                                    })
-                                    .child(
-                                        h_flex()
-                                            .pr_1p5()
-                                            .child(slot)
-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                cx.stop_propagation()
-                                            }),
-                                    ),
-                            )
-                        })
-                    }),
+                    .children(title_row_action_slot),
             )
-            .when(has_metadata, |this| {
+            .when(has_metadata && (!compact || hovered), |this| {
                 this.child(
                     h_flex()
                         .gap_1p5()
-                        .child(icon_container()) // Icon Spacing
+                        .when(compact, |this| this.flex_1().min_w_0().overflow_hidden())
+                        .when(!compact, |this| this.child(icon_container())) // Icon Spacing
                         .when(self.archived, |this| {
                             this.child(
                                 Icon::new(IconName::Archive).size(IconSize::XSmall).color(
@@ -614,6 +647,7 @@ impl RenderOnce for ThreadItem {
                         }),
                 )
             })
+            .children(trailing_action_slot)
             .when(show_tooltip, |this| {
                 let status = self.status;
                 this.tooltip(Tooltip::element(move |_, _| match status {

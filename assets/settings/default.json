@@ -1195,6 +1195,8 @@
       "default_width": 300,
       // Automatically open the Threads Sidebar when opening a folder in an existing window.
       "auto_open": true,
+      // Show each thread on a single line at the height of the tab bar, with its details on hover.
+      "compact": false,
     },
     // Default fixed width when the agent panel is docked to the left or right and
     // `flexible` is false.

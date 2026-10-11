@@ -151,7 +151,7 @@ Open the Settings Editor and search for “Threads Sidebar Position”. Or add t
 
 **Options**
 
-Numbers from `200` to `800` pixels (inclusive). Values outside this range are clamped to the nearest limit.
+Numbers from `100` to `800` pixels (inclusive). Values outside this range are clamped to the nearest limit.
 
 Open the Settings Editor and search for “Threads Sidebar Default Width”. Or add this to your `settings.json`:
 
