@@ -12,6 +12,9 @@
     "dark": "One Dark",
   },
   "icon_theme": "Zed (Default)",
+  // Whether rows in the project, git and outline panels take the tab bar height,
+  // so they line up with the tab bar and the sticky rows of the project panel.
+  "panel_rows_tab_height": false,
   // The name of a base set of key bindings to use.
   // This setting can take the following values:
   //
@@ -609,6 +612,8 @@
     "agent_review": true,
     // Whether to show code action buttons in the editor toolbar.
     "code_actions": false,
+    // Whether to shrink the pane toolbar to the height of the tab bar.
+    "compact": false,
   },
   // Whether to allow windows to tab together based on the user's tabbing preference (macOS only).
   "use_system_window_tabs": false,

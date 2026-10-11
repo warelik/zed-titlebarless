@@ -99,7 +99,7 @@ use ui::{
 use util::ResultExt as _;
 use workspace::{
     CollaboratorId, DraggedSelection, DraggedTab, MultiWorkspace, PathList, SerializedPathList,
-    ToggleWorkspaceSidebar, ToggleZoom, ToolbarItemView, Workspace, WorkspaceId,
+    ToggleWorkspaceSidebar, ToggleZoom, Toolbar, ToolbarItemView, Workspace, WorkspaceId,
     dock::{DockPosition, Panel, PanelEvent},
     item::{ItemEvent, ItemHandle},
 };
@@ -6679,7 +6679,9 @@ impl Render for AgentPanel {
                                     v_flex()
                                         .group("toolbar")
                                         .relative()
-                                        .py(DynamicSpacing::Base06.rems(cx))
+                                        .when(Toolbar::compact_row_height(cx).is_none(), |this| {
+                                            this.py(DynamicSpacing::Base06.rems(cx))
+                                        })
                                         .px(DynamicSpacing::Base08.rems(cx))
                                         .border_b_1()
                                         .border_color(cx.theme().colors().border_variant)

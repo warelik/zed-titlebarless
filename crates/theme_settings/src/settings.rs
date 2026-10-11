@@ -96,6 +96,8 @@ pub struct ThemeSettings {
     pub theme_overrides: HashMap<String, settings::ThemeStyleContent>,
     /// The current icon theme selection.
     pub icon_theme: IconThemeSelection,
+    /// Whether rows in the project, git and outline panels take the tab bar height.
+    pub panel_rows_tab_height: bool,
     /// The density of the UI.
     /// Note: This setting is still experimental. See [this tracking issue](
     pub ui_density: UiDensity,
@@ -798,6 +800,7 @@ impl settings::Settings for ThemeSettings {
             experimental_theme_overrides: content.experimental_theme_overrides.clone(),
             theme_overrides: content.theme_overrides.clone(),
             icon_theme: icon_theme_selection,
+            panel_rows_tab_height: content.panel_rows_tab_height.unwrap_or(false),
             ui_density: ui_density_from_settings(content.ui_density.unwrap_or_default()),
             shadows: ShadowSettings {
                 project_panel: shadows
@@ -813,6 +816,19 @@ impl settings::Settings for ThemeSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_theme_settings_defaults_when_fields_none() {
+        let mut raw: ::settings::SettingsContent =
+            ::settings::parse_json_with_comments(&::settings::default_settings()).unwrap();
+        raw.theme.shadows = None;
+        raw.theme.panel_rows_tab_height = None;
+
+        let settings = ThemeSettings::from_settings(&raw);
+        assert!(!settings.panel_rows_tab_height);
+        assert!(settings.shadows.project_panel);
+        assert!(settings.shadows.minimap);
+    }
 
     fn theme_with_colors(colors: ::settings::ThemeColorsContent) -> Theme {
         crate::refine_theme(&crate::ThemeContent {

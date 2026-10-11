@@ -3,7 +3,7 @@ use gpui::{
 };
 use ui::prelude::*;
 use workspace::{
-    ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
+    Toolbar, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
     item::{HighlightedText, ItemEvent, ItemHandle},
 };
 
@@ -50,7 +50,7 @@ impl Render for Breadcrumbs {
         let element = h_flex()
             .id("breadcrumb-container")
             .flex_grow_1()
-            .h_8()
+            .h(Toolbar::row_height(cx))
             .overflow_x_scroll()
             .text_ui(cx);
 

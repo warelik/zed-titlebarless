@@ -6203,8 +6203,11 @@ impl ProjectPanel {
                     .into_owned()
             });
 
+        let row_height = workspace::panel_row_height(cx);
+
         div()
             .id(id.clone())
+            .when_some(row_height, |this, height| this.h(height))
             .relative()
             .group(GROUP_NAME)
             .when_some(
@@ -6581,6 +6584,7 @@ impl ProjectPanel {
             )
             .child(
                 ListItem::new(id)
+                    .when(row_height.is_some(), |this| this.height(relative(1.)))
                     .indent_level(depth)
                     .indent_step_size(px(settings.indent_size))
                     .spacing(match settings.entry_spacing {

@@ -6,7 +6,7 @@ use db::kvp::KeyValueStore;
 use gpui::{App, EntityId, EventEmitter, Subscription};
 use ui::{IconButtonShape, Tooltip, prelude::*};
 use workspace::item::{ItemBufferKind, ItemEvent, ItemHandle};
-use workspace::{ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView};
+use workspace::{Toolbar, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView};
 
 pub struct MultibufferHint {
     shown_on: HashSet<EntityId>,
@@ -136,7 +136,9 @@ impl Render for MultibufferHint {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .px_2()
-            .py_0p5()
+            .when(Toolbar::compact_row_height(cx).is_none(), |this| {
+                this.py_0p5()
+            })
             .justify_between()
             .bg(cx.theme().status().info_background.opacity(0.5))
             .border_1()
