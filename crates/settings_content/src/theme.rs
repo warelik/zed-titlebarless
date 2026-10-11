@@ -221,6 +221,10 @@ pub struct ThemeSettingsContent {
     pub theme: Option<ThemeSelection>,
     /// The name of the icon theme to use.
     pub icon_theme: Option<IconThemeSelection>,
+    /// Whether rows in the project, git and outline panels take the tab bar height.
+    ///
+    /// Default: false
+    pub panel_rows_tab_height: Option<bool>,
 
     /// UNSTABLE: Expect many elements to be broken.
     ///

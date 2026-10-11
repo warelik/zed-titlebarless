@@ -334,6 +334,12 @@ pub fn title_bar_in_status_bar(cx: &App) -> bool {
 /// Where stock Zed puts the traffic lights; the title bar is centred on them.
 pub const TRAFFIC_LIGHT_INSET: Pixels = px(9.);
 
+pub fn panel_row_height(cx: &App) -> Option<Pixels> {
+    ThemeSettings::get_global(cx)
+        .panel_rows_tab_height
+        .then(|| ui::Tab::container_height(cx))
+}
+
 /// Without the title bar the traffic lights are centred between the window's top edge and the
 /// bottom border of the tab-height header beside them, as far from the left edge as from the top.
 /// The button size depends on the macOS SDK, so it is only known once the window exists; until
