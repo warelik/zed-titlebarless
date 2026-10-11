@@ -1,7 +1,10 @@
 use crate::focus_follows_mouse::FocusFollowsMouse as _;
 use crate::persistence::model::DockData;
 use crate::status_bar::HideStatusItem;
-use crate::{DraggedDock, Event, FocusFollowsMouse, ModalLayer, Pane, WorkspaceSettings};
+use crate::{
+    DraggedDock, Event, FocusFollowsMouse, ModalLayer, Pane, WorkspaceSettings, traffic_light_row,
+    traffic_lights_overlay_workspace,
+};
 use crate::{Workspace, status_bar::StatusItemView};
 use anyhow::Context as _;
 use client::proto;
@@ -1268,10 +1271,14 @@ impl Dock {
 }
 
 impl Render for Dock {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dispatch_context = Self::dispatch_context();
         if let Some(entry) = self.visible_entry() {
             let position = self.position;
+            let top_spacer = (position == DockPosition::Left
+                && traffic_lights_overlay_workspace(window, cx))
+            .then(|| traffic_light_row(window, cx));
+            let has_top_spacer = top_spacer.is_some();
             let create_resize_handle = || {
                 let handle = div()
                     .id("resize-handle")
@@ -1343,6 +1350,7 @@ impl Render for Dock {
                 .map(|this| match self.position().axis() {
                     // Width and height are always set on the workspace wrapper in
                     // render_dock, so fill whatever space the wrapper provides.
+                    Axis::Horizontal if has_top_spacer => this.w_full().h_full().flex_col(),
                     Axis::Horizontal => this.w_full().h_full().flex_row(),
                     Axis::Vertical => this.h_full().w_full().flex_col(),
                 })
@@ -1351,9 +1359,11 @@ impl Render for Dock {
                     DockPosition::Right => this.border_l_1(),
                     DockPosition::Bottom => this.border_t_1(),
                 })
+                .children(top_spacer)
                 .child(
                     div()
                         .map(|this| match self.position().axis() {
+                            Axis::Horizontal if has_top_spacer => this.w_full().flex_1().min_h_0(),
                             Axis::Horizontal => this.w_full().h_full(),
                             Axis::Vertical => this.h_full().w_full(),
                         })
