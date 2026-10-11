@@ -4,6 +4,7 @@ use settings::Settings;
 use theme_settings::ThemeSettings;
 use ui::{IconButton, IconButtonShape};
 use ui::{Tooltip, prelude::*};
+use workspace::Toolbar;
 
 pub(super) enum HistoryNavigationDirection {
     Previous,
@@ -66,11 +67,39 @@ pub(super) fn render_action_button(
     })
 }
 
-pub(crate) fn input_base_styles(border_color: Hsla, map: impl FnOnce(Div) -> Div) -> Div {
+/// Wraps a search editor. The vertical padding of stock rows does not fit a compact row, and
+/// the editor is centred in the row either way.
+pub(crate) fn text_input_cell(cx: &App) -> Div {
+    div()
+        .flex_1()
+        .when(Toolbar::compact_row_height(cx).is_none(), |this| {
+            this.py_1()
+        })
+}
+
+/// A search error shown under its input row. Stock tucks it 4px under the row (`mt_neg_1`
+/// against the stack's `gap_2`). A compact stack has no gap, so there the message gets a row of
+/// its own, as tall as the input rows, with the text centred in it.
+pub(crate) fn error_line(message: impl Into<SharedString>, cx: &App) -> AnyElement {
+    let label = Label::new(message)
+        .size(LabelSize::Small)
+        .color(Color::Error)
+        .ml_2();
+    match Toolbar::compact_row_height(cx) {
+        Some(_) => v_flex()
+            .min_h(Toolbar::row_height(cx))
+            .justify_center()
+            .child(label)
+            .into_any_element(),
+        None => label.mt_neg_1().into_any_element(),
+    }
+}
+
+pub(crate) fn input_base_styles(border_color: Hsla, map: impl FnOnce(Div) -> Div, cx: &App) -> Div {
     h_flex()
         .map(map)
         .min_w_32()
-        .min_h_8()
+        .min_h(Toolbar::row_height(cx))
         .pl_2()
         .pr_1()
         .border_1()
@@ -82,7 +111,7 @@ pub(crate) fn filter_search_results_input(
     map: impl FnOnce(Div) -> Div,
     cx: &App,
 ) -> Div {
-    input_base_styles(border_color, map).pl_0().child(
+    input_base_styles(border_color, map, cx).pl_0().child(
         h_flex()
             .mr_2()
             .px_2()
