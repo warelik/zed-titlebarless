@@ -61,6 +61,8 @@ pub struct ItemSettings {
     pub file_icons: bool,
     pub show_diagnostics: ShowDiagnostics,
     pub show_close_button: ShowCloseButton,
+    pub min_width: Option<Pixels>,
+    pub max_width: Option<Pixels>,
 }
 
 #[derive(RegisterSetting)]
@@ -91,6 +93,8 @@ impl Settings for ItemSettings {
             file_icons: tabs.file_icons.unwrap(),
             show_diagnostics: tabs.show_diagnostics.unwrap(),
             show_close_button: tabs.show_close_button.unwrap(),
+            min_width: tabs.min_width.map(|width| gpui::px(width.0)),
+            max_width: tabs.max_width.map(|width| gpui::px(width.0)),
         }
     }
 }

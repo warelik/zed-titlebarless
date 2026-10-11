@@ -211,6 +211,15 @@ pub struct ItemSettingsContent {
     ///
     /// Default: false
     pub show_close_button: Option<ShowCloseButton>,
+    /// Minimum width of a tab in pixels. `null` keeps tabs as wide as their title.
+    ///
+    /// Default: null
+    pub min_width: Option<crate::PixelSetting>,
+    /// Maximum width of a tab in pixels. Longer titles are truncated in the middle.
+    /// `null` keeps tabs as wide as their title.
+    ///
+    /// Default: null
+    pub max_width: Option<crate::PixelSetting>,
 }
 
 #[with_fallible_options]
@@ -560,6 +569,18 @@ pub struct TabBarSettingsContent {
     ///
     /// Default: false
     pub show_pinned_tabs_in_separate_row: Option<bool>,
+    /// Whether to render pinned tabs as compact borderless chips.
+    ///
+    /// Default: false
+    pub pinned_tab_chips: Option<bool>,
+    /// Whether to render unpinned tabs as compact borderless chips.
+    ///
+    /// Default: false
+    pub unpinned_tab_chips: Option<bool>,
+    /// Maximum number of rows for unpinned tabs when both `tabs.min_width` and `tabs.max_width` are set.
+    ///
+    /// Default: 1
+    pub max_tab_rows: Option<u32>,
 }
 
 #[with_fallible_options]
