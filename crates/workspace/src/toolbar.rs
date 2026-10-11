@@ -1,9 +1,10 @@
-use crate::ItemHandle;
+use crate::{ItemHandle, WorkspaceSettings};
 use gpui::{
     AnyView, App, Context, Div, Entity, EntityId, EventEmitter, Global, KeyContext,
     ParentElement as _, Render, Styled, Window,
 };
 use language::LanguageRegistry;
+use settings::Settings as _;
 use std::sync::Arc;
 use ui::prelude::*;
 use ui::{h_flex, v_flex};
@@ -69,6 +70,23 @@ pub struct Toolbar {
 }
 
 impl Toolbar {
+    /// Height of one toolbar row under `toolbar.compact`, `None` when the setting is off. A tab's
+    /// content height plus the toolbar's 1px bottom border equals the tab bar height, so a
+    /// single-row toolbar is exactly as tall as the tab bar; every row nested in the toolbar
+    /// (search inputs, breadcrumbs) derives its height from here.
+    pub fn compact_row_height(cx: &App) -> Option<Pixels> {
+        WorkspaceSettings::get_global(cx)
+            .compact_toolbar
+            .then(|| ui::Tab::content_height(cx))
+    }
+
+    pub fn row_height(cx: &App) -> gpui::DefiniteLength {
+        match Self::compact_row_height(cx) {
+            Some(height) => height.into(),
+            None => rems(2.0).into(),
+        }
+    }
+
     fn has_any_visible_items(&self) -> bool {
         self.items
             .iter()
@@ -116,15 +134,19 @@ impl Render for Toolbar {
 
         let has_left_items = self.left_items().count() > 0;
         let has_right_items = self.right_items().count() > 0;
+        let compact_height = Self::compact_row_height(cx);
 
         v_flex()
             .group("toolbar")
             .relative()
-            .py(DynamicSpacing::Base06.rems(cx))
-            .px(DynamicSpacing::Base08.rems(cx))
-            .when(has_left_items || has_right_items, |this| {
-                this.gap(DynamicSpacing::Base06.rems(cx))
+            .when(compact_height.is_none(), |this| {
+                this.py(DynamicSpacing::Base06.rems(cx))
             })
+            .px(DynamicSpacing::Base08.rems(cx))
+            .when(
+                (has_left_items || has_right_items) && compact_height.is_none(),
+                |this| this.gap(DynamicSpacing::Base06.rems(cx)),
+            )
             .border_b_1()
             .border_color(cx.theme().colors().border_variant)
             .bg(cx.theme().colors().toolbar_background)
@@ -137,7 +159,7 @@ impl Render for Toolbar {
                         .when(has_left_items, |this| {
                             this.child(
                                 h_flex()
-                                    .min_h_8()
+                                    .min_h(Self::row_height(cx))
                                     .flex_auto()
                                     .justify_start()
                                     .overflow_x_hidden()
@@ -147,7 +169,7 @@ impl Render for Toolbar {
                         .when(has_right_items, |this| {
                             this.child(
                                 h_flex()
-                                    .h_8()
+                                    .h(Self::row_height(cx))
                                     .flex_row_reverse()
                                     .when(has_left_items, |this| this.flex_none())
                                     .justify_end()
@@ -156,7 +178,18 @@ impl Render for Toolbar {
                         }),
                 )
             })
-            .children(secondary_items)
+            // Without the wrapper a content-sized notice would be taller or shorter than the
+            // search rows, which are whole compact rows.
+            .children(secondary_items.map(|item| {
+                match compact_height {
+                    Some(height) => v_flex()
+                        .min_h(height)
+                        .justify_center()
+                        .child(item)
+                        .into_any_element(),
+                    None => item.into_any_element(),
+                }
+            }))
     }
 }
 

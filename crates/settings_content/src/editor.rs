@@ -400,6 +400,10 @@ pub struct ToolbarContent {
     ///
     /// Default: false
     pub code_actions: Option<bool>,
+    /// Whether to shrink the pane toolbar to the height of the tab bar.
+    ///
+    /// Default: false
+    pub compact: Option<bool>,
 }
 
 /// Scrollbar related settings
