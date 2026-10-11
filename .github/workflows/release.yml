@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Upstream tag to build (defaults to the latest stable release)
+        required: false
+      force:
+        description: Rebuild even if the release already exists
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          tag="${INPUT_TAG:-$(gh release view --repo zed-industries/zed --json tagName --jq .tagName)}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ "$FORCE" != true ] && gh release view "$tag-titlebarless" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: macos-15
+    timeout-minutes: 355
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+      RELEASE: ${{ needs.check.outputs.tag }}-titlebarless
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: fork
+
+      - name: Check out upstream and apply patches
+        run: |
+          git clone --depth 1 --branch "$TAG" https://github.com/zed-industries/zed.git zed
+          cd zed
+          git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com am ../fork/patches/*.patch
+
+      - name: Free disk space
+        run: |
+          df -h /
+          keep=$(realpath "$(xcode-select -p)/../..")
+          for xcode in /Applications/Xcode*.app; do
+            [ "$(realpath "$xcode")" = "$keep" ] || sudo rm -rf "$xcode"
+          done
+          sudo rm -rf ~/Library/Android /usr/local/share/dotnet ~/.dotnet ~/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Build
+        working-directory: zed
+        env:
+          ALLOW_MISSING_LICENSES: 1
+          CARGO_PROFILE_RELEASE_DEBUG: "false"
+          ZED_UPDATE_MANIFEST_URL: https://github.com/${{ github.repository }}/releases/latest/download/latest.json
+        run: ./script/bundle-mac aarch64-apple-darwin
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${TAG#v}"
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE/Zed-aarch64.dmg"
+          printf '{"version":"%s","url":"%s"}\n' "$version" "$url" > latest.json
+          {
+            echo "Zed [$TAG](https://github.com/zed-industries/zed/releases/tag/$TAG) + [patches](https://github.com/$GITHUB_REPOSITORY/tree/$GITHUB_SHA/patches)."
+            echo
+            cat fork/RELEASE_NOTES.md
+          } > notes.md
+          if gh release view "$RELEASE" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release delete "$RELEASE" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          fi
+          gh release create "$RELEASE" zed/target/aarch64-apple-darwin/release/Zed-aarch64.dmg latest.json \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Zed $version titlebarless (macOS arm64)" --notes-file notes.md

@@ -1,0 +1,814 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: warelik <warelik@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 11:28:27 +0300
+Subject: [PATCH] Add setting to move the title bar contents into the status
+ bar
+
+---
+ assets/settings/default.json                |   2 +
+ crates/agent_ui/src/threads_archive_view.rs |  20 ++-
+ crates/settings/src/vscode_import.rs        |   1 +
+ crates/settings_content/src/workspace.rs    |   4 +
+ crates/settings_ui/src/page_data.rs         |  18 ++-
+ crates/sidebar/src/sidebar.rs               |  20 ++-
+ crates/title_bar/src/title_bar.rs           |  35 ++++--
+ crates/workspace/src/dock.rs                |  23 +++-
+ crates/workspace/src/pane.rs                |  39 +++++-
+ crates/workspace/src/status_bar.rs          |  17 ++-
+ crates/workspace/src/workspace.rs           | 128 +++++++++++++++++++-
+ crates/workspace/src/workspace_settings.rs  |   2 +
+ crates/zed/src/zed.rs                       |   2 +-
+ docs/src/reference/all-settings.md          |  10 ++
+ docs/src/visual-customization.md            |   2 +
+ 15 files changed, 297 insertions(+), 26 deletions(-)
+
+diff --git a/assets/settings/default.json b/assets/settings/default.json
+index 1228f8b859..e981fe7d91 100644
+--- a/assets/settings/default.json
++++ b/assets/settings/default.json
+@@ -606,6 +606,8 @@
+   //    on notched displays, the area around the notch.
+   //     "simple"
+   "fullscreen_mode": "native",
++  // Whether to hide the title bar and show its contents in the status bar instead.
++  "title_bar_to_status_bar": false,
+   // Titlebar related settings
+   "title_bar": {
+     // Whether to show git status indicators on the branch icon in the titlebar.
+diff --git a/crates/agent_ui/src/threads_archive_view.rs b/crates/agent_ui/src/threads_archive_view.rs
+index fd1f69de8c..8b17078ffa 100644
+--- a/crates/agent_ui/src/threads_archive_view.rs
++++ b/crates/agent_ui/src/threads_archive_view.rs
+@@ -856,7 +856,7 @@ impl ThreadsArchiveView {
+         .detach_and_log_err(cx);
+     }
+ 
+-    fn render_header(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
++    fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+         let has_query = !self.filter_editor.read(cx).text(cx).is_empty();
+         let sidebar_on_left = matches!(
+             AgentSettings::get_global(cx).sidebar_side(),
+@@ -868,7 +868,12 @@ impl ThreadsArchiveView {
+         let left_window_controls = !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_left;
+         let right_window_controls =
+             !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_right;
+-        let header_height = platform_title_bar_height(window);
++        let in_status_bar = workspace::WorkspaceSettings::get_global(cx).title_bar_to_status_bar;
++        let header_height = if in_status_bar {
++            Tab::container_height(cx)
++        } else {
++            platform_title_bar_height(window)
++        };
+         let show_focus_keybinding =
+             self.selection.is_some() && !self.filter_editor.focus_handle(cx).is_focused(window);
+ 
+@@ -881,6 +886,7 @@ impl ThreadsArchiveView {
+                     right_window_controls,
+                     false,
+                 ),
++                Decorations::Server if in_status_bar => header,
+                 Decorations::Server => header.mt_px().pb_px(),
+             })
+             .when(left_window_controls, |this| {
+@@ -895,6 +901,16 @@ impl ThreadsArchiveView {
+                     this
+                 }
+             })
++            .when(traffic_lights && in_status_bar, |this| {
++                this.child(
++                    workspace::move_window_on_drag(div().id("traffic-light-area"), window, cx)
++                        .absolute()
++                        .top_0()
++                        .left_0()
++                        .h_full()
++                        .w(px(ui::utils::TRAFFIC_LIGHT_PADDING)),
++                )
++            })
+             .when(!right_window_controls, |this| this.pr_1p5())
+             .gap_1()
+             .justify_between()
+diff --git a/crates/settings/src/vscode_import.rs b/crates/settings/src/vscode_import.rs
+index 7248c1ab19..f4d59b06b2 100644
+--- a/crates/settings/src/vscode_import.rs
++++ b/crates/settings/src/vscode_import.rs
+@@ -1094,6 +1094,7 @@ impl VsCodeSettings {
+             reveal_if_open: self.read_bool("workbench.editor.revealIfOpen"),
+             restore_on_startup: None,
+             window_decorations: None,
++            title_bar_to_status_bar: None,
+             show_call_status_icon: None,
+             use_system_path_prompts: self.read_bool("files.simpleDialog.enable").map(|b| !b),
+             use_system_prompts: None,
+diff --git a/crates/settings_content/src/workspace.rs b/crates/settings_content/src/workspace.rs
+index dbcb6fc414..fd227a3b2e 100644
+--- a/crates/settings_content/src/workspace.rs
++++ b/crates/settings_content/src/workspace.rs
+@@ -169,6 +169,10 @@ pub struct WorkspaceSettingsContent {
+     ///
+     /// Default: client
+     pub window_decorations: Option<WindowDecorations>,
++    /// Whether to hide the title bar and show its contents in the status bar instead.
++    ///
++    /// Default: false
++    pub title_bar_to_status_bar: Option<bool>,
+     /// Whether the focused panel follows the mouse location
+     /// Default: false
+     pub focus_follows_mouse: Option<FocusFollowsMouse>,
+diff --git a/crates/settings_ui/src/page_data.rs b/crates/settings_ui/src/page_data.rs
+index 972be0aba1..02e111bd6c 100644
+--- a/crates/settings_ui/src/page_data.rs
++++ b/crates/settings_ui/src/page_data.rs
+@@ -4286,9 +4286,25 @@ fn window_and_layout_page() -> SettingsPage {
+         ]
+     }
+ 
+-    fn title_bar_section() -> [SettingsPageItem; 12] {
++    fn title_bar_section() -> [SettingsPageItem; 13] {
+         [
+             SettingsPageItem::SectionHeader("Title Bar"),
++            SettingsPageItem::SettingItem(SettingItem {
++                title: "Title Bar to Status Bar",
++                description: "Hide the title bar and show its contents in the status bar instead.",
++                field: Box::new(SettingField {
++                    organization_override: None,
++                    json_path: Some("title_bar_to_status_bar"),
++                    pick: |settings_content| {
++                        settings_content.workspace.title_bar_to_status_bar.as_ref()
++                    },
++                    write: |settings_content, value, _| {
++                        settings_content.workspace.title_bar_to_status_bar = value;
++                    },
++                }),
++                metadata: None,
++                files: USER,
++            }),
+             SettingsPageItem::SettingItem(SettingItem {
+                 title: "Show Branch Status Icon",
+                 description: "Show git status indicators on the branch icon in the titlebar.",
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index 890248d674..9fb6380ff3 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -7361,7 +7361,7 @@ impl Sidebar {
+     fn render_sidebar_header(
+         &self,
+         no_open_projects: bool,
+-        window: &Window,
++        window: &mut Window,
+         cx: &mut Context<Self>,
+     ) -> impl IntoElement {
+         let has_query = self.has_filter_query(cx);
+@@ -7372,7 +7372,12 @@ impl Sidebar {
+         let left_window_controls = !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_left;
+         let right_window_controls =
+             !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_right;
+-        let header_height = platform_title_bar_height(window);
++        let in_status_bar = workspace::WorkspaceSettings::get_global(cx).title_bar_to_status_bar;
++        let header_height = if in_status_bar {
++            Tab::container_height(cx)
++        } else {
++            platform_title_bar_height(window)
++        };
+ 
+         h_flex()
+             .h(header_height)
+@@ -7384,6 +7389,7 @@ impl Sidebar {
+                     right_window_controls,
+                     no_open_projects,
+                 ),
++                Decorations::Server if in_status_bar => header,
+                 Decorations::Server => header.mt_px().pb_px(),
+             })
+             .when(left_window_controls, |this| {
+@@ -7398,6 +7404,16 @@ impl Sidebar {
+                     this
+                 }
+             })
++            .when(traffic_lights && in_status_bar, |this| {
++                this.child(
++                    workspace::move_window_on_drag(div().id("traffic-light-area"), window, cx)
++                        .absolute()
++                        .top_0()
++                        .left_0()
++                        .h_full()
++                        .w(px(ui::utils::TRAFFIC_LIGHT_PADDING)),
++                )
++            })
+             .when(!right_window_controls, |this| this.pr_1p5())
+             .gap_1()
+             .when(!no_open_projects, |this| {
+diff --git a/crates/title_bar/src/title_bar.rs b/crates/title_bar/src/title_bar.rs
+index 09c36b3855..9c22ef4d7e 100644
+--- a/crates/title_bar/src/title_bar.rs
++++ b/crates/title_bar/src/title_bar.rs
+@@ -53,7 +53,7 @@ use ui::{
+ use update_version::UpdateVersion;
+ use util::ResultExt;
+ use workspace::{
+-    AccessibleMode, MultiWorkspace, ToggleWorktreeSecurity, Workspace,
++    AccessibleMode, MultiWorkspace, ToggleWorktreeSecurity, Workspace, WorkspaceSettings,
+     notifications::{NotifyResultExt, NotifyTaskExt as _},
+ };
+ 
+@@ -207,6 +207,15 @@ fn set_window_layout(layout: WindowLayout, cx: &App) {
+     drop(AgentSettings::set_layout(layout, fs, cx));
+ }
+ 
++/// The status bar is at the bottom of the window, so popovers open upward from it.
++fn popover_anchor(anchor: Anchor, cx: &App) -> Anchor {
++    if WorkspaceSettings::get_global(cx).title_bar_to_status_bar {
++        anchor.other_side_along(gpui::Axis::Vertical)
++    } else {
++        anchor
++    }
++}
++
+ pub struct TitleBar {
+     platform_titlebar: Entity<PlatformTitleBar>,
+     project: Entity<Project>,
+@@ -409,6 +418,18 @@ impl Render for TitleBar {
+                 .into_any_element(),
+         );
+ 
++        if WorkspaceSettings::get_global(cx).title_bar_to_status_bar {
++            // In the status bar, the platform title bar (window controls, drag area) has no place.
++            return h_flex()
++                .w_full()
++                .justify_between()
++                .when(show_menus, |this| {
++                    this.children(self.application_menu.clone())
++                })
++                .children(children)
++                .into_any_element();
++        }
++
+         if show_menus {
+             self.platform_titlebar.update(cx, |this, _| {
+                 this.set_button_layout(button_layout);
+@@ -697,7 +718,7 @@ impl TitleBar {
+                         )
+                     },
+                 )
+-                .anchor(gpui::Anchor::TopLeft)
++                .anchor(popover_anchor(Anchor::TopLeft, cx))
+                 .into_any_element(),
+         )
+     }
+@@ -871,7 +892,7 @@ impl TitleBar {
+                     Tooltip::for_action("Recent Projects", &zed_actions::OpenRecent::default(), cx)
+                 },
+             )
+-            .anchor(gpui::Anchor::TopLeft)
++            .anchor(popover_anchor(Anchor::TopLeft, cx))
+             .into_any_element()
+     }
+ 
+@@ -923,7 +944,7 @@ impl TitleBar {
+                     Tooltip::for_action("Recent Projects", &zed_actions::OpenRecent::default(), cx)
+                 },
+             )
+-            .anchor(gpui::Anchor::TopLeft)
++            .anchor(popover_anchor(Anchor::TopLeft, cx))
+     }
+ 
+     fn render_worktree_and_branch(
+@@ -1029,7 +1050,7 @@ impl TitleBar {
+                         )
+                     },
+                 )
+-                .anchor(gpui::Anchor::TopLeft)
++                .anchor(popover_anchor(Anchor::TopLeft, cx))
+         });
+ 
+         let branch_picker = branch_name.and_then(|branch_name| {
+@@ -1086,7 +1107,7 @@ impl TitleBar {
+                             cx,
+                         )
+                     })
+-                    .anchor(gpui::Anchor::TopLeft)
++                    .anchor(popover_anchor(Anchor::TopLeft, cx))
+             })
+         });
+ 
+@@ -1436,7 +1457,7 @@ impl TitleBar {
+                 })
+                 .into()
+             })
+-            .anchor(Anchor::TopRight)
++            .anchor(popover_anchor(Anchor::TopRight, cx))
+     }
+ }
+ 
+diff --git a/crates/workspace/src/dock.rs b/crates/workspace/src/dock.rs
+index 918607c0cd..ac9efd534a 100644
+--- a/crates/workspace/src/dock.rs
++++ b/crates/workspace/src/dock.rs
+@@ -1,7 +1,10 @@
+ use crate::focus_follows_mouse::FocusFollowsMouse as _;
+ use crate::persistence::model::DockData;
+ use crate::status_bar::HideStatusItem;
+-use crate::{DraggedDock, Event, FocusFollowsMouse, ModalLayer, Pane, WorkspaceSettings};
++use crate::{
++    DraggedDock, Event, FocusFollowsMouse, ModalLayer, Pane, WorkspaceSettings,
++    move_window_on_drag, traffic_lights_overlay_workspace,
++};
+ use crate::{Workspace, status_bar::StatusItemView};
+ use anyhow::Context as _;
+ use client::proto;
+@@ -17,7 +20,7 @@ use serde::{Deserialize, Serialize};
+ use settings::{Settings, SettingsStore, TerminalDockPosition};
+ use std::sync::Arc;
+ use ui::{
+-    ContextMenu, CountBadge, Divider, DividerColor, IconButton, Tooltip, prelude::*,
++    ContextMenu, CountBadge, Divider, DividerColor, IconButton, Tab, Tooltip, prelude::*,
+     right_click_menu,
+ };
+ use util::ResultExt as _;
+@@ -1268,10 +1271,21 @@ impl Dock {
+ }
+ 
+ impl Render for Dock {
+-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
++    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+         let dispatch_context = Self::dispatch_context();
+         if let Some(entry) = self.visible_entry() {
+             let position = self.position;
++            let top_spacer = (position == DockPosition::Left
++                && traffic_lights_overlay_workspace(window, cx))
++            .then(|| {
++                move_window_on_drag(div().id("traffic-light-spacer"), window, cx)
++                    .flex_none()
++                    .h(Tab::container_height(cx))
++                    .bg(cx.theme().colors().tab_bar_background)
++                    .border_b_1()
++                    .border_color(cx.theme().colors().border)
++            });
++            let has_top_spacer = top_spacer.is_some();
+             let create_resize_handle = || {
+                 let handle = div()
+                     .id("resize-handle")
+@@ -1343,6 +1357,7 @@ impl Render for Dock {
+                 .map(|this| match self.position().axis() {
+                     // Width and height are always set on the workspace wrapper in
+                     // render_dock, so fill whatever space the wrapper provides.
++                    Axis::Horizontal if has_top_spacer => this.w_full().h_full().flex_col(),
+                     Axis::Horizontal => this.w_full().h_full().flex_row(),
+                     Axis::Vertical => this.h_full().w_full().flex_col(),
+                 })
+@@ -1351,9 +1366,11 @@ impl Render for Dock {
+                     DockPosition::Right => this.border_l_1(),
+                     DockPosition::Bottom => this.border_t_1(),
+                 })
++                .children(top_spacer)
+                 .child(
+                     div()
+                         .map(|this| match self.position().axis() {
++                            Axis::Horizontal if has_top_spacer => this.w_full().flex_1().min_h_0(),
+                             Axis::Horizontal => this.w_full().h_full(),
+                             Axis::Vertical => this.h_full().w_full(),
+                         })
+diff --git a/crates/workspace/src/pane.rs b/crates/workspace/src/pane.rs
+index 25771a8ee1..4f16ab577f 100644
+--- a/crates/workspace/src/pane.rs
++++ b/crates/workspace/src/pane.rs
+@@ -9,9 +9,10 @@ use crate::{
+         PreviewTabsSettings, ProjectItemKind, SaveOptions, ShowCloseButton, ShowDiagnostics,
+         TabContentParams, TabTooltipContent, WeakItemHandle,
+     },
+-    move_item,
++    move_item, move_window_on_drag,
+     notifications::NotifyResultExt,
+     toolbar::Toolbar,
++    traffic_lights_overlay_workspace,
+     workspace_settings::{AutosaveSetting, FocusFollowsMouse, TabBarSettings, WorkspaceSettings},
+ };
+ use anyhow::Result;
+@@ -3575,7 +3576,20 @@ impl Pane {
+         window: &mut Window,
+         cx: &mut Context<Pane>,
+     ) -> TabBar {
++        let traffic_light_spacer = traffic_lights_overlay_workspace(window, cx)
++            && self.workspace.upgrade().is_some_and(|workspace| {
++                let workspace = workspace.read(cx);
++                workspace.center.first_pane() == cx.entity()
++                    && workspace.left_dock.read(cx).visible_panel().is_none()
++            });
+         tab_bar
++            .when(traffic_light_spacer, |tab_bar| {
++                tab_bar.start_child(
++                    move_window_on_drag(div().id("traffic-light-spacer"), window, cx)
++                        .h_full()
++                        .w(px(ui::utils::TRAFFIC_LIGHT_PADDING)),
++                )
++            })
+             .when(
+                 self.display_nav_history_buttons.unwrap_or_default(),
+                 |tab_bar| {
+@@ -3631,7 +3645,7 @@ impl Pane {
+                             .border_color(cx.theme().colors().border)
+                     })
+             }))
+-            .child(self.render_unpinned_tabs_container(unpinned_tabs, tab_count, cx));
++            .child(self.render_unpinned_tabs_container(unpinned_tabs, tab_count, window, cx));
+         tab_bar.into_any_element()
+     }
+ 
+@@ -3660,7 +3674,7 @@ impl Pane {
+                     .overflow_x_scroll()
+                     .w_full()
+                     .children(pinned_tabs)
+-                    .child(self.render_pinned_tab_bar_drop_target(cx)),
++                    .child(self.render_pinned_tab_bar_drop_target(window, cx)),
+             );
+         v_flex()
+             .w_full()
+@@ -3670,6 +3684,7 @@ impl Pane {
+                 TabBar::new("unpinned_tab_bar").child(self.render_unpinned_tabs_container(
+                     unpinned_tabs,
+                     tab_count,
++                    window,
+                     cx,
+                 )),
+             )
+@@ -3680,6 +3695,7 @@ impl Pane {
+         &mut self,
+         unpinned_tabs: Vec<AnyElement>,
+         tab_count: usize,
++        window: &mut Window,
+         cx: &mut Context<Pane>,
+     ) -> impl IntoElement {
+         h_flex()
+@@ -3691,16 +3707,21 @@ impl Pane {
+                 this.suppress_scroll = true;
+             }))
+             .children(unpinned_tabs)
+-            .child(self.render_tab_bar_drop_target(tab_count, cx))
++            .child(self.render_tab_bar_drop_target(tab_count, window, cx))
+     }
+ 
+     fn render_tab_bar_drop_target(
+         &self,
+         tab_count: usize,
++        window: &mut Window,
+         cx: &mut Context<Pane>,
+     ) -> impl IntoElement {
+         div()
+             .id("tab_bar_drop_target")
++            .when(
++                WorkspaceSettings::get_global(cx).title_bar_to_status_bar,
++                |this| move_window_on_drag(this, window, cx),
++            )
+             .min_w_6()
+             .h(Tab::container_height(cx))
+             .flex_grow_1()
+@@ -3741,9 +3762,17 @@ impl Pane {
+             }))
+     }
+ 
+-    fn render_pinned_tab_bar_drop_target(&self, cx: &mut Context<Pane>) -> impl IntoElement {
++    fn render_pinned_tab_bar_drop_target(
++        &self,
++        window: &mut Window,
++        cx: &mut Context<Pane>,
++    ) -> impl IntoElement {
+         div()
+             .id("pinned_tabs_border")
++            .when(
++                WorkspaceSettings::get_global(cx).title_bar_to_status_bar,
++                |this| move_window_on_drag(this, window, cx),
++            )
+             .debug_selector(|| "pinned_tabs_border".into())
+             .min_w_6()
+             .h(Tab::container_height(cx))
+diff --git a/crates/workspace/src/status_bar.rs b/crates/workspace/src/status_bar.rs
+index 0cf9e97b13..aa672d35cd 100644
+--- a/crates/workspace/src/status_bar.rs
++++ b/crates/workspace/src/status_bar.rs
+@@ -1,12 +1,12 @@
+ use crate::{
+-    ItemHandle, MultiWorkspace, Pane, SidebarSide, ToggleWorkspaceSidebar,
++    ItemHandle, MultiWorkspace, Pane, SidebarSide, ToggleWorkspaceSidebar, WorkspaceSettings,
+     sidebar_side_context_menu,
+ };
+ use gpui::{
+     Anchor, AnyView, App, Context, Decorations, Entity, FocusHandle, Focusable, IntoElement,
+     ParentElement, Render, Role, SharedString, Styled, Subscription, WeakEntity, Window,
+ };
+-use settings::{SettingsContent, update_settings_file};
++use settings::{Settings as _, SettingsContent, update_settings_file};
+ use std::{any::TypeId, sync::Arc};
+ use theme::CLIENT_SIDE_DECORATION_ROUNDING;
+ use ui::{ContextMenu, Divider, IconPosition, Indicator, Tooltip, prelude::*, right_click_menu};
+@@ -100,6 +100,7 @@ impl SidebarStatus {
+ pub struct StatusBar {
+     left_items: Vec<Box<dyn StatusItemViewHandle>>,
+     right_items: Vec<Box<dyn StatusItemViewHandle>>,
++    titlebar_item: Option<AnyView>,
+     active_pane: Entity<Pane>,
+     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
+     focus_handle: FocusHandle,
+@@ -182,6 +183,12 @@ impl Render for StatusBar {
+                     .border_color(cx.theme().colors().status_bar_background),
+             })
+             .child(self.render_left_tools(&sidebar, cx))
++            .children(
++                self.titlebar_item
++                    .clone()
++                    .filter(|_| WorkspaceSettings::get_global(cx).title_bar_to_status_bar)
++                    .map(|item| div().flex_1().min_w_0().overflow_x_hidden().child(item)),
++            )
+             .child(self.render_right_tools(&sidebar, cx))
+     }
+ }
+@@ -333,6 +340,7 @@ impl StatusBar {
+         let mut this = Self {
+             left_items: Default::default(),
+             right_items: Default::default(),
++            titlebar_item: None,
+             active_pane: active_pane.clone(),
+             multi_workspace,
+             focus_handle: cx.focus_handle(),
+@@ -344,6 +352,11 @@ impl StatusBar {
+         this
+     }
+ 
++    pub fn set_titlebar_item(&mut self, item: AnyView, cx: &mut Context<Self>) {
++        self.titlebar_item = Some(item);
++        cx.notify();
++    }
++
+     pub fn set_multi_workspace(
+         &mut self,
+         multi_workspace: WeakEntity<MultiWorkspace>,
+diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
+index 7d50ce7297..890b17b3f7 100644
+--- a/crates/workspace/src/workspace.rs
++++ b/crates/workspace/src/workspace.rs
+@@ -325,6 +325,51 @@ static ZED_WINDOW_POSITION: LazyLock<Option<Point<Pixels>>> = LazyLock::new(|| {
+         .and_then(parse_pixel_position_env_var)
+ });
+ 
++/// Without the title bar the traffic lights sit closer to the window corner.
++pub fn traffic_light_position(cx: &App) -> Point<Pixels> {
++    let inset = if WorkspaceSettings::get_global(cx).title_bar_to_status_bar {
++        px(6.)
++    } else {
++        px(9.)
++    };
++    point(inset, inset)
++}
++
++/// Without the title bar the traffic lights overlay the workspace's top-left corner,
++/// unless the sidebar beside them holds them in its header.
++pub fn traffic_lights_overlay_workspace(window: &Window, cx: &App) -> bool {
++    let sidebar = window
++        .root::<MultiWorkspace>()
++        .flatten()
++        .map(|multi_workspace| multi_workspace.read(cx).sidebar_render_state(cx))
++        .unwrap_or_default();
++    cfg!(target_os = "macos")
++        && !window.is_fullscreen()
++        && !window.is_simple_fullscreen()
++        && WorkspaceSettings::get_global(cx).title_bar_to_status_bar
++        && !(sidebar.open && sidebar.side == SidebarSide::Left)
++}
++
++/// Lets a drag that starts on `element` move the window, as the title bar does.
++#[track_caller]
++pub fn move_window_on_drag(
++    element: Stateful<Div>,
++    window: &mut Window,
++    cx: &mut App,
++) -> Stateful<Div> {
++    let drag_started = window.use_state(cx, |_, _| false);
++    element
++        .on_mouse_down(MouseButton::Left, {
++            let drag_started = drag_started.clone();
++            move |_, _, cx| drag_started.update(cx, |started, _| *started = true)
++        })
++        .on_mouse_move(move |event, window, cx| {
++            if drag_started.update(cx, |started, _| std::mem::take(started)) && event.dragging() {
++                window.start_window_move();
++            }
++        })
++}
++
+ pub trait TerminalProvider {
+     fn spawn(
+         &self,
+@@ -1611,6 +1656,7 @@ pub struct Workspace {
+     /// the window, used to skip title recomputation when unrelated settings
+     /// change.
+     last_window_title_settings: Option<(String, String)>,
++    title_bar_to_status_bar: bool,
+     dirty_items: HashMap<EntityId, Subscription>,
+     active_call: Option<(GlobalAnyActiveCall, Vec<Subscription>)>,
+     leader_updates_tx: mpsc::UnboundedSender<(PeerId, proto::UpdateFollowers)>,
+@@ -2022,6 +2068,14 @@ impl Workspace {
+                 if last_title_settings != Some(title_settings) {
+                     this.update_window_title(window, cx);
+                 }
++
++                let title_bar_to_status_bar =
++                    WorkspaceSettings::get_global(cx).title_bar_to_status_bar;
++                if this.title_bar_to_status_bar != title_bar_to_status_bar {
++                    this.title_bar_to_status_bar = title_bar_to_status_bar;
++                    window.set_traffic_light_position(traffic_light_position(cx));
++                    cx.notify();
++                }
+             }),
+             cx.subscribe_in(
+                 &project.read(cx).git_store().clone(),
+@@ -2118,6 +2172,7 @@ impl Workspace {
+             window_edited: false,
+             last_window_title: None,
+             last_window_title_settings: None,
++            title_bar_to_status_bar: WorkspaceSettings::get_global(cx).title_bar_to_status_bar,
+             dirty_items: Default::default(),
+             active_call,
+             database_id: workspace_id,
+@@ -3325,6 +3380,9 @@ impl Workspace {
+     }
+ 
+     pub fn set_titlebar_item(&mut self, item: AnyView, _: &mut Window, cx: &mut Context<Self>) {
++        self.status_bar.update(cx, |status_bar, cx| {
++            status_bar.set_titlebar_item(item.clone(), cx)
++        });
+         self.titlebar_item = Some(item);
+         cx.notify();
+     }
+@@ -8753,7 +8811,7 @@ impl Workspace {
+         };
+ 
+         let mut parts = Vec::new();
+-        if self.titlebar_item.is_some() {
++        if self.titlebar_item.is_some() && !self.title_bar_to_status_bar {
+             // The title bar is an ARIA toolbar, so region navigation lands on
+             // its first control rather than the toolbar container.
+             parts.push(FocusablePart::toolbar(self.titlebar_focus_handle.clone()));
+@@ -9562,6 +9620,10 @@ impl Render for Workspace {
+             && self.active_item(cx).is_some();
+         let pad_zoomed_pane =
+             self.centered_layout && self.zoomed.is_some() && self.zoomed_position.is_none();
++        let titlebar_item = self
++            .titlebar_item
++            .clone()
++            .filter(|_| !self.title_bar_to_status_bar);
+         let render_padding = |size| {
+             (size > 0.0).then(|| {
+                 div()
+@@ -9625,7 +9687,7 @@ impl Render for Workspace {
+             // a tab group: region navigation lands on the first control (per
+             // the ARIA toolbar pattern), Tab steps through them, and arrow keys
+             // move between them once focus is inside.
+-            .when_some(self.titlebar_item.clone(), |this, item| {
++            .when_some(titlebar_item, |this, item| {
+                 this.child(
+                     div()
+                         .id("titlebar-region")
+@@ -9677,7 +9739,7 @@ impl Render for Workspace {
+                             .flex()
+                             .flex_col()
+                             .overflow_hidden()
+-                            .border_t_1()
++                            .when(!self.title_bar_to_status_bar, |this| this.border_t_1())
+                             .border_b_1()
+                             .border_color(colors.border)
+                             .child({
+@@ -12996,6 +13058,66 @@ mod tests {
+         );
+     }
+ 
++    fn set_title_bar_to_status_bar(enabled: bool, cx: &mut VisualTestContext) {
++        cx.update(|_, cx| {
++            SettingsStore::update_global(cx, |store, cx| {
++                store.update_user_settings(cx, |settings| {
++                    settings.workspace.title_bar_to_status_bar = Some(enabled);
++                })
++            });
++        });
++        cx.run_until_parked();
++    }
++
++    #[gpui::test]
++    async fn test_title_bar_to_status_bar(cx: &mut TestAppContext) {
++        struct TestTitleBar;
++        impl Render for TestTitleBar {
++            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
++                div().size_4().debug_selector(|| "test_title_bar".into())
++            }
++        }
++
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs, None, cx).await;
++        let (workspace, cx) =
++            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
++        workspace.update_in(cx, |workspace, window, cx| {
++            workspace.set_titlebar_item(cx.new(|_| TestTitleBar).into(), window, cx);
++        });
++
++        let title_bar_top = |enabled, cx: &mut VisualTestContext| {
++            set_title_bar_to_status_bar(enabled, cx);
++            cx.debug_bounds("test_title_bar")
++                .expect("title bar contents should be rendered")
++                .top()
++        };
++        let in_title_bar = title_bar_top(false, cx);
++        assert!(title_bar_top(true, cx) > in_title_bar + px(100.));
++        assert_eq!(title_bar_top(false, cx), in_title_bar);
++    }
++
++    #[cfg(target_os = "macos")]
++    #[gpui::test]
++    async fn test_title_bar_to_status_bar_reserves_traffic_lights(cx: &mut TestAppContext) {
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs, None, cx).await;
++        let (workspace, cx) =
++            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
++        add_an_item_to_active_pane(cx, &workspace, 1);
++
++        let first_tab_left = |enabled, cx: &mut VisualTestContext| {
++            set_title_bar_to_status_bar(enabled, cx);
++            cx.debug_bounds("TAB-0")
++                .expect("the tab should be rendered")
++                .left()
++        };
++        let without_spacer = first_tab_left(false, cx);
++        assert!(first_tab_left(true, cx) >= without_spacer + px(ui::utils::TRAFFIC_LIGHT_PADDING));
++    }
++
+     #[gpui::test]
+     async fn test_window_title_format_empty_project(cx: &mut TestAppContext) {
+         init_test(cx);
+diff --git a/crates/workspace/src/workspace_settings.rs b/crates/workspace/src/workspace_settings.rs
+index eff3a0a93c..cf162095b1 100644
+--- a/crates/workspace/src/workspace_settings.rs
++++ b/crates/workspace/src/workspace_settings.rs
+@@ -45,6 +45,7 @@ pub struct WorkspaceSettings {
+     pub fullscreen_mode: settings::FullscreenMode,
+     pub zoomed_padding: bool,
+     pub window_decorations: settings::WindowDecorations,
++    pub title_bar_to_status_bar: bool,
+     pub focus_follows_mouse: FocusFollowsMouse,
+ }
+ 
+@@ -150,6 +151,7 @@ impl Settings for WorkspaceSettings {
+             fullscreen_mode: workspace.fullscreen_mode.unwrap(),
+             zoomed_padding: workspace.zoomed_padding.unwrap(),
+             window_decorations: workspace.window_decorations.unwrap(),
++            title_bar_to_status_bar: workspace.title_bar_to_status_bar.unwrap(),
+             focus_follows_mouse: FocusFollowsMouse {
+                 enabled: workspace
+                     .focus_follows_mouse
+diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
+index a5d947b967..b388a55748 100644
+--- a/crates/zed/src/zed.rs
++++ b/crates/zed/src/zed.rs
+@@ -394,7 +394,7 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
+         titlebar: Some(TitlebarOptions {
+             title: None,
+             appears_transparent: true,
+-            traffic_light_position: Some(point(px(9.0), px(9.0))),
++            traffic_light_position: Some(workspace::traffic_light_position(cx)),
+         }),
+         window_bounds: None,
+         focus: false,
+diff --git a/docs/src/reference/all-settings.md b/docs/src/reference/all-settings.md
+index 9ce09d7ea5..29e73d762a 100644
+--- a/docs/src/reference/all-settings.md
++++ b/docs/src/reference/all-settings.md
+@@ -5493,6 +5493,16 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a
+ - `open_menus_on_hover`: Whether to open title-bar menus on hover. Once a menu is open, hovering always switches between menus.
+ - `button_layout`: The layout of window control buttons in the title bar (Linux only). Can be set to `"platform_default"` to follow the system setting, `"standard"` to use Zed's built-in layout, or a custom format like `"close:minimize,maximize"`
+ 
++## Title Bar to Status Bar
++
++- Description: Whether to hide the title bar and show its contents in the status bar instead
++- Setting: `title_bar_to_status_bar`
++- Default: `false`
++
++**Options**
++
++`boolean` values
++
+ ## Window Title Format
+ 
+ - Description: Template for the window title. Use `${separator}` to insert a
+diff --git a/docs/src/visual-customization.md b/docs/src/visual-customization.md
+index c727ee4f17..4a5937f635 100644
+--- a/docs/src/visual-customization.md
++++ b/docs/src/visual-customization.md
+@@ -133,6 +133,8 @@ To disable this behavior use:
+ ### Titlebar
+ 
+ ```json [settings]
++  // Hide the title bar and show its contents in the status bar instead
++  "title_bar_to_status_bar": false,
+   // Control which items are shown/hidden in the title bar
+   "title_bar": {
+     "show_branch_status_icon": false, // Show git status on branch icon
+-- 
+2.55.0
+
