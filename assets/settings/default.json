@@ -1483,6 +1483,10 @@
     // When enabled, pinned tabs appear in a top row and unpinned tabs in a bottom row.
     // When disabled, all tabs appear in a single row (default behavior).
     "show_pinned_tabs_in_separate_row": false,
+    // Whether to render pinned tabs as compact borderless chips.
+    "pinned_tab_chips": false,
+    // Whether to render unpinned tabs as compact borderless chips.
+    "unpinned_tab_chips": false,
   },
   // Settings related to the tab switcher (Ctrl-Tab).
   "tab_switcher": {
@@ -1529,6 +1533,10 @@
     // 3. Mark files with errors and warnings:
     //    "all"
     "show_diagnostics": "off",
+    // Minimum width of a tab in pixels; null keeps tabs as wide as their title.
+    "min_width": null,
+    // Maximum width of a tab in pixels; longer titles are truncated in the middle.
+    "max_width": null,
   },
   // Settings related to preview tabs.
   "preview_tabs": {

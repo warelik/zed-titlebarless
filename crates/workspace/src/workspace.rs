@@ -13254,6 +13254,44 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_tab_width_bounds(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        add_an_item_to_active_pane(cx, &workspace, 1);
+
+        let tab_width =
+            |min_width: Option<f32>, max_width: Option<f32>, cx: &mut VisualTestContext| {
+                cx.update(|_, cx| {
+                    SettingsStore::update_global(cx, |store, cx| {
+                        store.update_user_settings(cx, |settings| {
+                            let tabs = settings.tabs.get_or_insert_default();
+                            tabs.min_width = min_width.map(Into::into);
+                            tabs.max_width = max_width.map(Into::into);
+                        })
+                    });
+                });
+                cx.run_until_parked();
+                cx.debug_bounds("TAB-0")
+                    .expect("the tab should be rendered")
+                    .size
+                    .width
+            };
+        let natural = tab_width(None, None, cx);
+        assert_eq!(
+            tab_width(Some(natural.as_f32() + 100.), None, cx),
+            natural + px(100.)
+        );
+        assert_eq!(
+            tab_width(None, Some(natural.as_f32() - 10.), cx),
+            natural - px(10.)
+        );
+        assert_eq!(tab_width(None, None, cx), natural);
+    }
+
+    #[gpui::test]
     async fn test_window_title_format_empty_project(cx: &mut TestAppContext) {
         init_test(cx);
 

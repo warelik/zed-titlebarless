@@ -53,7 +53,8 @@ use workspace::{
     CloseActiveItem, DraggedSelection, DraggedTab, NewCenterTerminal, NewTerminal, Pane,
     ToolbarItemLocation, Workspace, WorkspaceId, delete_unloaded_items,
     item::{
-        HighlightedText, Item, ItemEvent, SerializableItem, TabContentParams, TabTooltipContent,
+        HighlightedText, Item, ItemEvent, ItemSettings, SerializableItem, TabContentParams,
+        TabTooltipContent,
     },
     register_serializable_item,
     searchable::{
@@ -1634,10 +1635,17 @@ impl Item for TerminalView {
             None => (IconName::Terminal, Color::Muted, None),
         };
 
+        // The tab switcher always asks for middle truncation; terminal titles only follow it
+        // when a maximum tab width is configured, so the default layout is unchanged.
+        let truncate_title_middle =
+            params.truncate_title_middle && ItemSettings::get_global(cx).max_width.is_some();
         let self_handle = self.self_handle.clone();
         h_flex()
             .gap_1()
             .group("term-tab-icon")
+            .when(truncate_title_middle, |this| {
+                this.w_full().min_w_0().overflow_hidden()
+            })
             .when(!params.selected, |this| {
                 this.track_focus(&self.focus_handle)
             })
@@ -1668,10 +1676,12 @@ impl Item for TerminalView {
             .child(
                 div()
                     .relative()
+                    .when(truncate_title_middle, |this| this.flex_1().min_w_0())
                     .child(
                         Label::new(title)
                             .single_line()
                             .color(params.text_color())
+                            .when(truncate_title_middle, |this| this.truncate_middle())
                             .when(self.is_renaming(), |this| this.alpha(0.)),
                     )
                     .when_some(self.rename_editor.clone(), |this, editor| {
