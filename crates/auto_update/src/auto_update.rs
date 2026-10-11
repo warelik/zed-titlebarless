@@ -717,24 +717,7 @@ impl AutoUpdater {
             },
         )?;
 
-        let mut response = http_client
-            .get(url.as_str(), Default::default(), true)
-            .await?;
-        let mut body = Vec::new();
-        response.body_mut().read_to_end(&mut body).await?;
-
-        anyhow::ensure!(
-            response.status().is_success(),
-            "failed to fetch release: {:?}",
-            String::from_utf8_lossy(&body),
-        );
-
-        serde_json::from_slice(body.as_slice()).with_context(|| {
-            format!(
-                "error deserializing release {:?}",
-                String::from_utf8_lossy(&body),
-            )
-        })
+        fetch_release_json(&http_client, url.as_str(), "release").await
     }
 
     async fn update(this: Entity<Self>, cx: &mut AsyncApp) -> Result<()> {
@@ -756,8 +739,16 @@ impl AutoUpdater {
             cx.notify();
         });
 
-        let fetched_release_data =
-            Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx).await?;
+        // Fork builds point this at their own release manifest; the remote server keeps
+        // coming from zed.dev because its version matches the upstream release.
+        let fetched_release_data = match option_env!("ZED_UPDATE_MANIFEST_URL") {
+            Some(manifest_url) => {
+                fetch_release_json(&client, manifest_url, "release manifest").await?
+            }
+            None => {
+                Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx).await?
+            }
+        };
         let fetched_version = fetched_release_data.clone().version;
         let app_commit_sha = Ok(cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full())));
         let newer_version = Self::check_if_fetched_version_is_newer(
@@ -1071,6 +1062,31 @@ async fn cleanup_remote_server_cache(
     }
 
     Ok(())
+}
+
+async fn fetch_release_json(
+    client: &HttpClientWithUrl,
+    url: &str,
+    description: &str,
+) -> Result<ReleaseAsset> {
+    let mut response = client.get(url, Default::default(), true).await?;
+    let mut body = Vec::new();
+    response.body_mut().read_to_end(&mut body).await?;
+
+    anyhow::ensure!(
+        response.status().is_success(),
+        "failed to fetch {}: {:?}",
+        description,
+        String::from_utf8_lossy(&body),
+    );
+
+    serde_json::from_slice(body.as_slice()).with_context(|| {
+        format!(
+            "error deserializing {} {:?}",
+            description,
+            String::from_utf8_lossy(&body),
+        )
+    })
 }
 
 async fn download_release(
