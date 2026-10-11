@@ -3,15 +3,16 @@ mod system_window_tabs;
 mod title_bar_settings;
 
 use gpui::{
-    Action, AnyElement, App, Context, Decorations, Entity, Hsla, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, StatefulInteractiveElement, Styled, WeakEntity, Window,
-    WindowButtonLayout, WindowControlArea, div, px,
+    Action, AnyElement, App, Context, Decorations, Div, Entity, Hsla, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, Pixels, Stateful, StatefulInteractiveElement, Styled,
+    WeakEntity, Window, WindowButtonLayout, WindowControlArea, div, px,
 };
 use project::DisableAiSettings;
 use settings::Settings;
 use smallvec::SmallVec;
 use std::mem;
 use ui::{
+    Tab,
     prelude::*,
     utils::{TRAFFIC_LIGHT_PADDING, platform_title_bar_height},
 };
@@ -68,6 +69,29 @@ impl SidebarWindowControls {
             right: visible && !is_macos && !on_left,
         }
     }
+}
+
+/// The height of the header a sidebar draws where the title bar would be. If the title bar
+/// is hidden or its contents are in the status bar, match the tab bar beside it.
+pub fn sidebar_header_height(window: &Window, cx: &App) -> Pixels {
+    if workspace::title_bar_in_status_bar(cx)
+        || !TitleBarSettings::is_title_bar_visible(window, cx)
+    {
+        Tab::container_height(cx)
+    } else {
+        platform_title_bar_height(window)
+    }
+}
+
+/// The padding a sidebar header keeps free for the macOS traffic lights, made draggable (and
+/// zoomable by double-click) like the title bar it replaces.
+pub fn traffic_light_drag_area(window: &mut Window, cx: &mut App) -> Stateful<Div> {
+    workspace::title_bar_area(div().id("traffic-light-area"), window, cx)
+        .absolute()
+        .top_0()
+        .left_0()
+        .h_full()
+        .w(px(TRAFFIC_LIGHT_PADDING))
 }
 
 pub struct PlatformTitleBar {

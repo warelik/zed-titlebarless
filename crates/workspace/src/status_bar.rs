@@ -1,6 +1,6 @@
 use crate::{
     ItemHandle, MultiWorkspace, Pane, SidebarSide, ToggleWorkspaceSidebar,
-    sidebar_side_context_menu,
+    sidebar_side_context_menu, title_bar_in_status_bar,
 };
 use gpui::{
     Anchor, AnyView, App, Context, Decorations, Entity, FocusHandle, Focusable, IntoElement,
@@ -100,6 +100,7 @@ impl SidebarStatus {
 pub struct StatusBar {
     left_items: Vec<Box<dyn StatusItemViewHandle>>,
     right_items: Vec<Box<dyn StatusItemViewHandle>>,
+    titlebar_item: Option<(AnyView, FocusHandle)>,
     active_pane: Entity<Pane>,
     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
     focus_handle: FocusHandle,
@@ -182,6 +183,20 @@ impl Render for StatusBar {
                     .border_color(cx.theme().colors().status_bar_background),
             })
             .child(self.render_left_tools(&sidebar, cx))
+            .children(
+                self.titlebar_item
+                    .clone()
+                    .filter(|_| title_bar_in_status_bar(cx))
+                    .map(|(item, focus_handle)| {
+                        div()
+                            .id("titlebar-in-status-bar")
+                            .track_focus(&focus_handle)
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_x_hidden()
+                            .child(item)
+                    }),
+            )
             .child(self.render_right_tools(&sidebar, cx))
     }
 }
@@ -333,6 +348,7 @@ impl StatusBar {
         let mut this = Self {
             left_items: Default::default(),
             right_items: Default::default(),
+            titlebar_item: None,
             active_pane: active_pane.clone(),
             multi_workspace,
             focus_handle: cx.focus_handle(),
@@ -342,6 +358,15 @@ impl StatusBar {
         };
         this.update_active_pane_item(window, cx);
         this
+    }
+
+    pub(crate) fn set_titlebar_item(
+        &mut self,
+        item: Option<(AnyView, FocusHandle)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.titlebar_item = item;
+        cx.notify();
     }
 
     pub fn set_multi_workspace(

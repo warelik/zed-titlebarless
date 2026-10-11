@@ -3031,9 +3031,11 @@ impl OutlinePanel {
             PanelEntry::Fs(FsEntry::File(file)) => file.is_deleted,
             _ => false,
         };
+        let row_height = workspace::panel_row_height(cx);
         div()
             .text_ui(cx)
             .id(item_id.clone())
+            .when_some(row_height, |this, height| this.h(height))
             .on_click({
                 let clicked_entry = rendered_entry.clone();
                 cx.listener(move |outline_panel, event: &gpui::ClickEvent, window, cx| {
@@ -3055,6 +3057,7 @@ impl OutlinePanel {
             .cursor_pointer()
             .child(
                 ListItem::new(item_id)
+                    .when(row_height.is_some(), |this| this.height(relative(1.)))
                     .indent_level(depth)
                     .indent_step_size(px(settings.indent_size))
                     .toggle_state(is_active)

@@ -96,11 +96,24 @@ pub struct ThemeSettings {
     pub theme_overrides: HashMap<String, settings::ThemeStyleContent>,
     /// The current icon theme selection.
     pub icon_theme: IconThemeSelection,
+    /// Whether rows in the project, git and outline panels take the tab bar height.
+    pub panel_rows_tab_height: bool,
     /// The density of the UI.
     /// Note: This setting is still experimental. See [this tracking issue](
     pub ui_density: UiDensity,
+    /// Which UI shadows to paint.
+    pub shadows: ShadowSettings,
     /// The amount of fading applied to unnecessary code.
     pub unnecessary_code_fade: f32,
+}
+
+/// Toggles for individual UI shadows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShadowSettings {
+    /// Whether to paint the shadow under the sticky folder rows of the project panel.
+    pub project_panel: bool,
+    /// Whether to paint the shadow around the minimap.
+    pub minimap: bool,
 }
 
 /// Returns the name of the default theme for the given [`Appearance`].
@@ -725,6 +738,7 @@ impl settings::Settings for ThemeSettings {
         let markdown_preview = settings_content.markdown_preview.as_ref();
         let theme_selection: ThemeSelection = content.theme.clone().unwrap().into();
         let icon_theme_selection: IconThemeSelection = content.icon_theme.clone().unwrap().into();
+        let shadows = content.shadows.as_ref();
         Self {
             ui_font_size: clamp_font_size(content.ui_font_size.unwrap().into_gpui()),
             ui_font: Font {
@@ -786,7 +800,14 @@ impl settings::Settings for ThemeSettings {
             experimental_theme_overrides: content.experimental_theme_overrides.clone(),
             theme_overrides: content.theme_overrides.clone(),
             icon_theme: icon_theme_selection,
+            panel_rows_tab_height: content.panel_rows_tab_height.unwrap_or(false),
             ui_density: ui_density_from_settings(content.ui_density.unwrap_or_default()),
+            shadows: ShadowSettings {
+                project_panel: shadows
+                    .and_then(|shadows| shadows.project_panel)
+                    .unwrap_or(true),
+                minimap: shadows.and_then(|shadows| shadows.minimap).unwrap_or(true),
+            },
             unnecessary_code_fade: content.unnecessary_code_fade.unwrap().0.clamp(0.0, 0.9),
         }
     }
@@ -795,6 +816,19 @@ impl settings::Settings for ThemeSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_theme_settings_defaults_when_fields_none() {
+        let mut raw: ::settings::SettingsContent =
+            ::settings::parse_json_with_comments(&::settings::default_settings()).unwrap();
+        raw.theme.shadows = None;
+        raw.theme.panel_rows_tab_height = None;
+
+        let settings = ThemeSettings::from_settings(&raw);
+        assert!(!settings.panel_rows_tab_height);
+        assert!(settings.shadows.project_panel);
+        assert!(settings.shadows.minimap);
+    }
 
     fn theme_with_colors(colors: ::settings::ThemeColorsContent) -> Theme {
         crate::refine_theme(&crate::ThemeContent {

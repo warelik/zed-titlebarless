@@ -39,11 +39,13 @@ use menu::{
     Cancel, Confirm, SelectChild, SelectFirst, SelectLast, SelectNext, SelectParent, SelectPrevious,
 };
 use notifications::status_toast::StatusToast;
-use platform_title_bar::{SidebarWindowControls, TitleBarSettings, apply_title_bar_insets};
+use platform_title_bar::{
+    SidebarWindowControls, TitleBarSettings, apply_title_bar_insets, sidebar_header_height,
+    traffic_light_drag_area,
+};
 use project::{AgentId, AgentRegistryStore, Event as ProjectEvent, WorktreeId};
 use recent_projects::sidebar_recent_projects::SidebarRecentProjects;
 use remote::RemoteConnectionOptions;
-use ui::utils::platform_title_bar_height;
 
 use serde::{Deserialize, Serialize};
 use settings::{Settings as _, SettingsStore};
@@ -2407,7 +2409,13 @@ impl Sidebar {
             .group(&group_name)
             .when(!has_filter, |this| this.cursor_pointer())
             .relative()
-            .h(Tab::content_height(cx))
+            // Every header but the first also gets 1px from its separator wrapper (or the sticky
+            // copy's bottom border), so only the first one has to supply the full tab height.
+            .h(if Self::is_compact(cx) && !is_sticky && ix == 0 {
+                Tab::container_height(cx)
+            } else {
+                Tab::content_height(cx)
+            })
             .w_full()
             .pl_2()
             .pr_1p5()
@@ -2538,15 +2546,16 @@ impl Sidebar {
             .block_mouse_except_scroll();
 
         if !is_collapsed && !has_threads {
+            let compact = Self::is_compact(cx);
             v_flex()
                 .w_full()
                 .child(header)
                 .child(
                     h_flex()
                         .px_2()
-                        .pt_1()
-                        .pb_2()
                         .gap(px(7.))
+                        .when(compact, |this| this.h(Tab::container_height(cx)))
+                        .when(!compact, |this| this.pt_1().pb_2())
                         .child(Icon::new(IconName::Circle).size(IconSize::Small).color(
                             Color::Custom(cx.theme().colors().icon_placeholder.opacity(0.1)),
                         ))
@@ -3432,6 +3441,10 @@ impl Sidebar {
 
     fn has_filter_query(&self, cx: &App) -> bool {
         !self.filter_editor.read(cx).text(cx).is_empty()
+    }
+
+    fn is_compact(cx: &App) -> bool {
+        AgentSettings::get_global(cx).threads_sidebar.compact
     }
 
     fn start_renaming_entry(
@@ -6304,6 +6317,7 @@ impl Sidebar {
 
         let thread_item = ThreadItem::new(id, title.clone())
             .base_bg(sidebar_bg)
+            .compact(Self::is_compact(cx))
             .icon(icon)
             .when(is_draft, |this| {
                 this.icon_color(Color::Custom(cx.theme().colors().icon_muted.opacity(0.2)))
@@ -6633,6 +6647,7 @@ impl Sidebar {
 
         let terminal_item = ThreadItem::new(id, title)
             .base_bg(sidebar_bg)
+            .compact(Self::is_compact(cx))
             .icon(IconName::Terminal)
             .when_some(icon_char, |this, icon_char| this.icon_char(icon_char))
             .is_remote(is_remote)
@@ -7371,21 +7386,19 @@ impl Sidebar {
     fn render_sidebar_header(
         &self,
         no_open_projects: bool,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let has_query = self.has_filter_query(cx);
+        let compact = Self::is_compact(cx);
         let SidebarWindowControls {
             traffic_lights,
             left: left_window_controls,
             right: right_window_controls,
         } = SidebarWindowControls::new(self.side(cx), window, cx);
         let title_bar_visible = TitleBarSettings::is_title_bar_visible(window, cx);
-        let header_height = if title_bar_visible {
-            platform_title_bar_height(window)
-        } else {
-            Tab::container_height(cx)
-        };
+        let in_status_bar = workspace::title_bar_in_status_bar(cx);
+        let header_height = sidebar_header_height(window, cx);
 
         h_flex()
             .debug_selector(|| "sidebar-header".into())
@@ -7402,6 +7415,7 @@ impl Sidebar {
                         right_window_controls,
                         no_open_projects,
                     ),
+                    Decorations::Server if in_status_bar => header,
                     Decorations::Server => header.mt_px().pb_px(),
                 }
             })
@@ -7417,24 +7431,29 @@ impl Sidebar {
                     this
                 }
             })
+            .when(traffic_lights && in_status_bar, |this| {
+                this.child(traffic_light_drag_area(window, cx))
+            })
             .when(!right_window_controls, |this| this.pr_1p5())
             .gap_1()
             .when(!no_open_projects, |this| {
                 this.border_b_1()
                     .border_color(cx.theme().colors().border)
-                    .when(traffic_lights, |this| {
+                    .when(traffic_lights && !compact, |this| {
                         this.child(Divider::vertical().color(ui::DividerColor::Border))
                     })
-                    .child(
-                        div()
-                            .debug_selector(|| "sidebar-header-search".into())
-                            .ml_1()
-                            .child(
-                                Icon::new(IconName::MagnifyingGlass)
-                                    .size(IconSize::Small)
-                                    .color(Color::Muted),
-                            ),
-                    )
+                    .when(!compact, |this| {
+                        this.child(
+                            div()
+                                .debug_selector(|| "sidebar-header-search".into())
+                                .ml_1()
+                                .child(
+                                    Icon::new(IconName::MagnifyingGlass)
+                                        .size(IconSize::Small)
+                                        .color(Color::Muted),
+                                ),
+                        )
+                    })
                     .child(self.render_filter_input(cx))
                     .child(
                         h_flex()
@@ -7444,7 +7463,7 @@ impl Sidebar {
                                     && !self.filter_editor.focus_handle(cx).is_focused(window),
                                 |this| this.child(KeyBinding::for_action(&FocusSidebarFilter, cx)),
                             )
-                            .when(has_query, |this| {
+                            .when(has_query && !compact, |this| {
                                 this.child(
                                     IconButton::new("clear_filter", IconName::Close)
                                         .icon_size(IconSize::Small)
