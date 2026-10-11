@@ -46,6 +46,8 @@ pub struct WorkspaceSettings {
     pub fullscreen_mode: settings::FullscreenMode,
     pub zoomed_padding: bool,
     pub window_decorations: settings::WindowDecorations,
+    pub title_bar_to_status_bar: bool,
+    pub(crate) title_bar_visibility: settings::TitleBarVisibility,
     pub focus_follows_mouse: FocusFollowsMouse,
 }
 
@@ -152,6 +154,8 @@ impl Settings for WorkspaceSettings {
             fullscreen_mode: workspace.fullscreen_mode.unwrap(),
             zoomed_padding: workspace.zoomed_padding.unwrap(),
             window_decorations: workspace.window_decorations.unwrap(),
+            title_bar_to_status_bar: workspace.title_bar_to_status_bar.unwrap_or(false),
+            title_bar_visibility: content.title_bar.clone().unwrap().show.unwrap(),
             focus_follows_mouse: FocusFollowsMouse {
                 enabled: workspace
                     .focus_follows_mouse
