@@ -87,7 +87,7 @@ use std::{
 use sum_tree::Bias;
 use text::{BufferId, ToPoint as _};
 use theme::{ActiveTheme, Appearance, PlayerColor};
-use theme_settings::BufferLineHeight;
+use theme_settings::{BufferLineHeight, ThemeSettings};
 use ui::utils::ensure_minimum_contrast;
 use ui::{ButtonLike, POPOVER_Y_PADDING, Tooltip, prelude::*, scrollbars::ShowScrollbar};
 use unicode_segmentation::UnicodeSegmentation;
@@ -1694,7 +1694,9 @@ impl EditorElement {
 
         let mut minimap = div()
             .size_full()
-            .shadow_xs()
+            .when(ThemeSettings::get_global(cx).shadows.minimap, |this| {
+                this.shadow_xs()
+            })
             .px(PADDING_OFFSET)
             .child(minimap_editor)
             .into_any_element();

@@ -7401,6 +7401,7 @@ impl ProjectPanel {
         // already checked if non empty above
         let last_item_index = sticky_parents.len() - 1;
         let marked_selections: Arc<[SelectedEntry]> = Arc::from(self.marked_entries.clone());
+        let shadow_enabled = ThemeSettings::get_global(cx).shadows.project_panel;
         sticky_parents
             .iter()
             .enumerate()
@@ -7429,7 +7430,7 @@ impl ProjectPanel {
                     window,
                     cx,
                 )
-                .when(index == last_item_index, |this| {
+                .when(index == last_item_index && shadow_enabled, |this| {
                     let shadow_color_top = hsla(0.0, 0.0, 0.0, 0.1);
                     let shadow_color_bottom = hsla(0.0, 0.0, 0.0, 0.);
                     let sticky_shadow = div()

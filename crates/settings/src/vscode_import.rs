@@ -1046,6 +1046,7 @@ impl VsCodeSettings {
             theme: None,
             icon_theme: None,
             ui_density: None,
+            shadows: None,
             unnecessary_code_fade: None,
             experimental_theme_overrides: None,
             theme_overrides: Default::default(),
