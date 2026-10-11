@@ -802,6 +802,8 @@ impl VsCodeSettings {
                         ShowCloseButton::Hidden
                     }
                 }),
+            min_width: None,
+            max_width: None,
         })
     }
 
@@ -831,6 +833,8 @@ impl VsCodeSettings {
                 .read_str("workbench.editor.editorActionsLocation")
                 .and_then(|str| if str == "hidden" { Some(false) } else { None }),
             show_pinned_tabs_in_separate_row: None,
+            pinned_tab_chips: None,
+            unpinned_tab_chips: None,
         })
     }
 

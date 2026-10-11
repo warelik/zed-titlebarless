@@ -2842,6 +2842,7 @@ impl Pane {
         ix: usize,
         item: &dyn ItemHandle,
         detail: usize,
+        is_chip: bool,
         focus_handle: &FocusHandle,
         window: &mut Window,
         cx: &mut Context<Pane>,
@@ -2852,6 +2853,7 @@ impl Pane {
             .map(|id| id == item.item_id())
             .unwrap_or(false);
 
+        let settings = ItemSettings::get_global(cx);
         let label = item.tab_content(
             TabContentParams {
                 detail: Some(detail),
@@ -2859,7 +2861,7 @@ impl Pane {
                 preview: is_preview,
                 deemphasized: !self.has_focus(window, cx),
                 max_title_len: None,
-                truncate_title_middle: false,
+                truncate_title_middle: settings.max_width.is_some(),
             },
             window,
             cx,
@@ -2867,7 +2869,6 @@ impl Pane {
 
         let icon = self.tab_icon_element(item, is_active, window, cx);
 
-        let settings = ItemSettings::get_global(cx);
         let close_side = &settings.close_position;
         let show_close_button = &settings.show_close_button;
         let indicator = render_item_indicator(item.boxed_clone(), cx);
@@ -2920,6 +2921,9 @@ impl Pane {
                 ClosePosition::Right => ui::TabCloseSide::End,
             })
             .toggle_state(is_active)
+            .chip(is_chip)
+            .min_width(settings.min_width)
+            .max_width(settings.max_width)
             .on_click(cx.listener({
                 let item_handle = item.boxed_clone();
                 move |pane: &mut Self, event: &ClickEvent, window, cx| {
@@ -3056,6 +3060,13 @@ impl Pane {
                 h_flex()
                     .id(("pane-tab-content", ix))
                     .gap_1()
+                    .when(
+                        settings.min_width.is_some() || settings.max_width.is_some(),
+                        |this| this.flex_grow(1.),
+                    )
+                    .when(settings.max_width.is_some(), |this| {
+                        this.min_w_0().overflow_hidden()
+                    })
                     .children(if let Some(icon) = icon {
                         Some(icon)
                     } else if !capability.editable() {
@@ -3519,13 +3530,23 @@ impl Pane {
                 }
             });
 
+        let tab_bar_settings = TabBarSettings::get_global(cx);
+        let use_separate_rows = tab_bar_settings.show_pinned_tabs_in_separate_row;
+        let pinned_tab_chips = tab_bar_settings.pinned_tab_chips;
+        let unpinned_tab_chips = tab_bar_settings.unpinned_tab_chips;
+
         let mut tab_items = self
             .items
             .iter()
             .enumerate()
             .zip(tab_details(&self.items, window, cx))
             .map(|((ix, item), detail)| {
-                self.render_tab(ix, &**item, detail, &focus_handle, window, cx)
+                let is_chip = if self.is_tab_pinned(ix) {
+                    pinned_tab_chips
+                } else {
+                    unpinned_tab_chips
+                };
+                self.render_tab(ix, &**item, detail, is_chip, &focus_handle, window, cx)
                     .into_any_element()
             })
             .collect::<Vec<_>>();
@@ -3542,9 +3563,6 @@ impl Pane {
         }
         let unpinned_tabs = tab_items.split_off(self.pinned_tab_count);
         let pinned_tabs = tab_items;
-
-        let tab_bar_settings = TabBarSettings::get_global(cx);
-        let use_separate_rows = tab_bar_settings.show_pinned_tabs_in_separate_row;
 
         if use_separate_rows && !pinned_tabs.is_empty() && !unpinned_tabs.is_empty() {
             self.render_two_row_tab_bar(
