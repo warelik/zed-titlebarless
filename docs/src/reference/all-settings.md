@@ -175,7 +175,7 @@ Open the Settings Editor and search for “Threads Sidebar Position”. Or add t
 
 **Options**
 
-Numbers from `200` to `800` pixels (inclusive). Values outside this range are clamped to the nearest limit.
+Numbers from `100` to `800` pixels (inclusive). Values outside this range are clamped to the nearest limit.
 
 Open the Settings Editor and search for “Threads Sidebar Default Width”. Or add this to your `settings.json`:
 
@@ -192,6 +192,29 @@ Open the Settings Editor and search for “Threads Sidebar Default Width”. Or 
 Changing this setting immediately updates the sidebar width, even if you previously resized it manually. You can also double-click the divider to reset the sidebar to the configured width.
 
 Widths saved by older versions of Zed are preserved if they differ from the previous default of 300 pixels. A saved width of 300 pixels uses this setting instead.
+
+### Threads Sidebar Compact
+
+- Description: Whether each thread uses a single row at tab-bar height, with details shown on hover.
+- Setting: `agent.threads_sidebar.compact`
+- Default: `false`
+
+**Options**
+
+`boolean` values
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "agent": {
+    "threads_sidebar": {
+      "compact": true
+    }
+  }
+}
+```
 
 ### Threads Sidebar Auto Open {#agent-threads-sidebar-auto-open}
 
@@ -2409,14 +2432,28 @@ When trusted, project settings are synchronized automatically, language and MCP 
     "quick_actions": true,
     "selections_menu": true,
     "agent_review": true,
-    "code_actions": false
+    "code_actions": false,
+    "compact": false
   }
 }
 ```
 
 **Options**
 
-Each option controls displaying of a particular toolbar element. If all elements are hidden, the editor toolbar is not displayed.
+Each display option controls a particular toolbar element. If all elements are hidden, the editor toolbar is not displayed.
+
+- `compact`: Whether to shrink pane toolbars to the height of the tab bar. The default is `false`.
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "toolbar": {
+    "compact": true
+  }
+}
+```
 
 ## Use System Tabs
 
@@ -6450,6 +6487,48 @@ Where subpixel rendering is unavailable, Zed renders text in grayscale.
 **Options**
 
 `boolean` values
+
+## Panel Rows Tab Height
+
+- Description: Whether rows in the project, Git, and outline panels use the tab-bar height, aligning them with the tab bar and project panel sticky rows.
+- Setting: `panel_rows_tab_height`
+- Default: `false`
+
+**Options**
+
+`boolean` values
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "panel_rows_tab_height": true
+}
+```
+
+## Shadows
+
+- Description: Controls individual shadows in the user interface.
+- Setting: `shadows`
+Open the Settings Editor and choose **Edit in settings.json**. Configure these
+shadow options in JSON.
+
+- Default:
+
+```json [settings]
+{
+  "shadows": {
+    "project_panel": true,
+    "minimap": true
+  }
+}
+```
+
+**Options**
+
+- `project_panel`: Whether to paint the shadow below sticky folder rows in the project panel.
+- `minimap`: Whether to paint the shadow around the minimap.
 
 ## Theme
 

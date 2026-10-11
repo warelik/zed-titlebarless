@@ -49,6 +49,7 @@ pub struct WorkspaceSettings {
     pub title_bar_to_status_bar: bool,
     pub(crate) title_bar_visibility: settings::TitleBarVisibility,
     pub focus_follows_mouse: FocusFollowsMouse,
+    pub compact_toolbar: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -173,6 +174,12 @@ impl Settings for WorkspaceSettings {
                         .unwrap_or(250),
                 ),
             },
+            compact_toolbar: content
+                .editor
+                .toolbar
+                .as_ref()
+                .and_then(|toolbar| toolbar.compact)
+                .unwrap_or(false),
         }
     }
 }
@@ -260,6 +267,7 @@ mod tests {
         let mut raw: settings::SettingsContent =
             settings::parse_json_with_comments(&settings::default_settings()).unwrap();
         raw.workspace.title_bar_to_status_bar = None;
+        raw.editor.toolbar = None;
         if let Some(tab_bar) = raw.tab_bar.as_mut() {
             tab_bar.pinned_tab_chips = None;
             tab_bar.unpinned_tab_chips = None;
@@ -268,6 +276,7 @@ mod tests {
 
         let settings = WorkspaceSettings::from_settings(&raw);
         assert!(!settings.title_bar_to_status_bar);
+        assert!(!settings.compact_toolbar);
         let tab_settings = TabBarSettings::from_settings(&raw);
         assert!(!tab_settings.pinned_tab_chips);
         assert!(!tab_settings.unpinned_tab_chips);
