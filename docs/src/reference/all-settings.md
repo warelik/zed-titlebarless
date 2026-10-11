@@ -1981,7 +1981,10 @@ or
     "show": true,
     "show_nav_history_buttons": true,
     "show_tab_bar_buttons": true,
-    "show_pinned_tabs_in_separate_row": false
+    "show_pinned_tabs_in_separate_row": false,
+    "pinned_tab_chips": false,
+    "unpinned_tab_chips": false,
+    "max_tab_rows": 1
   }
 }
 ```
@@ -2018,13 +2021,80 @@ or
 
 ### Pinned Tabs in a Separate Row {#tab-bar-pinned-tabs}
 
-- Description: Show pinned tabs in a top row and unpinned tabs in a bottom row, instead of keeping all tabs in one row.
+- Description: Give pinned tabs their own row above unpinned tabs. By default, pinned and unpinned tabs share the first row.
 - Setting: `show_pinned_tabs_in_separate_row`
 - Default: `false`
 
 **Options**
 
 `boolean` values
+
+### Pinned Tab Chips
+
+- Description: Whether pinned tabs are rendered as compact, borderless chips that hug their contents.
+- Setting: `pinned_tab_chips`
+- Default: `false`
+
+**Options**
+
+`boolean` values
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "tab_bar": {
+    "pinned_tab_chips": true
+  }
+}
+```
+
+### Unpinned Tab Chips
+
+- Description: Whether unpinned tabs are rendered as compact, borderless chips that hug their contents.
+- Setting: `unpinned_tab_chips`
+- Default: `false`
+
+**Options**
+
+`boolean` values
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "tab_bar": {
+    "unpinned_tab_chips": true
+  }
+}
+```
+
+### Maximum Tab Rows
+
+- Description: Maximum number of rows for unpinned editor and terminal tabs. Wrapping is active only when both `tabs.min_width` and `tabs.max_width` are set; tabs fill up to `max_tab_rows` rows at `min_width` before the last row scrolls horizontally. A separate pinned row does not count toward this limit. `0` behaves as `1`.
+- Setting: `max_tab_rows`
+- Default: `1`
+
+**Options**
+
+Positive integer values (`1` or greater; `0` behaves as `1`).
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "tabs": {
+    "min_width": 120,
+    "max_width": 200
+  },
+  "tab_bar": {
+    "max_tab_rows": 3
+  }
+}
+```
 
 ## Tab Switcher {#tab-switcher}
 
@@ -2057,7 +2127,51 @@ See [Tab Switcher](../tab-switcher.md).
     "git_status": false,
     "activate_on_close": "history",
     "show_close_button": "hover",
-    "show_diagnostics": "off"
+    "show_diagnostics": "off",
+    "min_width": null,
+    "max_width": null
+  }
+}
+```
+
+### Minimum Width
+
+- Description: Minimum width of an editor tab in pixels. `null` keeps tabs as wide as their title.
+- Setting: `min_width`
+- Default: `null`
+
+**Options**
+
+A pixel value or `null`.
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "tabs": {
+    "min_width": 120
+  }
+}
+```
+
+### Maximum Width
+
+- Description: Maximum width of an editor tab in pixels. Longer titles are truncated in the middle. `null` keeps tabs as wide as their title.
+- Setting: `max_width`
+- Default: `null`
+
+**Options**
+
+A pixel value or `null`.
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "tabs": {
+    "max_width": 240
   }
 }
 ```

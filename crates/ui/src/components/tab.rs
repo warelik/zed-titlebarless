@@ -38,6 +38,8 @@ pub struct Tab {
     start_slot: Option<AnyElement>,
     end_slot: Option<AnyElement>,
     children: SmallVec<[AnyElement; 2]>,
+    chip: bool,
+    has_max_width: bool,
 }
 
 impl Tab {
@@ -53,7 +55,15 @@ impl Tab {
             start_slot: None,
             end_slot: None,
             children: SmallVec::new(),
+            chip: false,
+            has_max_width: false,
         }
+    }
+
+    /// Renders the tab as a compact borderless chip that hugs its content.
+    pub fn chip(mut self, chip: bool) -> Self {
+        self.chip = chip;
+        self
     }
 
     pub fn position(mut self, position: TabPosition) -> Self {
@@ -82,6 +92,23 @@ impl Tab {
 
     pub fn container_height(cx: &App) -> Pixels {
         DynamicSpacing::Base32.px(cx)
+    }
+
+    pub fn min_width(mut self, width: Option<Pixels>) -> Self {
+        if let Some(width) = width {
+            self.div = self.div.min_w(width);
+        }
+        self
+    }
+
+    pub fn max_width(mut self, width: Option<Pixels>) -> Self {
+        if let Some(width) = width {
+            // Clips the title at the bound; `has_max_width` keeps the slots at full size so
+            // that only the title shrinks.
+            self.div = self.div.max_w(width).overflow_hidden();
+            self.has_max_width = true;
+        }
+        self
     }
 }
 
@@ -124,14 +151,17 @@ impl RenderOnce for Tab {
             ),
         };
 
+        let keep_slot_size = self.chip || self.has_max_width;
         let (start_slot, end_slot) = {
             let start_slot = h_flex()
                 .size(START_TAB_SLOT_SIZE)
+                .when(keep_slot_size, |this| this.flex_shrink_0())
                 .justify_center()
                 .children(self.start_slot);
 
             let end_slot = h_flex()
                 .size(END_TAB_SLOT_SIZE)
+                .when(keep_slot_size, |this| this.flex_shrink_0())
                 .justify_center()
                 .children(self.end_slot);
 
@@ -140,6 +170,45 @@ impl RenderOnce for Tab {
                 TabCloseSide::Start => (end_slot, start_slot),
             }
         };
+
+        if self.chip {
+            let selected_bg = cx.theme().colors().element_selected;
+            let hover_bg = cx.theme().colors().element_hover;
+            return self
+                .div
+                .h(Tab::container_height(cx))
+                // Leaves the bottom line out of the centring, like regular tabs and the toolbar.
+                .pb_px()
+                .flex()
+                .items_center()
+                .px(DynamicSpacing::Base02.px(cx))
+                .cursor_pointer()
+                .child(
+                    h_flex()
+                        // Without an id the hover style gets no element state, so hovering does
+                        // not repaint and the highlight waits for an unrelated redraw.
+                        .id("chip")
+                        .group("")
+                        .relative()
+                        .min_w_0()
+                        .flex_grow(1.)
+                        .h(crate::ButtonSize::Default.rems())
+                        .px(DynamicSpacing::Base04.px(cx))
+                        .gap(DynamicSpacing::Base04.rems(cx))
+                        .rounded_sm()
+                        .text_color(text_color)
+                        .map(|this| {
+                            if self.selected {
+                                this.bg(selected_bg)
+                            } else {
+                                this.hover(move |style| style.bg(hover_bg))
+                            }
+                        })
+                        .child(start_slot)
+                        .children(self.children)
+                        .child(end_slot),
+                );
+        }
 
         self.div
             .h(Tab::container_height(cx))
