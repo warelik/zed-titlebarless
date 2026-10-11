@@ -39,13 +39,12 @@ use menu::{
     Cancel, Confirm, SelectChild, SelectFirst, SelectLast, SelectNext, SelectParent, SelectPrevious,
 };
 use notifications::status_toast::StatusToast;
-use platform_title_bar::apply_title_bar_insets;
+use platform_title_bar::{apply_title_bar_insets, sidebar_header_height, traffic_light_drag_area};
 use project::{
     AgentId, AgentRegistryStore, Event as ProjectEvent, WorktreeId, repo_identity_path_if_local,
 };
 use recent_projects::sidebar_recent_projects::SidebarRecentProjects;
 use remote::{RemoteConnectionOptions, same_remote_connection_identity};
-use ui::utils::platform_title_bar_height;
 
 use serde::{Deserialize, Serialize};
 use settings::{Settings as _, SettingsStore};
@@ -7410,7 +7409,7 @@ impl Sidebar {
     fn render_sidebar_header(
         &self,
         no_open_projects: bool,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let has_query = self.has_filter_query(cx);
@@ -7421,7 +7420,8 @@ impl Sidebar {
         let left_window_controls = !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_left;
         let right_window_controls =
             !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_right;
-        let header_height = platform_title_bar_height(window);
+        let in_status_bar = workspace::title_bar_in_status_bar(cx);
+        let header_height = sidebar_header_height(window, cx);
 
         h_flex()
             .h(header_height)
@@ -7433,6 +7433,7 @@ impl Sidebar {
                     right_window_controls,
                     no_open_projects,
                 ),
+                Decorations::Server if in_status_bar => header,
                 Decorations::Server => header.mt_px().pb_px(),
             })
             .when(left_window_controls, |this| {
@@ -7446,6 +7447,9 @@ impl Sidebar {
                 } else {
                     this
                 }
+            })
+            .when(traffic_lights && in_status_bar, |this| {
+                this.child(traffic_light_drag_area(window, cx))
             })
             .when(!right_window_controls, |this| this.pr_1p5())
             .gap_1()

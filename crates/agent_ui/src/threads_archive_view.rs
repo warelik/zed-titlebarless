@@ -28,14 +28,13 @@ use picker::{
     Picker, PickerDelegate,
     highlighted_match_with_paths::{HighlightedMatch, HighlightedMatchWithPaths},
 };
-use platform_title_bar::apply_title_bar_insets;
+use platform_title_bar::{apply_title_bar_insets, sidebar_header_height, traffic_light_drag_area};
 use project::{AgentId, AgentServerStore};
 use settings::Settings as _;
 use theme::ActiveTheme;
 use ui::{
     AgentThreadStatus, Divider, KeyBinding, ListItem, ListItemSpacing, ListSubHeader, ScrollAxes,
     Scrollbars, Tab, ThreadItem, Tooltip, WithScrollbar, prelude::*,
-    utils::platform_title_bar_height,
 };
 use util::ResultExt;
 use util::paths::PathExt;
@@ -857,7 +856,7 @@ impl ThreadsArchiveView {
         .detach_and_log_err(cx);
     }
 
-    fn render_header(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let has_query = !self.filter_editor.read(cx).text(cx).is_empty();
         let sidebar_on_left = matches!(
             AgentSettings::get_global(cx).sidebar_side(),
@@ -869,7 +868,8 @@ impl ThreadsArchiveView {
         let left_window_controls = !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_left;
         let right_window_controls =
             !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_right;
-        let header_height = platform_title_bar_height(window);
+        let in_status_bar = workspace::title_bar_in_status_bar(cx);
+        let header_height = sidebar_header_height(window, cx);
         let show_focus_keybinding =
             self.selection.is_some() && !self.filter_editor.focus_handle(cx).is_focused(window);
 
@@ -882,6 +882,7 @@ impl ThreadsArchiveView {
                     right_window_controls,
                     false,
                 ),
+                Decorations::Server if in_status_bar => header,
                 Decorations::Server => header.mt_px().pb_px(),
             })
             .when(left_window_controls, |this| {
@@ -895,6 +896,9 @@ impl ThreadsArchiveView {
                 } else {
                     this
                 }
+            })
+            .when(traffic_lights && in_status_bar, |this| {
+                this.child(traffic_light_drag_area(window, cx))
             })
             .when(!right_window_controls, |this| this.pr_1p5())
             .gap_1()
