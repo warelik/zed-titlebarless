@@ -613,6 +613,9 @@
   //    on notched displays, the area around the notch.
   //     "simple"
   "fullscreen_mode": "native",
+  // Whether to hide the title bar and show its contents in the status bar instead.
+  // macOS only: other platforms draw their window controls in the title bar, so it stays.
+  "title_bar_to_status_bar": false,
   // Titlebar related settings
   "title_bar": {
     // Whether to show git status indicators on the branch icon in the titlebar.

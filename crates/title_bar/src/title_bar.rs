@@ -55,6 +55,7 @@ use util::ResultExt;
 use workspace::{
     AccessibleMode, MultiWorkspace, ToggleWorktreeSecurity, Workspace,
     notifications::{NotifyResultExt, NotifyTaskExt as _},
+    title_bar_in_status_bar,
 };
 
 use zed_actions::OpenRemote;
@@ -205,6 +206,15 @@ fn update_layout_action_filter(cx: &mut App) {
 fn set_window_layout(layout: WindowLayout, cx: &App) {
     let fs = <dyn fs::Fs>::global(cx);
     drop(AgentSettings::set_layout(layout, fs, cx));
+}
+
+/// The status bar is at the bottom of the window, so popovers open upward from it.
+fn popover_anchor(anchor: Anchor, cx: &App) -> Anchor {
+    if title_bar_in_status_bar(cx) {
+        anchor.other_side_along(gpui::Axis::Vertical)
+    } else {
+        anchor
+    }
 }
 
 pub struct TitleBar {
@@ -409,6 +419,18 @@ impl Render for TitleBar {
                 })
                 .into_any_element(),
         );
+
+        if title_bar_in_status_bar(cx) {
+            // In the status bar, the platform title bar (window controls, drag area) has no place.
+            return h_flex()
+                .w_full()
+                .justify_between()
+                .when(show_menus, |this| {
+                    this.children(self.application_menu.clone())
+                })
+                .children(children)
+                .into_any_element();
+        }
 
         if show_menus {
             self.platform_titlebar.update(cx, |this, _| {
@@ -698,7 +720,7 @@ impl TitleBar {
                         )
                     },
                 )
-                .anchor(gpui::Anchor::TopLeft)
+                .anchor(popover_anchor(Anchor::TopLeft, cx))
                 .into_any_element(),
         )
     }
@@ -872,7 +894,7 @@ impl TitleBar {
                     Tooltip::for_action("Recent Projects", &zed_actions::OpenRecent::default(), cx)
                 },
             )
-            .anchor(gpui::Anchor::TopLeft)
+            .anchor(popover_anchor(Anchor::TopLeft, cx))
             .into_any_element()
     }
 
@@ -924,7 +946,7 @@ impl TitleBar {
                     Tooltip::for_action("Recent Projects", &zed_actions::OpenRecent::default(), cx)
                 },
             )
-            .anchor(gpui::Anchor::TopLeft)
+            .anchor(popover_anchor(Anchor::TopLeft, cx))
     }
 
     fn render_worktree_and_branch(
@@ -1030,7 +1052,7 @@ impl TitleBar {
                         )
                     },
                 )
-                .anchor(gpui::Anchor::TopLeft)
+                .anchor(popover_anchor(Anchor::TopLeft, cx))
         });
 
         let branch_picker = branch_name.and_then(|branch_name| {
@@ -1087,7 +1109,7 @@ impl TitleBar {
                             cx,
                         )
                     })
-                    .anchor(gpui::Anchor::TopLeft)
+                    .anchor(popover_anchor(Anchor::TopLeft, cx))
             })
         });
 
@@ -1437,7 +1459,7 @@ impl TitleBar {
                 })
                 .into()
             })
-            .anchor(Anchor::TopRight)
+            .anchor(popover_anchor(Anchor::TopRight, cx))
     }
 }
 

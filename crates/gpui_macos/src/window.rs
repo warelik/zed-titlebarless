@@ -1631,6 +1631,15 @@ impl PlatformWindow for MacWindow {
         state.move_traffic_light();
     }
 
+    fn traffic_light_size(&self) -> Option<Size<Pixels>> {
+        let state = self.0.lock();
+        let frame = state.traffic_light_buttons()?.close.frame();
+        Some(size(
+            Pixels::from(frame.size.width),
+            Pixels::from(frame.size.height),
+        ))
+    }
+
     fn scale_factor(&self) -> f32 {
         self.0.as_ref().lock().scale_factor()
     }

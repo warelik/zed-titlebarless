@@ -3067,6 +3067,12 @@ impl Window {
         self.platform_window.set_traffic_light_position(position);
     }
 
+    /// Returns the size of a macOS traffic light button, which depends on the SDK the app links against.
+    #[cfg(target_os = "macos")]
+    pub fn traffic_light_size(&self) -> Option<Size<Pixels>> {
+        self.platform_window.traffic_light_size()
+    }
+
     /// Sets the application identifier.
     pub fn set_app_id(&mut self, app_id: &str) {
         self.platform_window.set_app_id(app_id);
