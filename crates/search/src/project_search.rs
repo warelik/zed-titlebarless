@@ -5,8 +5,9 @@ use crate::{
     ToggleCaseSensitive, ToggleIncludeIgnored, ToggleRegex, ToggleReplace, ToggleWholeWord,
     buffer_search::Deploy,
     search_bar::{
-        ActionButtonState, HistoryNavigationDirection, alignment_element, input_base_styles,
-        render_action_button, render_text_input, should_navigate_history,
+        ActionButtonState, HistoryNavigationDirection, alignment_element, error_line,
+        input_base_styles, render_action_button, render_text_input, should_navigate_history,
+        text_input_cell,
     },
     text_finder::TextFinder,
 };
@@ -56,7 +57,7 @@ use ui::{
 };
 use util::{ResultExt as _, paths::PathMatcher};
 use workspace::{
-    DeploySearch, ItemNavHistory, NewSearch, ToolbarItemEvent, ToolbarItemLocation,
+    DeploySearch, ItemNavHistory, NewSearch, Toolbar, ToolbarItemEvent, ToolbarItemLocation,
     ToolbarItemView, Workspace, WorkspaceId,
     item::{Item, ItemBufferKind, ItemEvent, ItemHandle, SaveOptions},
     searchable::{Direction, SearchEvent, SearchToken, SearchableItem, SearchableItemHandle},
@@ -2998,10 +2999,14 @@ impl Render for ProjectSearchBar {
         let input_width = SearchInputWidth::calc_width(container_width);
 
         let input_base_styles = |panel: InputPanel| {
-            input_base_styles(search.border_color_for(panel, cx), |div| match panel {
-                InputPanel::Query | InputPanel::Replacement => div.w(input_width),
-                InputPanel::Include | InputPanel::Exclude => div.flex_grow_1(),
-            })
+            input_base_styles(
+                search.border_color_for(panel, cx),
+                |div| match panel {
+                    InputPanel::Query | InputPanel::Replacement => div.w(input_width),
+                    InputPanel::Include | InputPanel::Exclude => div.flex_grow_1(),
+                },
+                cx,
+            )
         };
         let theme_colors = cx.theme().colors();
         let project_search = search.entity.read(cx);
@@ -3050,7 +3055,7 @@ impl Render for ProjectSearchBar {
             .on_action(
                 cx.listener(|this, action, window, cx| this.next_history_query(action, window, cx)),
             )
-            .child(div().flex_1().py_1().child(render_text_input(
+            .child(text_input_cell(cx).child(render_text_input(
                 &search.query_editor,
                 color_override,
                 cx,
@@ -3213,11 +3218,7 @@ impl Render for ProjectSearchBar {
 
         let replace_line = search.replace_enabled.then(|| {
             let replace_column = input_base_styles(InputPanel::Replacement).child(
-                div().flex_1().py_1().child(render_text_input(
-                    &search.replacement_editor,
-                    None,
-                    cx,
-                )),
+                text_input_cell(cx).child(render_text_input(&search.replacement_editor, None, cx)),
             );
 
             let focus_handle = search.replacement_editor.read(cx).focus_handle(cx);
@@ -3311,28 +3312,18 @@ impl Render for ProjectSearchBar {
         let query_error_line = search
             .panels_with_errors
             .get(&InputPanel::Query)
-            .map(|error| {
-                Label::new(error)
-                    .size(LabelSize::Small)
-                    .color(Color::Error)
-                    .mt_neg_1()
-                    .ml_2()
-            });
+            .map(|error| error_line(error, cx));
 
         let filter_error_line = search
             .panels_with_errors
             .get(&InputPanel::Include)
             .or_else(|| search.panels_with_errors.get(&InputPanel::Exclude))
-            .map(|error| {
-                Label::new(error)
-                    .size(LabelSize::Small)
-                    .color(Color::Error)
-                    .mt_neg_1()
-                    .ml_2()
-            });
+            .map(|error| error_line(error, cx));
 
         v_flex()
-            .gap_2()
+            .when(Toolbar::compact_row_height(cx).is_none(), |this| {
+                this.gap_2()
+            })
             .w_full()
             .key_context(key_context)
             .on_action(cx.listener(|this, _: &ToggleFocus, window, cx| {
