@@ -2,6 +2,8 @@
 
 [Zed](https://github.com/zed-industries/zed) stable for macOS (Apple Silicon) with one goal: every row of the window does useful work.
 
+Zed without the title bar: titlebarless, title-less, no titlebar, hidden or hide title bar, compact title bar — the title bar contents live in the status bar instead.
+
 I work from a single MacBook — small display, many desktops, yabai. Cursor looks clean and compact but is slow; Zed is fast but spends space on rows that are mostly empty. This fork closes that gap with small, opt-in changes. It starts with the title bar; whatever comes next depends on what turns out to waste space.
 
 Everything is offered upstream first. The fork carries only what upstream hasn't taken (yet).
