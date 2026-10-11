@@ -8637,7 +8637,14 @@ impl Element for EditorElement {
 
                     let right_margin = minimap_width + vertical_scrollbar_width;
 
-                    let extended_right = 2 * em_width + right_margin;
+                    // A single-line editor has no content to scroll past its end, so it only
+                    // needs room for the cursor; the extra em hides text in narrow inputs.
+                    let overscroll_ems = if self.editor.read(cx).mode.is_single_line() {
+                        1.
+                    } else {
+                        2.
+                    };
+                    let extended_right = em_width * overscroll_ems + right_margin;
                     let editor_width = text_width - gutter_dimensions.margin - extended_right;
                     let editor_margins = EditorMargins {
                         gutter: gutter_dimensions,
