@@ -69,6 +69,13 @@
   "ui_font_weight": 400,
   // The default font size for text in the UI
   "ui_font_size": 16,
+  // Toggles for individual UI shadows.
+  "shadows": {
+    // Whether to paint the shadow under the sticky folder rows of the project panel.
+    "project_panel": true,
+    // Whether to paint the shadow around the minimap.
+    "minimap": true,
+  },
   // The font family for agent responses in the agent panel. Falls back to the UI font family if unset.
   "agent_ui_font_family": null,
   // The default font size for agent responses in the agent panel. Falls back to the UI font size if unset.

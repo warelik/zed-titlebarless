@@ -228,6 +228,9 @@ pub struct ThemeSettingsContent {
     #[serde(rename = "unstable.ui_density")]
     pub ui_density: Option<UiDensity>,
 
+    /// Which UI shadows to paint.
+    pub shadows: Option<ShadowsContent>,
+
     /// How much to fade out unused code.
     #[schemars(range(min = 0.0, max = 0.9))]
     pub unnecessary_code_fade: Option<CodeFade>,
@@ -243,6 +246,20 @@ pub struct ThemeSettingsContent {
     /// These values will override the ones on the specified theme
     #[serde(default)]
     pub theme_overrides: HashMap<String, ThemeStyleContent>,
+}
+
+/// Toggles for individual UI shadows.
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct ShadowsContent {
+    /// Whether to paint the shadow under the sticky folder rows of the project panel.
+    ///
+    /// Default: true
+    pub project_panel: Option<bool>,
+    /// Whether to paint the shadow around the minimap.
+    ///
+    /// Default: true
+    pub minimap: Option<bool>,
 }
 
 /// A font size value in pixels, wrapping around `f32` for custom settings UI rendering.
