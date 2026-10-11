@@ -93,6 +93,8 @@ pub struct TabBarSettings {
     pub show_nav_history_buttons: bool,
     pub show_tab_bar_buttons: bool,
     pub show_pinned_tabs_in_separate_row: bool,
+    pub pinned_tab_chips: bool,
+    pub unpinned_tab_chips: bool,
 }
 
 impl Settings for WorkspaceSettings {
@@ -213,6 +215,8 @@ impl Settings for TabBarSettings {
             show_nav_history_buttons: tab_bar.show_nav_history_buttons.unwrap(),
             show_tab_bar_buttons: tab_bar.show_tab_bar_buttons.unwrap(),
             show_pinned_tabs_in_separate_row: tab_bar.show_pinned_tabs_in_separate_row.unwrap(),
+            pinned_tab_chips: tab_bar.pinned_tab_chips.unwrap_or(false),
+            unpinned_tab_chips: tab_bar.unpinned_tab_chips.unwrap_or(false),
         }
     }
 }
