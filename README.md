@@ -44,6 +44,24 @@ Popovers open upward from the status bar:
 - The threads sidebar minimum width is halved (200 → 100 px).
 - Auto-update comes from this repository's releases. SSH remoting still downloads the official remote server, since the version matches upstream.
 
+### Optional density settings
+
+All off by default; each is a separate patch in [`patches/`](patches).
+
+```json
+{
+  "tabs": { "min_width": 120, "max_width": 200 },
+  "toolbar": { "compact": true },
+  "agent": { "threads_sidebar": { "compact": true } },
+  "project_panel": { "sticky_root_tab_height": true }
+}
+```
+
+- `tabs.min_width` / `tabs.max_width` — clamp tab width in px; long titles are truncated in the middle.
+- `toolbar.compact` — the breadcrumbs toolbar gets the height of the tab bar.
+- `agent.threads_sidebar.compact` — each thread is one row at the tab bar height, metadata on the title line.
+- `project_panel.sticky_root_tab_height` — the topmost sticky folder gets the height of the tab bar.
+
 Other changes will come later, if upstream rejects them.
 
 ## Install

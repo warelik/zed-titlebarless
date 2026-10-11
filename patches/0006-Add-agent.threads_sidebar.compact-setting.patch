@@ -1,0 +1,182 @@
+From 02bd020a84905c21e67d80a5bd508b3e1c4a6175 Mon Sep 17 00:00:00 2001
+From: warelik <warelik@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 16:22:53 +0300
+Subject: [PATCH 6/7] Add agent.threads_sidebar.compact setting
+
+Each sidebar thread takes two lines even when its only metadata is a
+timestamp. In compact mode a thread is one row at the tab bar height,
+with the metadata on the title line; hover actions replace it.
+---
+ assets/settings/default.json                |  2 ++
+ crates/agent/src/tool_permissions.rs        |  1 +
+ crates/agent_settings/src/agent_settings.rs |  2 ++
+ crates/agent_ui/src/agent_ui.rs             |  1 +
+ crates/settings_content/src/agent.rs        |  4 ++++
+ crates/sidebar/src/sidebar.rs               |  2 ++
+ crates/ui/src/components/ai/thread_item.rs  | 23 +++++++++++++++++++--
+ 7 files changed, 33 insertions(+), 2 deletions(-)
+
+diff --git a/assets/settings/default.json b/assets/settings/default.json
+index a3b738ed5b..3ba242c467 100644
+--- a/assets/settings/default.json
++++ b/assets/settings/default.json
+@@ -1180,6 +1180,8 @@
+       "default_width": 300,
+       // Automatically open the Threads Sidebar when opening a folder in an existing window.
+       "auto_open": true,
++      // Show each thread on a single line at the height of the tab bar.
++      "compact": false,
+     },
+     // Default fixed width when the agent panel is docked to the left or right and
+     // `flexible` is false.
+diff --git a/crates/agent/src/tool_permissions.rs b/crates/agent/src/tool_permissions.rs
+index fa38a0b0bb..750154a1fe 100644
+--- a/crates/agent/src/tool_permissions.rs
++++ b/crates/agent/src/tool_permissions.rs
+@@ -613,6 +613,7 @@ mod tests {
+                 auto_open: true,
+                 default_width: px(300.),
+                 position: settings::SidebarDockPosition::Left,
++                compact: false,
+             },
+             thinking_display: Default::default(),
+         }
+diff --git a/crates/agent_settings/src/agent_settings.rs b/crates/agent_settings/src/agent_settings.rs
+index 6372d1abd9..e88b9a9e33 100644
+--- a/crates/agent_settings/src/agent_settings.rs
++++ b/crates/agent_settings/src/agent_settings.rs
+@@ -257,6 +257,7 @@ pub struct ThreadsSidebarSettings {
+     pub auto_open: bool,
+     pub position: SidebarDockPosition,
+     pub default_width: Pixels,
++    pub compact: bool,
+ }
+ 
+ impl AgentSettings {
+@@ -785,6 +786,7 @@ impl Settings for AgentSettings {
+                     .unwrap()
+                     .into_gpui()
+                     .clamp(THREADS_LIST_MIN_WIDTH, THREADS_LIST_MAX_WIDTH),
++                compact: threads_sidebar.compact.unwrap(),
+             },
+             default_width: agent.default_width.unwrap().into_gpui(),
+             default_height: agent.default_height.unwrap().into_gpui(),
+diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
+index 7d28603d46..d9bcdf1811 100644
+--- a/crates/agent_ui/src/agent_ui.rs
++++ b/crates/agent_ui/src/agent_ui.rs
+@@ -1014,6 +1014,7 @@ mod tests {
+                 auto_open: true,
+                 default_width: px(300.),
+                 position: settings::SidebarDockPosition::Left,
++                compact: false,
+             },
+             thinking_display: Default::default(),
+         };
+diff --git a/crates/settings_content/src/agent.rs b/crates/settings_content/src/agent.rs
+index 6bafc029cb..bf6a194461 100644
+--- a/crates/settings_content/src/agent.rs
++++ b/crates/settings_content/src/agent.rs
+@@ -57,6 +57,10 @@ pub struct ThreadsSidebarSettingsContent {
+     /// Default: 300
+     #[schemars(range(min = 200, max = 800))]
+     pub default_width: Option<crate::PixelSetting>,
++    /// Whether to show each thread on a single line at the height of the tab bar.
++    ///
++    /// Default: false
++    pub compact: Option<bool>,
+ }
+ 
+ #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index 9fb6380ff3..377b726c7b 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -6303,6 +6303,7 @@ impl Sidebar {
+ 
+         let thread_item = ThreadItem::new(id, title.clone())
+             .base_bg(sidebar_bg)
++            .compact(AgentSettings::get_global(cx).threads_sidebar.compact)
+             .icon(icon)
+             .when(is_draft, |this| {
+                 this.icon_color(Color::Custom(cx.theme().colors().icon_muted.opacity(0.2)))
+@@ -6626,6 +6627,7 @@ impl Sidebar {
+ 
+         let terminal_item = ThreadItem::new(id, title)
+             .base_bg(sidebar_bg)
++            .compact(AgentSettings::get_global(cx).threads_sidebar.compact)
+             .icon(IconName::Terminal)
+             .when_some(icon_char, |this, icon_char| this.icon_char(icon_char))
+             .is_remote(is_remote)
+diff --git a/crates/ui/src/components/ai/thread_item.rs b/crates/ui/src/components/ai/thread_item.rs
+index 7cf574848a..476ca227aa 100644
+--- a/crates/ui/src/components/ai/thread_item.rs
++++ b/crates/ui/src/components/ai/thread_item.rs
+@@ -64,6 +64,7 @@ pub struct ThreadItem {
+     on_hover: Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>,
+     action_slot: Option<AnyElement>,
+     base_bg: Option<Hsla>,
++    compact: bool,
+ }
+ 
+ impl ThreadItem {
+@@ -99,6 +100,7 @@ impl ThreadItem {
+             on_hover: Box::new(|_, _, _| {}),
+             action_slot: None,
+             base_bg: None,
++            compact: false,
+         }
+     }
+ 
+@@ -246,10 +248,19 @@ impl ThreadItem {
+         self.base_bg = Some(color);
+         self
+     }
++
++    /// Renders the metadata on the title line, at the height of the tab bar.
++    pub fn compact(mut self, compact: bool) -> Self {
++        self.compact = compact;
++        self
++    }
+ }
+ 
+ impl RenderOnce for ThreadItem {
+     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
++        let compact = self.compact;
++        // On a single line the hover actions take the metadata's place.
++        let hide_metadata = compact && self.hovered && self.action_slot.is_some();
+         let color = cx.theme().colors();
+         let raw_bg = self.base_bg.unwrap_or(color.surface_background);
+         // The fade gradient paints a solid color over the title to blend it into
+@@ -430,6 +441,13 @@ impl RenderOnce for ThreadItem {
+             .w_full()
+             .py_1()
+             .px_1p5()
++            .when(compact, |this| {
++                this.flex_row()
++                    .items_center()
++                    .gap_2()
++                    .py_0()
++                    .h(crate::Tab::container_height(cx))
++            })
+             .when(self.selected, |s| s.bg(color.ghost_element_selected))
+             .border_1()
+             .border_r_2()
+@@ -484,11 +502,12 @@ impl RenderOnce for ThreadItem {
+                         })
+                     }),
+             )
+-            .when(has_metadata, |this| {
++            .when(has_metadata && !hide_metadata, |this| {
+                 this.child(
+                     h_flex()
+                         .gap_1p5()
+-                        .child(icon_container()) // Icon Spacing
++                        .when(compact, |this| this.flex_none())
++                        .when(!compact, |this| this.child(icon_container())) // Icon Spacing
+                         .when(self.archived, |this| {
+                             this.child(
+                                 Icon::new(IconName::Archive).size(IconSize::XSmall).color(
+-- 
+2.55.0
+

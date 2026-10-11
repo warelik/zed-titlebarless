@@ -1,0 +1,105 @@
+From d00d9798e7075f9c5c46ac19288e4150f945ca0e Mon Sep 17 00:00:00 2001
+From: warelik <warelik@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 16:10:17 +0300
+Subject: [PATCH 5/7] Add toolbar.compact setting
+
+The pane toolbar is taller than the tab bar because of its vertical
+padding and 32px rows. In compact mode it drops the padding and sizes
+its rows so that, with its bottom border, it matches the tab bar.
+---
+ assets/settings/default.json               | 2 ++
+ crates/settings_content/src/editor.rs      | 4 ++++
+ crates/workspace/src/toolbar.rs            | 9 +++++++++
+ crates/workspace/src/workspace_settings.rs | 2 ++
+ 4 files changed, 17 insertions(+)
+
+diff --git a/assets/settings/default.json b/assets/settings/default.json
+index 3fd3db5446..a3b738ed5b 100644
+--- a/assets/settings/default.json
++++ b/assets/settings/default.json
+@@ -595,6 +595,8 @@
+     "agent_review": true,
+     // Whether to show code action buttons in the editor toolbar.
+     "code_actions": false,
++    // Whether to shrink the pane toolbar to the height of the tab bar.
++    "compact": false,
+   },
+   // Whether to allow windows to tab together based on the user's tabbing preference (macOS only).
+   "use_system_window_tabs": false,
+diff --git a/crates/settings_content/src/editor.rs b/crates/settings_content/src/editor.rs
+index 23ff824a88..e2a4c64601 100644
+--- a/crates/settings_content/src/editor.rs
++++ b/crates/settings_content/src/editor.rs
+@@ -400,6 +400,10 @@ pub struct ToolbarContent {
+     ///
+     /// Default: false
+     pub code_actions: Option<bool>,
++    /// Whether to shrink the pane toolbar to the height of the tab bar.
++    ///
++    /// Default: false
++    pub compact: Option<bool>,
+ }
+ 
+ /// Scrollbar related settings
+diff --git a/crates/workspace/src/toolbar.rs b/crates/workspace/src/toolbar.rs
+index b14775f289..abf084cbdf 100644
+--- a/crates/workspace/src/toolbar.rs
++++ b/crates/workspace/src/toolbar.rs
+@@ -116,11 +116,16 @@ impl Render for Toolbar {
+ 
+         let has_left_items = self.left_items().count() > 0;
+         let has_right_items = self.right_items().count() > 0;
++        // Tab content height plus the toolbar's 1px bottom border equals the tab bar height.
++        let compact_height = <crate::WorkspaceSettings as settings::Settings>::get_global(cx)
++            .compact_toolbar
++            .then(|| ui::Tab::content_height(cx));
+ 
+         v_flex()
+             .group("toolbar")
+             .relative()
+             .py(DynamicSpacing::Base06.rems(cx))
++            .when(compact_height.is_some(), |this| this.py_0())
+             .px(DynamicSpacing::Base08.rems(cx))
+             .when(has_left_items || has_right_items, |this| {
+                 this.gap(DynamicSpacing::Base06.rems(cx))
+@@ -138,6 +143,9 @@ impl Render for Toolbar {
+                             this.child(
+                                 h_flex()
+                                     .min_h_8()
++                                    .when_some(compact_height, |this, height| {
++                                        this.min_h(height).h(height)
++                                    })
+                                     .flex_auto()
+                                     .justify_start()
+                                     .overflow_x_hidden()
+@@ -148,6 +156,7 @@ impl Render for Toolbar {
+                             this.child(
+                                 h_flex()
+                                     .h_8()
++                                    .when_some(compact_height, |this, height| this.h(height))
+                                     .flex_row_reverse()
+                                     .when(has_left_items, |this| this.flex_none())
+                                     .justify_end()
+diff --git a/crates/workspace/src/workspace_settings.rs b/crates/workspace/src/workspace_settings.rs
+index cf162095b1..c993e07284 100644
+--- a/crates/workspace/src/workspace_settings.rs
++++ b/crates/workspace/src/workspace_settings.rs
+@@ -47,6 +47,7 @@ pub struct WorkspaceSettings {
+     pub window_decorations: settings::WindowDecorations,
+     pub title_bar_to_status_bar: bool,
+     pub focus_follows_mouse: FocusFollowsMouse,
++    pub compact_toolbar: bool,
+ }
+ 
+ #[cfg(target_os = "macos")]
+@@ -166,6 +167,7 @@ impl Settings for WorkspaceSettings {
+                         .unwrap_or(250),
+                 ),
+             },
++            compact_toolbar: content.editor.toolbar.as_ref().unwrap().compact.unwrap(),
+         }
+     }
+ }
+-- 
+2.55.0
+
