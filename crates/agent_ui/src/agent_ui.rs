@@ -1110,6 +1110,7 @@ mod tests {
                 auto_open: true,
                 default_width: px(300.),
                 position: settings::SidebarDockPosition::Left,
+                compact: false,
             },
             thinking_display: Default::default(),
         };

@@ -51,12 +51,17 @@ pub struct ThreadsSidebarSettingsContent {
     pub position: Option<SidebarDockPosition>,
     /// Default width of the threads sidebar in pixels.
     ///
-    /// Values range from 200 to 800, matching the widths the sidebar can be
+    /// Values range from 100 to 800, matching the widths the sidebar can be
     /// dragged to. Values outside that range are clamped into it.
     ///
     /// Default: 300
-    #[schemars(range(min = 200, max = 800))]
+    #[schemars(range(min = 100, max = 800))]
     pub default_width: Option<crate::PixelSetting>,
+    /// Whether to show each thread on a single line at the height of the tab bar, with its
+    /// details on hover.
+    ///
+    /// Default: false
+    pub compact: Option<bool>,
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]

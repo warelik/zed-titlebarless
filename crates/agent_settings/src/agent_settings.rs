@@ -34,7 +34,7 @@ pub const COMPACTION_PROMPT: &str = include_str!("prompts/compaction_prompt.txt"
 /// Bounds on the width of the threads list. They constrain the configured
 /// default as well as the width the user drags to, so that no width the sidebar
 /// can hold is able to crowd out the editor or collapse the list.
-pub const THREADS_LIST_MIN_WIDTH: Pixels = px(200.0);
+pub const THREADS_LIST_MIN_WIDTH: Pixels = px(100.0);
 pub const THREADS_LIST_MAX_WIDTH: Pixels = px(800.0);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -257,6 +257,7 @@ pub struct ThreadsSidebarSettings {
     pub auto_open: bool,
     pub position: SidebarDockPosition,
     pub default_width: Pixels,
+    pub compact: bool,
 }
 
 impl AgentSettings {
@@ -785,6 +786,7 @@ impl Settings for AgentSettings {
                     .unwrap()
                     .into_gpui()
                     .clamp(THREADS_LIST_MIN_WIDTH, THREADS_LIST_MAX_WIDTH),
+                compact: threads_sidebar.compact.unwrap_or(false),
             },
             default_width: agent.default_width.unwrap().into_gpui(),
             default_height: agent.default_height.unwrap().into_gpui(),
@@ -1201,6 +1203,22 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[gpui::test]
+    fn test_threads_sidebar_compact_defaults_to_false_when_none(cx: &mut gpui::App) {
+        let store = SettingsStore::test(cx);
+        let mut content = store.raw_default_settings().clone();
+        content
+            .agent
+            .as_mut()
+            .unwrap()
+            .threads_sidebar
+            .as_mut()
+            .unwrap()
+            .compact = None;
+        let agent_settings = AgentSettings::from_settings(&content);
+        assert!(!agent_settings.threads_sidebar.compact);
     }
 
     #[gpui::test]
