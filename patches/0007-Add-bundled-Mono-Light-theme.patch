@@ -5,24 +5,25 @@ Subject: [PATCH 7/8] Add bundled Mono Light theme
 
 Mono Light is a flat light theme for the borderless layout of this fork.
 The border colours of panes, panels and elements are transparent, and
-the editor, panels, tab bar and status bar share one surface colour
-(#F1F0EF), so areas are told apart by spacing and by the hover and
-selection fill (#E2E1DE) instead of by lines. The scrollbar thumb has
-the surface colour at rest and takes the hover fill under the pointer.
+the editor, panels, tab bar, toolbar, terminal and status bar share one
+surface colour (#F1F0EF), so areas are told apart by spacing and by the
+hover and selection fill (#E2E1DE) instead of by lines. The scrollbar
+thumb is transparent in every state; the minimap thumb keeps a
+translucent fill so the visible range stays readable.
 
 The theme is only bundled. It shows up in the theme picker and can be
 chosen with "theme": "Mono Light"; the default theme does not change.
 ---
- assets/themes/mono/mono.json | 83 ++++++++++++++++++++++++++++++++++++
- 1 file changed, 83 insertions(+)
+ assets/themes/mono/mono.json | 99 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 99 insertions(+)
  create mode 100644 assets/themes/mono/mono.json
 
 diff --git a/assets/themes/mono/mono.json b/assets/themes/mono/mono.json
 new file mode 100644
-index 0000000000..fad0e9e835
+index 0000000000..bd2223f2f9
 --- /dev/null
 +++ b/assets/themes/mono/mono.json
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,99 @@
 +{
 +  "$schema": "https://zed.dev/schema/themes/v0.2.0.json",
 +  "name": "Mono",
@@ -32,24 +33,40 @@ index 0000000000..fad0e9e835
 +      "name": "Mono Light",
 +      "appearance": "light",
 +      "style": {
++        "text": "#000000",
++        "text.muted": "#82827C",
++
 +        "border": "#00000000",
 +        "border.variant": "#00000000",
 +        "border.focused": "#00000000",
 +        "border.selected": "#00000000",
 +        "panel.focused_border": "#00000000",
 +        "pane.focused_border": "#00000000",
++        "scrollbar.track.border": "#00000000",
 +
 +        "background": "#F1F0EF",
 +        "surface.background": "#F1F0EF",
++        "elevated_surface.background": "#F1F0EF",
 +        "status_bar.background": "#F1F0EF",
 +        "tab_bar.background": "#F1F0EF",
 +        "tab.inactive_background": "#F1F0EF",
++        "tab.active_background": "#F1F0EF",
++        "toolbar.background": "#F1F0EF",
 +        "panel.background": "#F1F0EF",
++        "editor.background": "#F1F0EF",
++        "editor.gutter.background": "#F1F0EF",
++        "editor.subheader.background": "#F1F0EF",
++        "terminal.background": "#F1F0EF",
++        "terminal.ansi.background": "#F1F0EF",
 +
 +        "element.selected": "#E2E1DE",
 +        "element.hover": "#E2E1DE",
-+        "scrollbar.thumb.background": "#F1F0EF",
-+        "scrollbar.thumb.hover_background": "#E2E1DE",
++        "scrollbar.thumb.background": "#00000000",
++        "scrollbar.thumb.hover_background": "#00000000",
++        "scrollbar.thumb.active_background": "#00000000",
++        "minimap.thumb.background": "#DCDBD7B3",
++        "minimap.thumb.hover_background": "#D7D5D1B3",
++        "minimap.thumb.active_background": "#DCDBD7B3",
 +        "players": [{ "selection": "#E2E1DE" }],
 +
 +        "conflict": "#CE2C31", "conflict.background": "#FEEBEC", "conflict.border": "#CE2C31",
