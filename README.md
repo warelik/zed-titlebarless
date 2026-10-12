@@ -46,7 +46,6 @@ Without any setting:
 - The threads sidebar minimum width is halved (200 → 100 px). The clamp also applies to `agent.threads_sidebar.default_width`, so its valid range now starts at 100.
 - Single-line editors (such as the threads sidebar search) reserve one em instead of two after the text.
 - A flat light theme, Mono Light, is bundled. It only appears in the theme picker (`"theme": "Mono Light"`); the default theme is unchanged.
-- Release builds use fat LTO instead of thin LTO (slower to build, no change in behaviour).
 - Auto-update comes from this repository's releases. SSH remoting still downloads the official remote server, since the version matches upstream.
 
 ### Optional density settings
