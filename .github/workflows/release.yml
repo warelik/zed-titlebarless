@@ -77,6 +77,12 @@ jobs:
           ZED_UPDATE_MANIFEST_URL: https://github.com/${{ github.repository }}/releases/latest/download/latest.json
         run: ./script/bundle-mac aarch64-apple-darwin
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Zed-aarch64.dmg
+          path: zed/target/aarch64-apple-darwin/release/Zed-aarch64.dmg
+          if-no-files-found: error
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
