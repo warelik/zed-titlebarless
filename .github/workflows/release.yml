@@ -73,8 +73,7 @@ jobs:
       - name: Build
         working-directory: zed
         env:
-          ALLOW_MISSING_LICENSES: 1
-          CARGO_PROFILE_RELEASE_DEBUG: "false"
+          CARGO_INCREMENTAL: 0
           ZED_UPDATE_MANIFEST_URL: https://github.com/${{ github.repository }}/releases/latest/download/latest.json
         run: ./script/bundle-mac aarch64-apple-darwin
 
