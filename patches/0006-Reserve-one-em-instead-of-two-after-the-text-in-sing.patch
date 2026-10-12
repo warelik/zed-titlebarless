@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: warelik <warelik@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 22:31:38 +0300
+Subject: [PATCH 6/8] Reserve one em instead of two after the text in
+ single-line editors
+
+Single-line editors have nothing to scroll past their end, yet they
+reserved two ems after the text. In a narrow input such as the threads
+sidebar search that left room for only a couple of visible characters.
+One em still keeps the cursor visible.
+
+Editors in the other modes keep the two ems. This applies without a
+setting.
+---
+ crates/editor/src/element.rs | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/crates/editor/src/element.rs b/crates/editor/src/element.rs
+index b8b0e67c24..c59545b48d 100644
+--- a/crates/editor/src/element.rs
++++ b/crates/editor/src/element.rs
+@@ -8566,7 +8566,14 @@ impl Element for EditorElement {
+ 
+                     let right_margin = minimap_width + vertical_scrollbar_width;
+ 
+-                    let extended_right = 2 * em_width + right_margin;
++                    // A single-line editor has no content to scroll past its end, so it only
++                    // needs room for the cursor; the extra em hides text in narrow inputs.
++                    let overscroll_ems = if self.editor.read(cx).mode.is_single_line() {
++                        1.
++                    } else {
++                        2.
++                    };
++                    let extended_right = em_width * overscroll_ems + right_margin;
+                     let editor_width = text_width - gutter_dimensions.margin - extended_right;
+                     let editor_margins = EditorMargins {
+                         gutter: gutter_dimensions,
+-- 
+2.55.0
+

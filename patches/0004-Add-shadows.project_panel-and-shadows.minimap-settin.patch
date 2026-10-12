@@ -1,0 +1,193 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: warelik <warelik@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 21:24:41 +0300
+Subject: [PATCH 4/8] Add shadows.project_panel and shadows.minimap settings
+
+The sticky folder rows of the project panel and the minimap draw
+shadows that read as visual noise in flat themes. These toggles turn
+each of them off. Only the shadow is skipped; the sticky rows
+themselves are unchanged. Both settings default to true, which keeps
+the stock shadows.
+---
+ assets/settings/default.json                |  7 +++++++
+ crates/editor/src/element.rs                |  6 ++++--
+ crates/project_panel/src/project_panel.rs   |  3 ++-
+ crates/settings/src/vscode_import.rs        |  1 +
+ crates/settings_content/src/theme.rs        | 17 +++++++++++++++++
+ crates/theme_settings/src/settings.rs       | 16 ++++++++++++++++
+ crates/theme_settings/src/theme_settings.rs |  4 ++--
+ 7 files changed, 49 insertions(+), 5 deletions(-)
+
+diff --git a/assets/settings/default.json b/assets/settings/default.json
+index 470efc3d33..0695356169 100644
+--- a/assets/settings/default.json
++++ b/assets/settings/default.json
+@@ -69,6 +69,13 @@
+   "ui_font_weight": 400,
+   // The default font size for text in the UI
+   "ui_font_size": 16,
++  // Toggles for individual UI shadows.
++  "shadows": {
++    // Whether to paint the shadow under the sticky folder rows of the project panel.
++    "project_panel": true,
++    // Whether to paint the shadow around the minimap.
++    "minimap": true,
++  },
+   // The font family for agent responses in the agent panel. Falls back to the UI font family if unset.
+   "agent_ui_font_family": null,
+   // The default font size for agent responses in the agent panel. Falls back to the UI font size if unset.
+diff --git a/crates/editor/src/element.rs b/crates/editor/src/element.rs
+index 91f06b0e2f..b8b0e67c24 100644
+--- a/crates/editor/src/element.rs
++++ b/crates/editor/src/element.rs
+@@ -87,7 +87,7 @@ use std::{
+ use sum_tree::Bias;
+ use text::{BufferId, ToPoint as _};
+ use theme::{ActiveTheme, Appearance, PlayerColor};
+-use theme_settings::BufferLineHeight;
++use theme_settings::{BufferLineHeight, ThemeSettings};
+ use ui::utils::ensure_minimum_contrast;
+ use ui::{ButtonLike, POPOVER_Y_PADDING, Tooltip, prelude::*, scrollbars::ShowScrollbar};
+ use unicode_segmentation::UnicodeSegmentation;
+@@ -1681,7 +1681,9 @@ impl EditorElement {
+ 
+         let mut minimap = div()
+             .size_full()
+-            .shadow_xs()
++            .when(ThemeSettings::get_global(cx).shadows.minimap, |this| {
++                this.shadow_xs()
++            })
+             .px(PADDING_OFFSET)
+             .child(minimap_editor)
+             .into_any_element();
+diff --git a/crates/project_panel/src/project_panel.rs b/crates/project_panel/src/project_panel.rs
+index 7fb5e6d7ef..9737f28538 100644
+--- a/crates/project_panel/src/project_panel.rs
++++ b/crates/project_panel/src/project_panel.rs
+@@ -7230,6 +7230,7 @@ impl ProjectPanel {
+         // already checked if non empty above
+         let last_item_index = sticky_parents.len() - 1;
+         let marked_selections: Arc<[SelectedEntry]> = Arc::from(self.marked_entries.clone());
++        let shadow_enabled = ThemeSettings::get_global(cx).shadows.project_panel;
+         sticky_parents
+             .iter()
+             .enumerate()
+@@ -7258,7 +7259,7 @@ impl ProjectPanel {
+                     window,
+                     cx,
+                 )
+-                .when(index == last_item_index, |this| {
++                .when(index == last_item_index && shadow_enabled, |this| {
+                     let shadow_color_top = hsla(0.0, 0.0, 0.0, 0.1);
+                     let shadow_color_bottom = hsla(0.0, 0.0, 0.0, 0.);
+                     let sticky_shadow = div()
+diff --git a/crates/settings/src/vscode_import.rs b/crates/settings/src/vscode_import.rs
+index d1cd0ed3ea..47472ba2ee 100644
+--- a/crates/settings/src/vscode_import.rs
++++ b/crates/settings/src/vscode_import.rs
+@@ -1043,6 +1043,7 @@ impl VsCodeSettings {
+             theme: None,
+             icon_theme: None,
+             ui_density: None,
++            shadows: None,
+             unnecessary_code_fade: None,
+             experimental_theme_overrides: None,
+             theme_overrides: Default::default(),
+diff --git a/crates/settings_content/src/theme.rs b/crates/settings_content/src/theme.rs
+index 157d138455..2124b535a5 100644
+--- a/crates/settings_content/src/theme.rs
++++ b/crates/settings_content/src/theme.rs
+@@ -225,6 +225,9 @@ pub struct ThemeSettingsContent {
+     #[serde(rename = "unstable.ui_density")]
+     pub ui_density: Option<UiDensity>,
+ 
++    /// Which UI shadows to paint.
++    pub shadows: Option<ShadowsContent>,
++
+     /// How much to fade out unused code.
+     #[schemars(range(min = 0.0, max = 0.9))]
+     pub unnecessary_code_fade: Option<CodeFade>,
+@@ -242,6 +245,20 @@ pub struct ThemeSettingsContent {
+     pub theme_overrides: HashMap<String, ThemeStyleContent>,
+ }
+ 
++/// Toggles for individual UI shadows.
++#[with_fallible_options]
++#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
++pub struct ShadowsContent {
++    /// Whether to paint the shadow under the sticky folder rows of the project panel.
++    ///
++    /// Default: true
++    pub project_panel: Option<bool>,
++    /// Whether to paint the shadow around the minimap.
++    ///
++    /// Default: true
++    pub minimap: Option<bool>,
++}
++
+ /// A font size value in pixels, wrapping around `f32` for custom settings UI rendering.
+ #[derive(
+     Clone,
+diff --git a/crates/theme_settings/src/settings.rs b/crates/theme_settings/src/settings.rs
+index e72179bdc5..0fbe306ef0 100644
+--- a/crates/theme_settings/src/settings.rs
++++ b/crates/theme_settings/src/settings.rs
+@@ -94,10 +94,21 @@ pub struct ThemeSettings {
+     /// The density of the UI.
+     /// Note: This setting is still experimental. See [this tracking issue](
+     pub ui_density: UiDensity,
++    /// Which UI shadows to paint.
++    pub shadows: ShadowSettings,
+     /// The amount of fading applied to unnecessary code.
+     pub unnecessary_code_fade: f32,
+ }
+ 
++/// Toggles for individual UI shadows.
++#[derive(Debug, Clone, Copy, PartialEq)]
++pub struct ShadowSettings {
++    /// Whether to paint the shadow under the sticky folder rows of the project panel.
++    pub project_panel: bool,
++    /// Whether to paint the shadow around the minimap.
++    pub minimap: bool,
++}
++
+ /// Returns the name of the default theme for the given [`Appearance`].
+ pub fn default_theme(appearance: Appearance) -> &'static str {
+     match appearance {
+@@ -707,6 +718,7 @@ impl settings::Settings for ThemeSettings {
+         let markdown_preview = settings_content.markdown_preview.as_ref();
+         let theme_selection: ThemeSelection = content.theme.clone().unwrap().into();
+         let icon_theme_selection: IconThemeSelection = content.icon_theme.clone().unwrap().into();
++        let shadows = content.shadows.as_ref().unwrap();
+         Self {
+             ui_font_size: clamp_font_size(content.ui_font_size.unwrap().into_gpui()),
+             ui_font: Font {
+@@ -761,6 +773,10 @@ impl settings::Settings for ThemeSettings {
+             theme_overrides: content.theme_overrides.clone(),
+             icon_theme: icon_theme_selection,
+             ui_density: ui_density_from_settings(content.ui_density.unwrap_or_default()),
++            shadows: ShadowSettings {
++                project_panel: shadows.project_panel.unwrap(),
++                minimap: shadows.minimap.unwrap(),
++            },
+             unnecessary_code_fade: content.unnecessary_code_fade.unwrap().0.clamp(0.0, 0.9),
+         }
+     }
+diff --git a/crates/theme_settings/src/theme_settings.rs b/crates/theme_settings/src/theme_settings.rs
+index f56a46b405..e5296d656a 100644
+--- a/crates/theme_settings/src/theme_settings.rs
++++ b/crates/theme_settings/src/theme_settings.rs
+@@ -30,8 +30,8 @@ use crate::settings::adjust_buffer_font_size;
+ pub use crate::settings::{
+     AgentBufferFontSize, AgentUiFontSize, BufferLineHeight, FontFamilyName,
+     GitCommitBufferFontSize, IconThemeName, IconThemeSelection, MarkdownPreviewFontSize,
+-    ThemeAppearanceMode, ThemeName, ThemeSelection, ThemeSettings, adjust_agent_buffer_font_size,
+-    adjust_agent_ui_font_size, adjust_git_commit_buffer_font_size,
++    ShadowSettings, ThemeAppearanceMode, ThemeName, ThemeSelection, ThemeSettings,
++    adjust_agent_buffer_font_size, adjust_agent_ui_font_size, adjust_git_commit_buffer_font_size,
+     adjust_markdown_preview_font_size, adjust_ui_font_size, adjusted_font_size, appearance_to_mode,
+     buffer_line_height_from_settings, clamp_font_size, default_theme,
+     observe_buffer_font_size_adjustment, reset_agent_buffer_font_size, reset_agent_ui_font_size,
+-- 
+2.55.0
+

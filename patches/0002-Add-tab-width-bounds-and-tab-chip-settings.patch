@@ -1,0 +1,464 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: warelik <warelik@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 16:05:02 +0300
+Subject: [PATCH 2/8] Add tab width bounds and tab chip settings
+
+Tabs size to their title by default, which makes the tab bar uneven.
+tabs.min_width and tabs.max_width clamp the tab width; editor and
+terminal titles truncate in the middle when a maximum is set.
+
+tab_bar.pinned_tab_chips and tab_bar.unpinned_tab_chips render the
+tabs of the pinned or unpinned row as compact borderless chips that hug
+their content. Chips are as tall as the toolbar's default buttons and
+use the theme's element state colours.
+
+The width bounds default to null and the chips to false, which keeps
+the stock tab layout, including terminal titles in the tab switcher.
+---
+ assets/settings/default.json               |  8 +++
+ crates/settings/src/vscode_import.rs       |  4 ++
+ crates/settings_content/src/workspace.rs   | 17 ++++++
+ crates/terminal_view/src/terminal_view.rs  | 12 +++-
+ crates/ui/src/components/tab.rs            | 66 ++++++++++++++++++++++
+ crates/workspace/src/item.rs               |  4 ++
+ crates/workspace/src/pane.rs               | 30 ++++++++--
+ crates/workspace/src/workspace.rs          | 38 +++++++++++++
+ crates/workspace/src/workspace_settings.rs |  4 ++
+ 9 files changed, 176 insertions(+), 7 deletions(-)
+
+diff --git a/assets/settings/default.json b/assets/settings/default.json
+index 67798e5099..bbc8f654c9 100644
+--- a/assets/settings/default.json
++++ b/assets/settings/default.json
+@@ -1467,6 +1467,10 @@
+     // When enabled, pinned tabs appear in a top row and unpinned tabs in a bottom row.
+     // When disabled, all tabs appear in a single row (default behavior).
+     "show_pinned_tabs_in_separate_row": false,
++    // Whether to render pinned tabs as compact borderless chips.
++    "pinned_tab_chips": false,
++    // Whether to render unpinned tabs as compact borderless chips.
++    "unpinned_tab_chips": false,
+   },
+   // Settings related to the editor's tabs
+   "tabs": {
+@@ -1506,6 +1510,10 @@
+     // 3. Mark files with errors and warnings:
+     //    "all"
+     "show_diagnostics": "off",
++    // Minimum width of a tab in pixels; null keeps tabs as wide as their title.
++    "min_width": null,
++    // Maximum width of a tab in pixels; longer titles are truncated in the middle.
++    "max_width": null,
+   },
+   // Settings related to preview tabs.
+   "preview_tabs": {
+diff --git a/crates/settings/src/vscode_import.rs b/crates/settings/src/vscode_import.rs
+index f4d59b06b2..d1cd0ed3ea 100644
+--- a/crates/settings/src/vscode_import.rs
++++ b/crates/settings/src/vscode_import.rs
+@@ -801,6 +801,8 @@ impl VsCodeSettings {
+                         ShowCloseButton::Hidden
+                     }
+                 }),
++            min_width: None,
++            max_width: None,
+         })
+     }
+ 
+@@ -830,6 +832,8 @@ impl VsCodeSettings {
+                 .read_str("workbench.editor.editorActionsLocation")
+                 .and_then(|str| if str == "hidden" { Some(false) } else { None }),
+             show_pinned_tabs_in_separate_row: None,
++            pinned_tab_chips: None,
++            unpinned_tab_chips: None,
+         })
+     }
+ 
+diff --git a/crates/settings_content/src/workspace.rs b/crates/settings_content/src/workspace.rs
+index d106cc9f15..43d0e48d63 100644
+--- a/crates/settings_content/src/workspace.rs
++++ b/crates/settings_content/src/workspace.rs
+@@ -207,6 +207,15 @@ pub struct ItemSettingsContent {
+     ///
+     /// Default: false
+     pub show_close_button: Option<ShowCloseButton>,
++    /// Minimum width of a tab in pixels. `null` keeps tabs as wide as their title.
++    ///
++    /// Default: null
++    pub min_width: Option<crate::PixelSetting>,
++    /// Maximum width of a tab in pixels. Longer titles are truncated in the middle.
++    /// `null` keeps tabs as wide as their title.
++    ///
++    /// Default: null
++    pub max_width: Option<crate::PixelSetting>,
+ }
+ 
+ #[with_fallible_options]
+@@ -556,6 +565,14 @@ pub struct TabBarSettingsContent {
+     ///
+     /// Default: false
+     pub show_pinned_tabs_in_separate_row: Option<bool>,
++    /// Whether to render pinned tabs as compact borderless chips.
++    ///
++    /// Default: false
++    pub pinned_tab_chips: Option<bool>,
++    /// Whether to render unpinned tabs as compact borderless chips.
++    ///
++    /// Default: false
++    pub unpinned_tab_chips: Option<bool>,
+ }
+ 
+ #[with_fallible_options]
+diff --git a/crates/terminal_view/src/terminal_view.rs b/crates/terminal_view/src/terminal_view.rs
+index c821c4b0f3..223c5fa607 100644
+--- a/crates/terminal_view/src/terminal_view.rs
++++ b/crates/terminal_view/src/terminal_view.rs
+@@ -53,7 +53,8 @@ use workspace::{
+     CloseActiveItem, DraggedSelection, DraggedTab, NewCenterTerminal, NewTerminal, Pane,
+     ToolbarItemLocation, Workspace, WorkspaceId, delete_unloaded_items,
+     item::{
+-        HighlightedText, Item, ItemEvent, SerializableItem, TabContentParams, TabTooltipContent,
++        HighlightedText, Item, ItemEvent, ItemSettings, SerializableItem, TabContentParams,
++        TabTooltipContent,
+     },
+     register_serializable_item,
+     searchable::{
+@@ -1600,10 +1601,17 @@ impl Item for TerminalView {
+             None => (IconName::Terminal, Color::Muted, None),
+         };
+ 
++        // The tab switcher always asks for middle truncation; terminal titles only follow it
++        // when a maximum tab width is configured, so the default layout is unchanged.
++        let truncate_title_middle =
++            params.truncate_title_middle && ItemSettings::get_global(cx).max_width.is_some();
+         let self_handle = self.self_handle.clone();
+         h_flex()
+             .gap_1()
+             .group("term-tab-icon")
++            .when(truncate_title_middle, |this| {
++                this.w_full().min_w_0().overflow_hidden()
++            })
+             .when(!params.selected, |this| {
+                 this.track_focus(&self.focus_handle)
+             })
+@@ -1634,10 +1642,12 @@ impl Item for TerminalView {
+             .child(
+                 div()
+                     .relative()
++                    .when(truncate_title_middle, |this| this.flex_1().min_w_0())
+                     .child(
+                         Label::new(title)
+                             .single_line()
+                             .color(params.text_color())
++                            .when(truncate_title_middle, |this| this.truncate_middle())
+                             .when(self.is_renaming(), |this| this.alpha(0.)),
+                     )
+                     .when_some(self.rename_editor.clone(), |this, editor| {
+diff --git a/crates/ui/src/components/tab.rs b/crates/ui/src/components/tab.rs
+index 6a25ad4345..64a4819d17 100644
+--- a/crates/ui/src/components/tab.rs
++++ b/crates/ui/src/components/tab.rs
+@@ -38,6 +38,8 @@ pub struct Tab {
+     start_slot: Option<AnyElement>,
+     end_slot: Option<AnyElement>,
+     children: SmallVec<[AnyElement; 2]>,
++    chip: bool,
++    has_max_width: bool,
+ }
+ 
+ impl Tab {
+@@ -53,9 +55,17 @@ impl Tab {
+             start_slot: None,
+             end_slot: None,
+             children: SmallVec::new(),
++            chip: false,
++            has_max_width: false,
+         }
+     }
+ 
++    /// Renders the tab as a compact borderless chip that hugs its content.
++    pub fn chip(mut self, chip: bool) -> Self {
++        self.chip = chip;
++        self
++    }
++
+     pub fn position(mut self, position: TabPosition) -> Self {
+         self.position = position;
+         self
+@@ -83,6 +93,23 @@ impl Tab {
+     pub fn container_height(cx: &App) -> Pixels {
+         DynamicSpacing::Base32.px(cx)
+     }
++
++    pub fn min_width(mut self, width: Option<Pixels>) -> Self {
++        if let Some(width) = width {
++            self.div = self.div.min_w(width);
++        }
++        self
++    }
++
++    pub fn max_width(mut self, width: Option<Pixels>) -> Self {
++        if let Some(width) = width {
++            // Clips the title at the bound; `has_max_width` keeps the slots at full size so
++            // that only the title shrinks.
++            self.div = self.div.max_w(width).overflow_hidden();
++            self.has_max_width = true;
++        }
++        self
++    }
+ }
+ 
+ impl InteractiveElement for Tab {
+@@ -124,14 +151,17 @@ impl RenderOnce for Tab {
+             ),
+         };
+ 
++        let keep_slot_size = self.chip || self.has_max_width;
+         let (start_slot, end_slot) = {
+             let start_slot = h_flex()
+                 .size(START_TAB_SLOT_SIZE)
++                .when(keep_slot_size, |this| this.flex_shrink_0())
+                 .justify_center()
+                 .children(self.start_slot);
+ 
+             let end_slot = h_flex()
+                 .size(END_TAB_SLOT_SIZE)
++                .when(keep_slot_size, |this| this.flex_shrink_0())
+                 .justify_center()
+                 .children(self.end_slot);
+ 
+@@ -141,6 +171,42 @@ impl RenderOnce for Tab {
+             }
+         };
+ 
++        if self.chip {
++            let selected_bg = cx.theme().colors().element_selected;
++            let hover_bg = cx.theme().colors().element_hover;
++            return self
++                .div
++                .h(Tab::container_height(cx))
++                // Leaves the bottom line out of the centring, like regular tabs and the toolbar.
++                .pb_px()
++                .flex()
++                .items_center()
++                .px(DynamicSpacing::Base02.px(cx))
++                .cursor_pointer()
++                .child(
++                    h_flex()
++                        .group("")
++                        .relative()
++                        .min_w_0()
++                        .flex_grow(1.)
++                        .h(crate::ButtonSize::Default.rems())
++                        .px(DynamicSpacing::Base04.px(cx))
++                        .gap(DynamicSpacing::Base04.rems(cx))
++                        .rounded_sm()
++                        .text_color(text_color)
++                        .map(|this| {
++                            if self.selected {
++                                this.bg(selected_bg)
++                            } else {
++                                this.hover(move |style| style.bg(hover_bg))
++                            }
++                        })
++                        .child(start_slot)
++                        .children(self.children)
++                        .child(end_slot),
++                );
++        }
++
+         self.div
+             .h(Tab::container_height(cx))
+             .bg(tab_bg)
+diff --git a/crates/workspace/src/item.rs b/crates/workspace/src/item.rs
+index ab4195f6a4..15cd5e1723 100644
+--- a/crates/workspace/src/item.rs
++++ b/crates/workspace/src/item.rs
+@@ -61,6 +61,8 @@ pub struct ItemSettings {
+     pub file_icons: bool,
+     pub show_diagnostics: ShowDiagnostics,
+     pub show_close_button: ShowCloseButton,
++    pub min_width: Option<Pixels>,
++    pub max_width: Option<Pixels>,
+ }
+ 
+ #[derive(RegisterSetting)]
+@@ -91,6 +93,8 @@ impl Settings for ItemSettings {
+             file_icons: tabs.file_icons.unwrap(),
+             show_diagnostics: tabs.show_diagnostics.unwrap(),
+             show_close_button: tabs.show_close_button.unwrap(),
++            min_width: tabs.min_width.map(|width| gpui::px(width.0)),
++            max_width: tabs.max_width.map(|width| gpui::px(width.0)),
+         }
+     }
+ }
+diff --git a/crates/workspace/src/pane.rs b/crates/workspace/src/pane.rs
+index 528dfa2976..40bc7bb9f9 100644
+--- a/crates/workspace/src/pane.rs
++++ b/crates/workspace/src/pane.rs
+@@ -2842,6 +2842,7 @@ impl Pane {
+         ix: usize,
+         item: &dyn ItemHandle,
+         detail: usize,
++        is_chip: bool,
+         focus_handle: &FocusHandle,
+         window: &mut Window,
+         cx: &mut Context<Pane>,
+@@ -2852,6 +2853,7 @@ impl Pane {
+             .map(|id| id == item.item_id())
+             .unwrap_or(false);
+ 
++        let settings = ItemSettings::get_global(cx);
+         let label = item.tab_content(
+             TabContentParams {
+                 detail: Some(detail),
+@@ -2859,7 +2861,7 @@ impl Pane {
+                 preview: is_preview,
+                 deemphasized: !self.has_focus(window, cx),
+                 max_title_len: None,
+-                truncate_title_middle: false,
++                truncate_title_middle: settings.max_width.is_some(),
+             },
+             window,
+             cx,
+@@ -2867,7 +2869,6 @@ impl Pane {
+ 
+         let icon = self.tab_icon_element(item, is_active, window, cx);
+ 
+-        let settings = ItemSettings::get_global(cx);
+         let close_side = &settings.close_position;
+         let show_close_button = &settings.show_close_button;
+         let indicator = render_item_indicator(item.boxed_clone(), cx);
+@@ -2920,6 +2921,9 @@ impl Pane {
+                 ClosePosition::Right => ui::TabCloseSide::End,
+             })
+             .toggle_state(is_active)
++            .chip(is_chip)
++            .min_width(settings.min_width)
++            .max_width(settings.max_width)
+             .on_click(cx.listener({
+                 let item_handle = item.boxed_clone();
+                 move |pane: &mut Self, event: &ClickEvent, window, cx| {
+@@ -3056,6 +3060,13 @@ impl Pane {
+                 h_flex()
+                     .id(("pane-tab-content", ix))
+                     .gap_1()
++                    .when(
++                        settings.min_width.is_some() || settings.max_width.is_some(),
++                        |this| this.flex_grow(1.),
++                    )
++                    .when(settings.max_width.is_some(), |this| {
++                        this.min_w_0().overflow_hidden()
++                    })
+                     .children(if let Some(icon) = icon {
+                         Some(icon)
+                     } else if !capability.editable() {
+@@ -3519,13 +3530,23 @@ impl Pane {
+                 }
+             });
+ 
++        let tab_bar_settings = TabBarSettings::get_global(cx);
++        let use_separate_rows = tab_bar_settings.show_pinned_tabs_in_separate_row;
++        let pinned_tab_chips = tab_bar_settings.pinned_tab_chips;
++        let unpinned_tab_chips = tab_bar_settings.unpinned_tab_chips;
++
+         let mut tab_items = self
+             .items
+             .iter()
+             .enumerate()
+             .zip(tab_details(&self.items, window, cx))
+             .map(|((ix, item), detail)| {
+-                self.render_tab(ix, &**item, detail, &focus_handle, window, cx)
++                let is_chip = if self.is_tab_pinned(ix) {
++                    pinned_tab_chips
++                } else {
++                    unpinned_tab_chips
++                };
++                self.render_tab(ix, &**item, detail, is_chip, &focus_handle, window, cx)
+                     .into_any_element()
+             })
+             .collect::<Vec<_>>();
+@@ -3543,9 +3564,6 @@ impl Pane {
+         let unpinned_tabs = tab_items.split_off(self.pinned_tab_count);
+         let pinned_tabs = tab_items;
+ 
+-        let tab_bar_settings = TabBarSettings::get_global(cx);
+-        let use_separate_rows = tab_bar_settings.show_pinned_tabs_in_separate_row;
+-
+         if use_separate_rows && !pinned_tabs.is_empty() && !unpinned_tabs.is_empty() {
+             self.render_two_row_tab_bar(
+                 pinned_tabs,
+diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
+index 715ed113bf..2ee0e41367 100644
+--- a/crates/workspace/src/workspace.rs
++++ b/crates/workspace/src/workspace.rs
+@@ -13219,6 +13219,44 @@ mod tests {
+         assert!(first_tab_left(true, cx) >= without_spacer + px(ui::utils::TRAFFIC_LIGHT_PADDING));
+     }
+ 
++    #[gpui::test]
++    async fn test_tab_width_bounds(cx: &mut TestAppContext) {
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs, None, cx).await;
++        let (workspace, cx) =
++            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
++        add_an_item_to_active_pane(cx, &workspace, 1);
++
++        let tab_width =
++            |min_width: Option<f32>, max_width: Option<f32>, cx: &mut VisualTestContext| {
++                cx.update(|_, cx| {
++                    SettingsStore::update_global(cx, |store, cx| {
++                        store.update_user_settings(cx, |settings| {
++                            let tabs = settings.tabs.get_or_insert_default();
++                            tabs.min_width = min_width.map(Into::into);
++                            tabs.max_width = max_width.map(Into::into);
++                        })
++                    });
++                });
++                cx.run_until_parked();
++                cx.debug_bounds("TAB-0")
++                    .expect("the tab should be rendered")
++                    .size
++                    .width
++            };
++        let natural = tab_width(None, None, cx);
++        assert_eq!(
++            tab_width(Some(natural.as_f32() + 100.), None, cx),
++            natural + px(100.)
++        );
++        assert_eq!(
++            tab_width(None, Some(natural.as_f32() - 10.), cx),
++            natural - px(10.)
++        );
++        assert_eq!(tab_width(None, None, cx), natural);
++    }
++
+     #[gpui::test]
+     async fn test_window_title_format_empty_project(cx: &mut TestAppContext) {
+         init_test(cx);
+diff --git a/crates/workspace/src/workspace_settings.rs b/crates/workspace/src/workspace_settings.rs
+index cf162095b1..4e2bb061f5 100644
+--- a/crates/workspace/src/workspace_settings.rs
++++ b/crates/workspace/src/workspace_settings.rs
+@@ -92,6 +92,8 @@ pub struct TabBarSettings {
+     pub show_nav_history_buttons: bool,
+     pub show_tab_bar_buttons: bool,
+     pub show_pinned_tabs_in_separate_row: bool,
++    pub pinned_tab_chips: bool,
++    pub unpinned_tab_chips: bool,
+ }
+ 
+ impl Settings for WorkspaceSettings {
+@@ -211,6 +213,8 @@ impl Settings for TabBarSettings {
+             show_nav_history_buttons: tab_bar.show_nav_history_buttons.unwrap(),
+             show_tab_bar_buttons: tab_bar.show_tab_bar_buttons.unwrap(),
+             show_pinned_tabs_in_separate_row: tab_bar.show_pinned_tabs_in_separate_row.unwrap(),
++            pinned_tab_chips: tab_bar.pinned_tab_chips.unwrap(),
++            unpinned_tab_chips: tab_bar.unpinned_tab_chips.unwrap(),
+         }
+     }
+ }
+-- 
+2.55.0
+

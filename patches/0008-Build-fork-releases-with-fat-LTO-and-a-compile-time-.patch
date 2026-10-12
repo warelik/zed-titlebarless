@@ -1,0 +1,136 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: warelik <warelik@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 11:28:27 +0300
+Subject: [PATCH 8/8] Build fork releases with fat LTO and a compile-time
+ update manifest
+
+Release builds use fat LTO instead of thin LTO, and the zed crate drops
+its per-package override of 16 codegen units, so it is built in one like
+the rest of the release profile. The optimiser can then work across the
+whole binary, at the price of a much slower and more memory-hungry
+release build. release-fast keeps its settings.
+
+App updates are read from a manifest URL set at compile time, so fork
+builds update from the fork's own releases. Setting
+ZED_UPDATE_MANIFEST_URL when compiling (it is read with option_env!)
+makes the update check fetch that URL instead of asking zed.dev for the
+latest release; without it the stock request is made. The manifest is a
+JSON object of the same shape as the zed.dev answer:
+
+    {"version": "1.23.2", "url": "https://example.com/Zed-aarch64.dmg"}
+
+The request carries no telemetry ids. The remote server keeps coming
+from zed.dev, because its version matches the upstream release.
+
+Limits: the manifest describes a single asset with no OS, architecture
+or channel in it, so every such build needs its own URL. A version that
+is not newer than the installed one is not offered, so a fork rebuild
+of the same upstream version never triggers an update; bump the version
+to publish one.
+---
+ Cargo.toml                            |  5 +--
+ crates/auto_update/src/auto_update.rs | 56 +++++++++++++++++----------
+ 2 files changed, 37 insertions(+), 24 deletions(-)
+
+diff --git a/Cargo.toml b/Cargo.toml
+index 1a61f86114..b3e86d4286 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1116,12 +1116,9 @@ zed_actions = { codegen-units = 1 }
+ 
+ [profile.release]
+ debug = "limited"
+-lto = "thin"
++lto = "fat"
+ codegen-units = 1
+ 
+-[profile.release.package]
+-zed = { codegen-units = 16 }
+-
+ [profile.release-fast]
+ inherits = "release"
+ debug = "full"
+diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs
+index 38324d5348..6afd897a5c 100644
+--- a/crates/auto_update/src/auto_update.rs
++++ b/crates/auto_update/src/auto_update.rs
+@@ -717,24 +717,7 @@ impl AutoUpdater {
+             },
+         )?;
+ 
+-        let mut response = http_client
+-            .get(url.as_str(), Default::default(), true)
+-            .await?;
+-        let mut body = Vec::new();
+-        response.body_mut().read_to_end(&mut body).await?;
+-
+-        anyhow::ensure!(
+-            response.status().is_success(),
+-            "failed to fetch release: {:?}",
+-            String::from_utf8_lossy(&body),
+-        );
+-
+-        serde_json::from_slice(body.as_slice()).with_context(|| {
+-            format!(
+-                "error deserializing release {:?}",
+-                String::from_utf8_lossy(&body),
+-            )
+-        })
++        fetch_release_json(&http_client, url.as_str(), "release").await
+     }
+ 
+     async fn update(this: Entity<Self>, cx: &mut AsyncApp) -> Result<()> {
+@@ -756,8 +739,16 @@ impl AutoUpdater {
+             cx.notify();
+         });
+ 
+-        let fetched_release_data =
+-            Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx).await?;
++        // Fork builds point this at their own release manifest; the remote server keeps
++        // coming from zed.dev because its version matches the upstream release.
++        let fetched_release_data = match option_env!("ZED_UPDATE_MANIFEST_URL") {
++            Some(manifest_url) => {
++                fetch_release_json(&client, manifest_url, "release manifest").await?
++            }
++            None => {
++                Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx).await?
++            }
++        };
+         let fetched_version = fetched_release_data.clone().version;
+         let app_commit_sha = Ok(cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full())));
+         let newer_version = Self::check_if_fetched_version_is_newer(
+@@ -1073,6 +1064,31 @@ async fn cleanup_remote_server_cache(
+     Ok(())
+ }
+ 
++async fn fetch_release_json(
++    client: &HttpClientWithUrl,
++    url: &str,
++    description: &str,
++) -> Result<ReleaseAsset> {
++    let mut response = client.get(url, Default::default(), true).await?;
++    let mut body = Vec::new();
++    response.body_mut().read_to_end(&mut body).await?;
++
++    anyhow::ensure!(
++        response.status().is_success(),
++        "failed to fetch {}: {:?}",
++        description,
++        String::from_utf8_lossy(&body),
++    );
++
++    serde_json::from_slice(body.as_slice()).with_context(|| {
++        format!(
++            "error deserializing {} {:?}",
++            description,
++            String::from_utf8_lossy(&body),
++        )
++    })
++}
++
+ async fn download_release(
+     target_path: &Path,
+     release: ReleaseAsset,
+-- 
+2.55.0
+

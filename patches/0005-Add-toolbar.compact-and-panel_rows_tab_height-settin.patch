@@ -1,0 +1,740 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: warelik <warelik@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 16:10:17 +0300
+Subject: [PATCH 5/8] Add toolbar.compact and panel_rows_tab_height settings
+
+Both settings line rows up with the tab bar height.
+
+The pane toolbar is taller than the tab bar because of its vertical
+padding, the gap above secondary rows such as the search bar, and its
+32px rows. toolbar.compact drops the padding and the gap and sizes the
+primary row so that, with the toolbar's bottom border, it matches the
+tab bar. The row only has a minimum height, as in stock Zed, so tall
+items such as the project search bar grow it instead of overflowing
+into the tab bar. The empty breadcrumbs placeholder that multi-file
+diffs show takes the row height instead of 32px.
+
+The rows of the buffer and project search bars are 32px whatever the
+density, which left a single-row project search 1px taller than the
+tab bar. Under toolbar.compact they are as tall as a tab's content and
+stack without gaps, so n rows plus the toolbar's border are n times the
+content height plus 1px: one row equals the tab bar. A search error,
+which stock tucks into the gap between two rows, gets a row of the
+same height instead, so it neither overlaps the input nor breaks the
+rhythm. The search bar is the same wherever it appears, so the one
+above an agent panel terminal is compacted as well, padding included.
+
+Notices that sit below the primary row, such as the multibuffer hint
+or a banner, are content-sized in stock Zed and would break that
+rhythm. Each gets a row of at least a tab's content height with its
+content centred, and the multibuffer hint drops its vertical padding
+to fit. A dismissed Python banner leaves the toolbar instead of
+leaving an empty row behind.
+
+Rows in the project, git and outline panels are shorter than the tab
+bar next to them, so the sticky rows of the project panel never line up
+with it. panel_rows_tab_height gives every row in these panels the tab
+bar height.
+
+Both settings default to off and leave the stock layout untouched.
+---
+ assets/settings/default.json               |  5 +++
+ crates/agent_ui/src/agent_panel.rs         |  6 ++-
+ crates/breadcrumbs/src/breadcrumbs.rs      |  7 +++-
+ crates/git_ui/src/git_panel.rs             | 20 +++++----
+ crates/language_onboarding/src/python.rs   |  9 +++-
+ crates/onboarding/src/multibuffer_hint.rs  |  6 ++-
+ crates/outline_panel/src/outline_panel.rs  |  5 +++
+ crates/project_panel/src/project_panel.rs  |  6 +++
+ crates/search/src/buffer_search.rs         | 27 +++++-------
+ crates/search/src/project_search.rs        | 47 +++++++++------------
+ crates/search/src/search_bar.rs            | 38 +++++++++++++++--
+ crates/settings/src/vscode_import.rs       |  1 +
+ crates/settings_content/src/editor.rs      |  4 ++
+ crates/settings_content/src/theme.rs       |  4 ++
+ crates/theme_settings/src/settings.rs      |  3 ++
+ crates/workspace/src/toolbar.rs            | 48 ++++++++++++++++++----
+ crates/workspace/src/workspace_settings.rs |  2 +
+ 17 files changed, 167 insertions(+), 71 deletions(-)
+
+diff --git a/assets/settings/default.json b/assets/settings/default.json
+index 0695356169..4ef8ff4d83 100644
+--- a/assets/settings/default.json
++++ b/assets/settings/default.json
+@@ -12,6 +12,9 @@
+     "dark": "One Dark",
+   },
+   "icon_theme": "Zed (Default)",
++  // Whether rows in the project, git and outline panels take the tab bar height,
++  // so they line up with the tab bar and the sticky rows of the project panel.
++  "panel_rows_tab_height": false,
+   // The name of a base set of key bindings to use.
+   // This setting can take the following values:
+   //
+@@ -602,6 +605,8 @@
+     "agent_review": true,
+     // Whether to show code action buttons in the editor toolbar.
+     "code_actions": false,
++    // Whether to shrink the pane toolbar to the height of the tab bar.
++    "compact": false,
+   },
+   // Whether to allow windows to tab together based on the user's tabbing preference (macOS only).
+   "use_system_window_tabs": false,
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index 8b50b5e74c..5a179247a1 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -99,7 +99,7 @@ use ui::{
+ use util::ResultExt as _;
+ use workspace::{
+     CollaboratorId, DraggedSelection, DraggedTab, MultiWorkspace, PathList, SerializedPathList,
+-    ToggleWorkspaceSidebar, ToggleZoom, ToolbarItemView, Workspace, WorkspaceId,
++    ToggleWorkspaceSidebar, ToggleZoom, Toolbar, ToolbarItemView, Workspace, WorkspaceId,
+     dock::{DockPosition, Panel, PanelEvent},
+     item::{ItemEvent, ItemHandle},
+ };
+@@ -6568,7 +6568,9 @@ impl Render for AgentPanel {
+                                     v_flex()
+                                         .group("toolbar")
+                                         .relative()
+-                                        .py(DynamicSpacing::Base06.rems(cx))
++                                        .when(Toolbar::compact_row_height(cx).is_none(), |this| {
++                                            this.py(DynamicSpacing::Base06.rems(cx))
++                                        })
+                                         .px(DynamicSpacing::Base08.rems(cx))
+                                         .border_b_1()
+                                         .border_color(cx.theme().colors().border_variant)
+diff --git a/crates/breadcrumbs/src/breadcrumbs.rs b/crates/breadcrumbs/src/breadcrumbs.rs
+index b981e17c33..911af16627 100644
+--- a/crates/breadcrumbs/src/breadcrumbs.rs
++++ b/crates/breadcrumbs/src/breadcrumbs.rs
+@@ -3,7 +3,7 @@ use gpui::{
+ };
+ use ui::prelude::*;
+ use workspace::{
+-    ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
++    Toolbar, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
+     item::{HighlightedText, ItemEvent, ItemHandle},
+ };
+ 
+@@ -50,7 +50,10 @@ impl Render for Breadcrumbs {
+         let element = h_flex()
+             .id("breadcrumb-container")
+             .flex_grow_1()
+-            .h_8()
++            .map(|this| match Toolbar::compact_row_height(cx) {
++                Some(height) => this.h(height),
++                None => this.h_8(),
++            })
+             .overflow_x_scroll()
+             .text_ui(cx);
+ 
+diff --git a/crates/git_ui/src/git_panel.rs b/crates/git_ui/src/git_panel.rs
+index d486099996..2d36e48ec8 100644
+--- a/crates/git_ui/src/git_panel.rs
++++ b/crates/git_ui/src/git_panel.rs
+@@ -7912,7 +7912,7 @@ impl GitPanel {
+                                             ));
+                                         }
+                                         Some(GitListEntry::EmptySection(section)) => {
+-                                            items.push(this.render_empty_section(*section));
++                                            items.push(this.render_empty_section(*section, cx));
+                                         }
+                                         None => {}
+                                     }
+@@ -7962,8 +7962,12 @@ impl GitPanel {
+         Label::new(label.into()).single_line().color(color)
+     }
+ 
+-    fn list_item_height(&self) -> Rems {
+-        rems(1.75)
++    fn list_item_height(&self, cx: &App) -> gpui::DefiniteLength {
++        if ThemeSettings::get_global(cx).panel_rows_tab_height {
++            Tab::container_height(cx).into()
++        } else {
++            rems(1.75).into()
++        }
+     }
+ 
+     fn render_list_header(
+@@ -7996,7 +8000,7 @@ impl GitPanel {
+         h_flex()
+             .id(id)
+             .group(group_name)
+-            .h(self.list_item_height())
++            .h(self.list_item_height(cx))
+             .w_full()
+             .pl_2p5()
+             .pr_1()
+@@ -8074,14 +8078,14 @@ impl GitPanel {
+             .into_any_element()
+     }
+ 
+-    fn render_empty_section(&self, section: Section) -> AnyElement {
++    fn render_empty_section(&self, section: Section, cx: &App) -> AnyElement {
+         let message = match section {
+             Section::Staged => "No staged changes yet",
+             Section::Unstaged => "No unstaged changes",
+             _ => "No changes",
+         };
+         h_flex()
+-            .h(self.list_item_height())
++            .h(self.list_item_height(cx))
+             .w_full()
+             .pl_2p5()
+             .pr_1()
+@@ -8466,7 +8470,7 @@ impl GitPanel {
+ 
+         h_flex()
+             .id(id)
+-            .h(self.list_item_height())
++            .h(self.list_item_height(cx))
+             .w_full()
+             .pl_2p5()
+             .pr_1()
+@@ -8689,7 +8693,7 @@ impl GitPanel {
+             .child(self.entry_label(entry.name.clone(), label_color).truncate());
+         h_flex()
+             .id(id)
+-            .h(self.list_item_height())
++            .h(self.list_item_height(cx))
+             .min_w_0()
+             .w_full()
+             .pl_2p5()
+diff --git a/crates/language_onboarding/src/python.rs b/crates/language_onboarding/src/python.rs
+index 64b6502327..6c2d3049c6 100644
+--- a/crates/language_onboarding/src/python.rs
++++ b/crates/language_onboarding/src/python.rs
+@@ -2,7 +2,7 @@ use db::kvp::Dismissable;
+ use editor::Editor;
+ use gpui::{Context, EventEmitter, Subscription};
+ use ui::{Banner, FluentBuilder as _, prelude::*};
+-use workspace::{ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace};
++use workspace::{Toolbar, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace};
+ 
+ pub struct BasedPyrightBanner {
+     dismissed: bool,
+@@ -66,6 +66,13 @@ impl Render for BasedPyrightBanner {
+                                     cx.listener(|this, _, _, cx| {
+                                         this.dismissed = true;
+                                         Self::set_dismissed(true, cx);
++                                        // A dismissed banner renders nothing but keeps its
++                                        // location, which would leave an empty compact row.
++                                        if Toolbar::compact_row_height(cx).is_some() {
++                                            cx.emit(ToolbarItemEvent::ChangeLocation(
++                                                ToolbarItemLocation::Hidden,
++                                            ));
++                                        }
+                                         cx.notify();
+                                     }),
+                                 ))
+diff --git a/crates/onboarding/src/multibuffer_hint.rs b/crates/onboarding/src/multibuffer_hint.rs
+index 56092863c8..a0bc7c6ab8 100644
+--- a/crates/onboarding/src/multibuffer_hint.rs
++++ b/crates/onboarding/src/multibuffer_hint.rs
+@@ -6,7 +6,7 @@ use db::kvp::KeyValueStore;
+ use gpui::{App, EntityId, EventEmitter, Subscription};
+ use ui::{IconButtonShape, Tooltip, prelude::*};
+ use workspace::item::{ItemBufferKind, ItemEvent, ItemHandle};
+-use workspace::{ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView};
++use workspace::{Toolbar, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView};
+ 
+ pub struct MultibufferHint {
+     shown_on: HashSet<EntityId>,
+@@ -136,7 +136,9 @@ impl Render for MultibufferHint {
+     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+         h_flex()
+             .px_2()
+-            .py_0p5()
++            .when(Toolbar::compact_row_height(cx).is_none(), |this| {
++                this.py_0p5()
++            })
+             .justify_between()
+             .bg(cx.theme().status().info_background.opacity(0.5))
+             .border_1()
+diff --git a/crates/outline_panel/src/outline_panel.rs b/crates/outline_panel/src/outline_panel.rs
+index 861d506da9..b01b646a9a 100644
+--- a/crates/outline_panel/src/outline_panel.rs
++++ b/crates/outline_panel/src/outline_panel.rs
+@@ -3032,9 +3032,13 @@ impl OutlinePanel {
+             PanelEntry::Fs(FsEntry::File(file)) => file.is_deleted,
+             _ => false,
+         };
++        let row_height = ThemeSettings::get_global(cx)
++            .panel_rows_tab_height
++            .then(|| Tab::container_height(cx));
+         div()
+             .text_ui(cx)
+             .id(item_id.clone())
++            .when_some(row_height, |this, height| this.h(height))
+             .on_click({
+                 let clicked_entry = rendered_entry.clone();
+                 cx.listener(move |outline_panel, event: &gpui::ClickEvent, window, cx| {
+@@ -3056,6 +3060,7 @@ impl OutlinePanel {
+             .cursor_pointer()
+             .child(
+                 ListItem::new(item_id)
++                    .when(row_height.is_some(), |this| this.height(relative(1.)))
+                     .indent_level(depth)
+                     .indent_step_size(px(settings.indent_size))
+                     .toggle_state(is_active)
+diff --git a/crates/project_panel/src/project_panel.rs b/crates/project_panel/src/project_panel.rs
+index 9737f28538..f019440946 100644
+--- a/crates/project_panel/src/project_panel.rs
++++ b/crates/project_panel/src/project_panel.rs
+@@ -6066,8 +6066,13 @@ impl ProjectPanel {
+                     .into_owned()
+             });
+ 
++        let row_height = ThemeSettings::get_global(cx)
++            .panel_rows_tab_height
++            .then(|| ui::Tab::container_height(cx));
++
+         div()
+             .id(id.clone())
++            .when_some(row_height, |this, height| this.h(height))
+             .relative()
+             .group(GROUP_NAME)
+             .when_some(
+@@ -6435,6 +6440,7 @@ impl ProjectPanel {
+             )
+             .child(
+                 ListItem::new(id)
++                    .when(row_height.is_some(), |this| this.height(relative(1.)))
+                     .indent_level(depth)
+                     .indent_step_size(px(settings.indent_size))
+                     .spacing(match settings.entry_spacing {
+diff --git a/crates/search/src/buffer_search.rs b/crates/search/src/buffer_search.rs
+index 8726f97e2c..78b581e6c8 100644
+--- a/crates/search/src/buffer_search.rs
++++ b/crates/search/src/buffer_search.rs
+@@ -6,9 +6,9 @@ use crate::{
+     ToggleCaseSensitive, ToggleRegex, ToggleReplace, ToggleSelection, ToggleWholeWord,
+     buffer_search::registrar::WithResultsOrExternalQuery,
+     search_bar::{
+-        ActionButtonState, HistoryNavigationDirection, alignment_element,
++        ActionButtonState, HistoryNavigationDirection, alignment_element, error_line,
+         filter_search_results_input, input_base_styles, render_action_button, render_text_input,
+-        should_navigate_history,
++        should_navigate_history, text_input_cell,
+     },
+ };
+ use any_vec::AnyVec;
+@@ -37,7 +37,7 @@ use zed_actions::{outline::ToggleOutline, workspace::CopyPath, workspace::CopyRe
+ use ui::{BASE_REM_SIZE_IN_PX, IconButtonShape, Tooltip, prelude::*, utils::SearchInputWidth};
+ use util::{ResultExt, paths::PathMatcher};
+ use workspace::{
+-    ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace,
++    Toolbar, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace,
+     item::{ItemBufferKind, ItemHandle},
+     searchable::{
+         Direction, FilteredSearchRange, SearchEvent, SearchToken, SearchableItemHandle,
+@@ -221,7 +221,7 @@ impl Render for BufferSearchBar {
+         let input_width = SearchInputWidth::calc_width(container_width);
+ 
+         let input_base_styles =
+-            |border_color| input_base_styles(border_color, |div| div.w(input_width));
++            |border_color| input_base_styles(border_color, |div| div.w(input_width), cx);
+ 
+         let input_style = if find_in_results {
+             filter_search_results_input(query_border, |div| div.w(input_width), cx)
+@@ -230,7 +230,7 @@ impl Render for BufferSearchBar {
+         };
+ 
+         let query_column = input_style
+-            .child(div().flex_1().min_w_0().py_1().child(render_text_input(
++            .child(text_input_cell(cx).min_w_0().child(render_text_input(
+                 &self.query_editor,
+                 color_override,
+                 cx,
+@@ -379,10 +379,7 @@ impl Render for BufferSearchBar {
+ 
+         let replace_line = should_show_replace_input.then(|| {
+             let replace_column = input_base_styles(replacement_border).child(
+-                div()
+-                    .flex_1()
+-                    .py_1()
+-                    .child(render_text_input(&self.replacement_editor, None, cx)),
++                text_input_cell(cx).child(render_text_input(&self.replacement_editor, None, cx)),
+             );
+             let focus_handle = self.replacement_editor.read(cx).focus_handle(cx);
+ 
+@@ -420,13 +417,7 @@ impl Render for BufferSearchBar {
+             key_context.add("in_replace");
+         }
+ 
+-        let query_error_line = self.query_error.as_ref().map(|error| {
+-            Label::new(error)
+-                .size(LabelSize::Small)
+-                .color(Color::Error)
+-                .mt_neg_1()
+-                .ml_2()
+-        });
++        let query_error_line = self.query_error.as_ref().map(|error| error_line(error, cx));
+ 
+         let search_line =
+             h_flex()
+@@ -455,7 +446,9 @@ impl Render for BufferSearchBar {
+ 
+         v_flex()
+             .id("buffer_search")
+-            .gap_2()
++            .when(Toolbar::compact_row_height(cx).is_none(), |this| {
++                this.gap_2()
++            })
+             .w_full()
+             .track_scroll(&self.scroll_handle)
+             .key_context(key_context)
+diff --git a/crates/search/src/project_search.rs b/crates/search/src/project_search.rs
+index 51be4def1a..865fce8964 100644
+--- a/crates/search/src/project_search.rs
++++ b/crates/search/src/project_search.rs
+@@ -5,8 +5,9 @@ use crate::{
+     ToggleCaseSensitive, ToggleIncludeIgnored, ToggleRegex, ToggleReplace, ToggleWholeWord,
+     buffer_search::Deploy,
+     search_bar::{
+-        ActionButtonState, HistoryNavigationDirection, alignment_element, input_base_styles,
+-        render_action_button, render_text_input, should_navigate_history,
++        ActionButtonState, HistoryNavigationDirection, alignment_element, error_line,
++        input_base_styles, render_action_button, render_text_input, should_navigate_history,
++        text_input_cell,
+     },
+     text_finder::TextFinder,
+ };
+@@ -56,7 +57,7 @@ use ui::{
+ };
+ use util::{ResultExt as _, paths::PathMatcher};
+ use workspace::{
+-    DeploySearch, ItemNavHistory, NewSearch, ToolbarItemEvent, ToolbarItemLocation,
++    DeploySearch, ItemNavHistory, NewSearch, Toolbar, ToolbarItemEvent, ToolbarItemLocation,
+     ToolbarItemView, Workspace, WorkspaceId,
+     item::{Item, ItemBufferKind, ItemEvent, ItemHandle, SaveOptions},
+     searchable::{Direction, SearchEvent, SearchToken, SearchableItem, SearchableItemHandle},
+@@ -2997,10 +2998,14 @@ impl Render for ProjectSearchBar {
+         let input_width = SearchInputWidth::calc_width(container_width);
+ 
+         let input_base_styles = |panel: InputPanel| {
+-            input_base_styles(search.border_color_for(panel, cx), |div| match panel {
+-                InputPanel::Query | InputPanel::Replacement => div.w(input_width),
+-                InputPanel::Include | InputPanel::Exclude => div.flex_grow_1(),
+-            })
++            input_base_styles(
++                search.border_color_for(panel, cx),
++                |div| match panel {
++                    InputPanel::Query | InputPanel::Replacement => div.w(input_width),
++                    InputPanel::Include | InputPanel::Exclude => div.flex_grow_1(),
++                },
++                cx,
++            )
+         };
+         let theme_colors = cx.theme().colors();
+         let project_search = search.entity.read(cx);
+@@ -3049,7 +3054,7 @@ impl Render for ProjectSearchBar {
+             .on_action(
+                 cx.listener(|this, action, window, cx| this.next_history_query(action, window, cx)),
+             )
+-            .child(div().flex_1().py_1().child(render_text_input(
++            .child(text_input_cell(cx).child(render_text_input(
+                 &search.query_editor,
+                 color_override,
+                 cx,
+@@ -3212,11 +3217,7 @@ impl Render for ProjectSearchBar {
+ 
+         let replace_line = search.replace_enabled.then(|| {
+             let replace_column = input_base_styles(InputPanel::Replacement).child(
+-                div().flex_1().py_1().child(render_text_input(
+-                    &search.replacement_editor,
+-                    None,
+-                    cx,
+-                )),
++                text_input_cell(cx).child(render_text_input(&search.replacement_editor, None, cx)),
+             );
+ 
+             let focus_handle = search.replacement_editor.read(cx).focus_handle(cx);
+@@ -3310,28 +3311,18 @@ impl Render for ProjectSearchBar {
+         let query_error_line = search
+             .panels_with_errors
+             .get(&InputPanel::Query)
+-            .map(|error| {
+-                Label::new(error)
+-                    .size(LabelSize::Small)
+-                    .color(Color::Error)
+-                    .mt_neg_1()
+-                    .ml_2()
+-            });
++            .map(|error| error_line(error, cx));
+ 
+         let filter_error_line = search
+             .panels_with_errors
+             .get(&InputPanel::Include)
+             .or_else(|| search.panels_with_errors.get(&InputPanel::Exclude))
+-            .map(|error| {
+-                Label::new(error)
+-                    .size(LabelSize::Small)
+-                    .color(Color::Error)
+-                    .mt_neg_1()
+-                    .ml_2()
+-            });
++            .map(|error| error_line(error, cx));
+ 
+         v_flex()
+-            .gap_2()
++            .when(Toolbar::compact_row_height(cx).is_none(), |this| {
++                this.gap_2()
++            })
+             .w_full()
+             .key_context(key_context)
+             .on_action(cx.listener(|this, _: &ToggleFocus, window, cx| {
+diff --git a/crates/search/src/search_bar.rs b/crates/search/src/search_bar.rs
+index a4757631a1..b1d0087bd1 100644
+--- a/crates/search/src/search_bar.rs
++++ b/crates/search/src/search_bar.rs
+@@ -4,6 +4,7 @@ use settings::Settings;
+ use theme_settings::ThemeSettings;
+ use ui::{IconButton, IconButtonShape};
+ use ui::{Tooltip, prelude::*};
++use workspace::Toolbar;
+ 
+ pub(super) enum HistoryNavigationDirection {
+     Previous,
+@@ -66,11 +67,42 @@ pub(super) fn render_action_button(
+     })
+ }
+ 
+-pub(crate) fn input_base_styles(border_color: Hsla, map: impl FnOnce(Div) -> Div) -> Div {
++/// Wraps a search editor. The vertical padding of stock rows does not fit a compact row, and
++/// the editor is centred in the row either way.
++pub(crate) fn text_input_cell(cx: &App) -> Div {
++    div()
++        .flex_1()
++        .when(Toolbar::compact_row_height(cx).is_none(), |this| {
++            this.py_1()
++        })
++}
++
++/// A search error shown under its input row. Stock tucks it 4px under the row (`mt_neg_1`
++/// against the stack's `gap_2`). A compact stack has no gap, so there the message gets a row of
++/// its own, as tall as the input rows, with the text centred in it.
++pub(crate) fn error_line(message: impl Into<SharedString>, cx: &App) -> AnyElement {
++    let label = Label::new(message)
++        .size(LabelSize::Small)
++        .color(Color::Error)
++        .ml_2();
++    match Toolbar::compact_row_height(cx) {
++        Some(height) => v_flex()
++            .min_h(height)
++            .justify_center()
++            .child(label)
++            .into_any_element(),
++        None => label.mt_neg_1().into_any_element(),
++    }
++}
++
++pub(crate) fn input_base_styles(border_color: Hsla, map: impl FnOnce(Div) -> Div, cx: &App) -> Div {
+     h_flex()
+         .map(map)
+         .min_w_32()
+-        .min_h_8()
++        .map(|this| match Toolbar::compact_row_height(cx) {
++            Some(height) => this.min_h(height),
++            None => this.min_h_8(),
++        })
+         .pl_2()
+         .pr_1()
+         .border_1()
+@@ -82,7 +114,7 @@ pub(crate) fn filter_search_results_input(
+     map: impl FnOnce(Div) -> Div,
+     cx: &App,
+ ) -> Div {
+-    input_base_styles(border_color, map).pl_0().child(
++    input_base_styles(border_color, map, cx).pl_0().child(
+         h_flex()
+             .mr_2()
+             .px_2()
+diff --git a/crates/settings/src/vscode_import.rs b/crates/settings/src/vscode_import.rs
+index 47472ba2ee..8a37705c0e 100644
+--- a/crates/settings/src/vscode_import.rs
++++ b/crates/settings/src/vscode_import.rs
+@@ -1042,6 +1042,7 @@ impl VsCodeSettings {
+             git_commit_buffer_font_size: None,
+             theme: None,
+             icon_theme: None,
++            panel_rows_tab_height: None,
+             ui_density: None,
+             shadows: None,
+             unnecessary_code_fade: None,
+diff --git a/crates/settings_content/src/editor.rs b/crates/settings_content/src/editor.rs
+index 23ff824a88..e2a4c64601 100644
+--- a/crates/settings_content/src/editor.rs
++++ b/crates/settings_content/src/editor.rs
+@@ -400,6 +400,10 @@ pub struct ToolbarContent {
+     ///
+     /// Default: false
+     pub code_actions: Option<bool>,
++    /// Whether to shrink the pane toolbar to the height of the tab bar.
++    ///
++    /// Default: false
++    pub compact: Option<bool>,
+ }
+ 
+ /// Scrollbar related settings
+diff --git a/crates/settings_content/src/theme.rs b/crates/settings_content/src/theme.rs
+index 2124b535a5..5c98f52416 100644
+--- a/crates/settings_content/src/theme.rs
++++ b/crates/settings_content/src/theme.rs
+@@ -218,6 +218,10 @@ pub struct ThemeSettingsContent {
+     pub theme: Option<ThemeSelection>,
+     /// The name of the icon theme to use.
+     pub icon_theme: Option<IconThemeSelection>,
++    /// Whether rows in the project, git and outline panels take the tab bar height.
++    ///
++    /// Default: false
++    pub panel_rows_tab_height: Option<bool>,
+ 
+     /// UNSTABLE: Expect many elements to be broken.
+     ///
+diff --git a/crates/theme_settings/src/settings.rs b/crates/theme_settings/src/settings.rs
+index 0fbe306ef0..9d5f98a39d 100644
+--- a/crates/theme_settings/src/settings.rs
++++ b/crates/theme_settings/src/settings.rs
+@@ -91,6 +91,8 @@ pub struct ThemeSettings {
+     pub theme_overrides: HashMap<String, settings::ThemeStyleContent>,
+     /// The current icon theme selection.
+     pub icon_theme: IconThemeSelection,
++    /// Whether rows in the project, git and outline panels take the tab bar height.
++    pub panel_rows_tab_height: bool,
+     /// The density of the UI.
+     /// Note: This setting is still experimental. See [this tracking issue](
+     pub ui_density: UiDensity,
+@@ -772,6 +774,7 @@ impl settings::Settings for ThemeSettings {
+             experimental_theme_overrides: content.experimental_theme_overrides.clone(),
+             theme_overrides: content.theme_overrides.clone(),
+             icon_theme: icon_theme_selection,
++            panel_rows_tab_height: content.panel_rows_tab_height.unwrap(),
+             ui_density: ui_density_from_settings(content.ui_density.unwrap_or_default()),
+             shadows: ShadowSettings {
+                 project_panel: shadows.project_panel.unwrap(),
+diff --git a/crates/workspace/src/toolbar.rs b/crates/workspace/src/toolbar.rs
+index b14775f289..64984cd969 100644
+--- a/crates/workspace/src/toolbar.rs
++++ b/crates/workspace/src/toolbar.rs
+@@ -1,9 +1,10 @@
+-use crate::ItemHandle;
++use crate::{ItemHandle, WorkspaceSettings};
+ use gpui::{
+     AnyView, App, Context, Div, Entity, EntityId, EventEmitter, Global, KeyContext,
+     ParentElement as _, Render, Styled, Window,
+ };
+ use language::LanguageRegistry;
++use settings::Settings as _;
+ use std::sync::Arc;
+ use ui::prelude::*;
+ use ui::{h_flex, v_flex};
+@@ -69,6 +70,16 @@ pub struct Toolbar {
+ }
+ 
+ impl Toolbar {
++    /// Height of one toolbar row under `toolbar.compact`, `None` when the setting is off. A tab's
++    /// content height plus the toolbar's 1px bottom border equals the tab bar height, so a
++    /// single-row toolbar is exactly as tall as the tab bar; every row nested in the toolbar
++    /// (search inputs, breadcrumbs) derives its height from here.
++    pub fn compact_row_height(cx: &App) -> Option<Pixels> {
++        WorkspaceSettings::get_global(cx)
++            .compact_toolbar
++            .then(|| ui::Tab::content_height(cx))
++    }
++
+     fn has_any_visible_items(&self) -> bool {
+         self.items
+             .iter()
+@@ -116,15 +127,19 @@ impl Render for Toolbar {
+ 
+         let has_left_items = self.left_items().count() > 0;
+         let has_right_items = self.right_items().count() > 0;
++        let compact_height = Self::compact_row_height(cx);
+ 
+         v_flex()
+             .group("toolbar")
+             .relative()
+-            .py(DynamicSpacing::Base06.rems(cx))
+-            .px(DynamicSpacing::Base08.rems(cx))
+-            .when(has_left_items || has_right_items, |this| {
+-                this.gap(DynamicSpacing::Base06.rems(cx))
++            .when(compact_height.is_none(), |this| {
++                this.py(DynamicSpacing::Base06.rems(cx))
+             })
++            .px(DynamicSpacing::Base08.rems(cx))
++            .when(
++                (has_left_items || has_right_items) && compact_height.is_none(),
++                |this| this.gap(DynamicSpacing::Base06.rems(cx)),
++            )
+             .border_b_1()
+             .border_color(cx.theme().colors().border_variant)
+             .bg(cx.theme().colors().toolbar_background)
+@@ -137,7 +152,10 @@ impl Render for Toolbar {
+                         .when(has_left_items, |this| {
+                             this.child(
+                                 h_flex()
+-                                    .min_h_8()
++                                    .map(|this| match compact_height {
++                                        Some(height) => this.min_h(height),
++                                        None => this.min_h_8(),
++                                    })
+                                     .flex_auto()
+                                     .justify_start()
+                                     .overflow_x_hidden()
+@@ -147,7 +165,10 @@ impl Render for Toolbar {
+                         .when(has_right_items, |this| {
+                             this.child(
+                                 h_flex()
+-                                    .h_8()
++                                    .map(|this| match compact_height {
++                                        Some(height) => this.h(height),
++                                        None => this.h_8(),
++                                    })
+                                     .flex_row_reverse()
+                                     .when(has_left_items, |this| this.flex_none())
+                                     .justify_end()
+@@ -156,7 +177,18 @@ impl Render for Toolbar {
+                         }),
+                 )
+             })
+-            .children(secondary_items)
++            // Without the wrapper a content-sized notice would be taller or shorter than the
++            // search rows, which are whole compact rows.
++            .children(secondary_items.map(|item| {
++                match compact_height {
++                    Some(height) => v_flex()
++                        .min_h(height)
++                        .justify_center()
++                        .child(item)
++                        .into_any_element(),
++                    None => item.into_any_element(),
++                }
++            }))
+     }
+ }
+ 
+diff --git a/crates/workspace/src/workspace_settings.rs b/crates/workspace/src/workspace_settings.rs
+index 4e2bb061f5..0e3f781204 100644
+--- a/crates/workspace/src/workspace_settings.rs
++++ b/crates/workspace/src/workspace_settings.rs
+@@ -47,6 +47,7 @@ pub struct WorkspaceSettings {
+     pub window_decorations: settings::WindowDecorations,
+     pub title_bar_to_status_bar: bool,
+     pub focus_follows_mouse: FocusFollowsMouse,
++    pub compact_toolbar: bool,
+ }
+ 
+ #[cfg(target_os = "macos")]
+@@ -168,6 +169,7 @@ impl Settings for WorkspaceSettings {
+                         .unwrap_or(250),
+                 ),
+             },
++            compact_toolbar: content.editor.toolbar.as_ref().unwrap().compact.unwrap(),
+         }
+     }
+ }
+-- 
+2.55.0
+

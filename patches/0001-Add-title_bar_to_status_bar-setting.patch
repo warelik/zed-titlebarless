@@ -1,45 +1,90 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 11:28:27 +0300
-Subject: [PATCH] Add setting to move the title bar contents into the status
- bar
+Subject: [PATCH 1/8] Add title_bar_to_status_bar setting
 
+The title bar spends a whole row of vertical space on a few controls,
+while the status bar at the bottom of the window has room for them.
+title_bar_to_status_bar hides the title bar and shows its contents in
+the status bar instead, which gives that row back to the editor. macOS
+only: Windows and Linux draw their window controls in the title bar,
+so the setting has no effect there.
+
+On macOS the traffic lights move into the tab-height header beside
+them and are centred between the window's top edge and the header's
+bottom border, as far from the left edge as from the top. The button
+size differs between macOS SDKs, so it is read from the live buttons
+(Window::traffic_light_size). The position follows the header when its
+height changes, including UI font size zoom, which bypasses settings.
+
+The reservation under the buttons also covers zoomed items, whose
+overlay is no longer below a title bar: a zoomed pane keeps the spacer
+in its tab bar, a zoomed panel gets the same tab-height row as the
+left dock, and the zoomed header starts at the window's top edge so
+the buttons stay centred in it. A top-left pane without a tab bar
+(tab_bar.show: false, or no items) gets the same tab-height row the
+left dock uses, so the buttons never cover its toolbar or content.
+
+The strips beside the traffic lights keep the title bar's drag and
+double-click-to-zoom behaviour. The empty space of the tab bar only
+drags the window: a double-click there keeps opening a new file
+instead of zooming.
 ---
- assets/settings/default.json                |   2 +
- crates/agent_ui/src/threads_archive_view.rs |  20 ++-
- crates/settings/src/vscode_import.rs        |   1 +
- crates/settings_content/src/workspace.rs    |   4 +
- crates/settings_ui/src/page_data.rs         |  18 ++-
- crates/sidebar/src/sidebar.rs               |  20 ++-
- crates/title_bar/src/title_bar.rs           |  35 ++++--
- crates/workspace/src/dock.rs                |  23 +++-
- crates/workspace/src/pane.rs                |  39 +++++-
- crates/workspace/src/status_bar.rs          |  17 ++-
- crates/workspace/src/workspace.rs           | 128 +++++++++++++++++++-
- crates/workspace/src/workspace_settings.rs  |   2 +
- crates/zed/src/zed.rs                       |   2 +-
- docs/src/reference/all-settings.md          |  10 ++
- docs/src/visual-customization.md            |   2 +
- 15 files changed, 297 insertions(+), 26 deletions(-)
+ assets/settings/default.json                  |   3 +
+ crates/agent_ui/src/threads_archive_view.rs   |  12 +-
+ crates/gpui/src/platform.rs                   |   4 +
+ crates/gpui/src/window.rs                     |   6 +
+ crates/gpui_macos/src/window.rs               |   9 +
+ .../src/platform_title_bar.rs                 |  28 ++-
+ crates/settings/src/vscode_import.rs          |   1 +
+ crates/settings_content/src/workspace.rs      |   5 +
+ crates/sidebar/src/sidebar.rs                 |  12 +-
+ crates/title_bar/src/title_bar.rs             |  34 ++-
+ crates/workspace/src/dock.rs                  |  14 +-
+ crates/workspace/src/pane.rs                  |  62 ++++-
+ crates/workspace/src/status_bar.rs            |  15 +-
+ crates/workspace/src/workspace.rs             | 231 +++++++++++++++++-
+ crates/workspace/src/workspace_settings.rs    |   2 +
+ crates/zed/src/zed.rs                         |   5 +-
+ docs/src/reference/all-settings.md            |  10 +
+ docs/src/visual-customization.md              |   2 +
+ 18 files changed, 424 insertions(+), 31 deletions(-)
 
 diff --git a/assets/settings/default.json b/assets/settings/default.json
-index 1228f8b859..e981fe7d91 100644
+index 1228f8b859..67798e5099 100644
 --- a/assets/settings/default.json
 +++ b/assets/settings/default.json
-@@ -606,6 +606,8 @@
+@@ -606,6 +606,9 @@
    //    on notched displays, the area around the notch.
    //     "simple"
    "fullscreen_mode": "native",
 +  // Whether to hide the title bar and show its contents in the status bar instead.
++  // macOS only: other platforms draw their window controls in the title bar, so it stays.
 +  "title_bar_to_status_bar": false,
    // Titlebar related settings
    "title_bar": {
      // Whether to show git status indicators on the branch icon in the titlebar.
 diff --git a/crates/agent_ui/src/threads_archive_view.rs b/crates/agent_ui/src/threads_archive_view.rs
-index fd1f69de8c..8b17078ffa 100644
+index fd1f69de8c..698edb87cb 100644
 --- a/crates/agent_ui/src/threads_archive_view.rs
 +++ b/crates/agent_ui/src/threads_archive_view.rs
-@@ -856,7 +856,7 @@ impl ThreadsArchiveView {
+@@ -28,14 +28,13 @@ use picker::{
+     Picker, PickerDelegate,
+     highlighted_match_with_paths::{HighlightedMatch, HighlightedMatchWithPaths},
+ };
+-use platform_title_bar::apply_title_bar_insets;
++use platform_title_bar::{apply_title_bar_insets, sidebar_header_height, traffic_light_drag_area};
+ use project::{AgentId, AgentServerStore};
+ use settings::Settings as _;
+ use theme::ActiveTheme;
+ use ui::{
+     AgentThreadStatus, Divider, KeyBinding, ListItem, ListItemSpacing, ListSubHeader, ScrollAxes,
+     Scrollbars, Tab, ThreadItem, Tooltip, WithScrollbar, prelude::*,
+-    utils::platform_title_bar_height,
+ };
+ use util::ResultExt;
+ use util::paths::PathExt;
+@@ -856,7 +855,7 @@ impl ThreadsArchiveView {
          .detach_and_log_err(cx);
      }
  
@@ -48,21 +93,17 @@ index fd1f69de8c..8b17078ffa 100644
          let has_query = !self.filter_editor.read(cx).text(cx).is_empty();
          let sidebar_on_left = matches!(
              AgentSettings::get_global(cx).sidebar_side(),
-@@ -868,7 +868,12 @@ impl ThreadsArchiveView {
+@@ -868,7 +867,8 @@ impl ThreadsArchiveView {
          let left_window_controls = !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_left;
          let right_window_controls =
              !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_right;
 -        let header_height = platform_title_bar_height(window);
-+        let in_status_bar = workspace::WorkspaceSettings::get_global(cx).title_bar_to_status_bar;
-+        let header_height = if in_status_bar {
-+            Tab::container_height(cx)
-+        } else {
-+            platform_title_bar_height(window)
-+        };
++        let in_status_bar = workspace::title_bar_in_status_bar(cx);
++        let header_height = sidebar_header_height(window, cx);
          let show_focus_keybinding =
              self.selection.is_some() && !self.filter_editor.focus_handle(cx).is_focused(window);
  
-@@ -881,6 +886,7 @@ impl ThreadsArchiveView {
+@@ -881,6 +881,7 @@ impl ThreadsArchiveView {
                      right_window_controls,
                      false,
                  ),
@@ -70,23 +111,120 @@ index fd1f69de8c..8b17078ffa 100644
                  Decorations::Server => header.mt_px().pb_px(),
              })
              .when(left_window_controls, |this| {
-@@ -895,6 +901,16 @@ impl ThreadsArchiveView {
+@@ -895,6 +896,9 @@ impl ThreadsArchiveView {
                      this
                  }
              })
 +            .when(traffic_lights && in_status_bar, |this| {
-+                this.child(
-+                    workspace::move_window_on_drag(div().id("traffic-light-area"), window, cx)
-+                        .absolute()
-+                        .top_0()
-+                        .left_0()
-+                        .h_full()
-+                        .w(px(ui::utils::TRAFFIC_LIGHT_PADDING)),
-+                )
++                this.child(traffic_light_drag_area(window, cx))
 +            })
              .when(!right_window_controls, |this| this.pr_1p5())
              .gap_1()
              .justify_between()
+diff --git a/crates/gpui/src/platform.rs b/crates/gpui/src/platform.rs
+index c03653ed94..4f8d597616 100644
+--- a/crates/gpui/src/platform.rs
++++ b/crates/gpui/src/platform.rs
+@@ -979,6 +979,10 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+     }
+     #[cfg(target_os = "macos")]
+     fn set_traffic_light_position(&self, _position: Point<Pixels>) {}
++    #[cfg(target_os = "macos")]
++    fn traffic_light_size(&self) -> Option<Size<Pixels>> {
++        None
++    }
+     fn show_character_palette(&self) {}
+     fn titlebar_double_click(&self, _is_resizable: bool, _is_minimizable: bool) {}
+     fn on_move_tab_to_new_window(&self, _callback: Box<dyn FnMut()>) {}
+diff --git a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
+index 52d729f75a..5ced012252 100644
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -2888,6 +2888,12 @@ impl Window {
+         self.platform_window.set_traffic_light_position(position);
+     }
+ 
++    /// Returns the size of a macOS traffic light button, which depends on the SDK the app links against.
++    #[cfg(target_os = "macos")]
++    pub fn traffic_light_size(&self) -> Option<Size<Pixels>> {
++        self.platform_window.traffic_light_size()
++    }
++
+     /// Sets the application identifier.
+     pub fn set_app_id(&mut self, app_id: &str) {
+         self.platform_window.set_app_id(app_id);
+diff --git a/crates/gpui_macos/src/window.rs b/crates/gpui_macos/src/window.rs
+index 12a75e73ee..79661d5a54 100644
+--- a/crates/gpui_macos/src/window.rs
++++ b/crates/gpui_macos/src/window.rs
+@@ -1626,6 +1626,15 @@ impl PlatformWindow for MacWindow {
+         state.move_traffic_light();
+     }
+ 
++    fn traffic_light_size(&self) -> Option<Size<Pixels>> {
++        let state = self.0.lock();
++        let frame = state.traffic_light_buttons()?.close.frame();
++        Some(size(
++            Pixels::from(frame.size.width),
++            Pixels::from(frame.size.height),
++        ))
++    }
++
+     fn scale_factor(&self) -> f32 {
+         self.0.as_ref().lock().scale_factor()
+     }
+diff --git a/crates/platform_title_bar/src/platform_title_bar.rs b/crates/platform_title_bar/src/platform_title_bar.rs
+index b69bb0d1ff..92fb6ff2d5 100644
+--- a/crates/platform_title_bar/src/platform_title_bar.rs
++++ b/crates/platform_title_bar/src/platform_title_bar.rs
+@@ -2,15 +2,16 @@ pub mod platforms;
+ mod system_window_tabs;
+ 
+ use gpui::{
+-    Action, AnyElement, App, Context, Decorations, Entity, Hsla, InteractiveElement, IntoElement,
+-    MouseButton, ParentElement, StatefulInteractiveElement, Styled, WeakEntity, Window,
+-    WindowButtonLayout, WindowControlArea, div, px,
++    Action, AnyElement, App, Context, Decorations, Div, Entity, Hsla, InteractiveElement,
++    IntoElement, MouseButton, ParentElement, Pixels, Stateful, StatefulInteractiveElement, Styled,
++    WeakEntity, Window, WindowButtonLayout, WindowControlArea, div, px,
+ };
+ use project::DisableAiSettings;
+ use settings::Settings;
+ use smallvec::SmallVec;
+ use std::mem;
+ use ui::{
++    Tab,
+     prelude::*,
+     utils::{TRAFFIC_LIGHT_PADDING, platform_title_bar_height},
+ };
+@@ -48,6 +49,27 @@ pub fn apply_title_bar_insets<E: Styled + FluentBuilder>(
+         .when(right_window_controls, |header| header.pr(inset))
+ }
+ 
++/// The height of the header a sidebar draws where the title bar would be: with the title bar's
++/// contents in the status bar it is as tall as the tab bar beside it.
++pub fn sidebar_header_height(window: &Window, cx: &App) -> Pixels {
++    if workspace::title_bar_in_status_bar(cx) {
++        Tab::container_height(cx)
++    } else {
++        platform_title_bar_height(window)
++    }
++}
++
++/// The padding a sidebar header keeps free for the macOS traffic lights, made draggable (and
++/// zoomable by double-click) like the title bar it replaces.
++pub fn traffic_light_drag_area(window: &mut Window, cx: &mut App) -> Stateful<Div> {
++    workspace::title_bar_area(div().id("traffic-light-area"), window, cx)
++        .absolute()
++        .top_0()
++        .left_0()
++        .h_full()
++        .w(px(TRAFFIC_LIGHT_PADDING))
++}
++
+ pub struct PlatformTitleBar {
+     id: ElementId,
+     platform_style: PlatformStyle,
 diff --git a/crates/settings/src/vscode_import.rs b/crates/settings/src/vscode_import.rs
 index 7248c1ab19..f4d59b06b2 100644
 --- a/crates/settings/src/vscode_import.rs
@@ -100,56 +238,41 @@ index 7248c1ab19..f4d59b06b2 100644
              use_system_path_prompts: self.read_bool("files.simpleDialog.enable").map(|b| !b),
              use_system_prompts: None,
 diff --git a/crates/settings_content/src/workspace.rs b/crates/settings_content/src/workspace.rs
-index dbcb6fc414..fd227a3b2e 100644
+index dbcb6fc414..d106cc9f15 100644
 --- a/crates/settings_content/src/workspace.rs
 +++ b/crates/settings_content/src/workspace.rs
-@@ -169,6 +169,10 @@ pub struct WorkspaceSettingsContent {
+@@ -169,6 +169,11 @@ pub struct WorkspaceSettingsContent {
      ///
      /// Default: client
      pub window_decorations: Option<WindowDecorations>,
-+    /// Whether to hide the title bar and show its contents in the status bar instead.
++    /// Whether to hide the title bar and show its contents in the status bar instead (macOS only).
++    /// Other platforms draw their window controls in the title bar, so they ignore this setting.
 +    ///
 +    /// Default: false
 +    pub title_bar_to_status_bar: Option<bool>,
      /// Whether the focused panel follows the mouse location
      /// Default: false
      pub focus_follows_mouse: Option<FocusFollowsMouse>,
-diff --git a/crates/settings_ui/src/page_data.rs b/crates/settings_ui/src/page_data.rs
-index 972be0aba1..02e111bd6c 100644
---- a/crates/settings_ui/src/page_data.rs
-+++ b/crates/settings_ui/src/page_data.rs
-@@ -4286,9 +4286,25 @@ fn window_and_layout_page() -> SettingsPage {
-         ]
-     }
- 
--    fn title_bar_section() -> [SettingsPageItem; 12] {
-+    fn title_bar_section() -> [SettingsPageItem; 13] {
-         [
-             SettingsPageItem::SectionHeader("Title Bar"),
-+            SettingsPageItem::SettingItem(SettingItem {
-+                title: "Title Bar to Status Bar",
-+                description: "Hide the title bar and show its contents in the status bar instead.",
-+                field: Box::new(SettingField {
-+                    organization_override: None,
-+                    json_path: Some("title_bar_to_status_bar"),
-+                    pick: |settings_content| {
-+                        settings_content.workspace.title_bar_to_status_bar.as_ref()
-+                    },
-+                    write: |settings_content, value, _| {
-+                        settings_content.workspace.title_bar_to_status_bar = value;
-+                    },
-+                }),
-+                metadata: None,
-+                files: USER,
-+            }),
-             SettingsPageItem::SettingItem(SettingItem {
-                 title: "Show Branch Status Icon",
-                 description: "Show git status indicators on the branch icon in the titlebar.",
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 890248d674..9fb6380ff3 100644
+index 890248d674..cb12edd25b 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
-@@ -7361,7 +7361,7 @@ impl Sidebar {
+@@ -39,13 +39,12 @@ use menu::{
+     Cancel, Confirm, SelectChild, SelectFirst, SelectLast, SelectNext, SelectParent, SelectPrevious,
+ };
+ use notifications::status_toast::StatusToast;
+-use platform_title_bar::apply_title_bar_insets;
++use platform_title_bar::{apply_title_bar_insets, sidebar_header_height, traffic_light_drag_area};
+ use project::{
+     AgentId, AgentRegistryStore, Event as ProjectEvent, WorktreeId, repo_identity_path_if_local,
+ };
+ use recent_projects::sidebar_recent_projects::SidebarRecentProjects;
+ use remote::{RemoteConnectionOptions, same_remote_connection_identity};
+-use ui::utils::platform_title_bar_height;
+ 
+ use serde::{Deserialize, Serialize};
+ use settings::{Settings as _, SettingsStore};
+@@ -7361,7 +7360,7 @@ impl Sidebar {
      fn render_sidebar_header(
          &self,
          no_open_projects: bool,
@@ -158,21 +281,17 @@ index 890248d674..9fb6380ff3 100644
          cx: &mut Context<Self>,
      ) -> impl IntoElement {
          let has_query = self.has_filter_query(cx);
-@@ -7372,7 +7372,12 @@ impl Sidebar {
+@@ -7372,7 +7371,8 @@ impl Sidebar {
          let left_window_controls = !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_left;
          let right_window_controls =
              !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_right;
 -        let header_height = platform_title_bar_height(window);
-+        let in_status_bar = workspace::WorkspaceSettings::get_global(cx).title_bar_to_status_bar;
-+        let header_height = if in_status_bar {
-+            Tab::container_height(cx)
-+        } else {
-+            platform_title_bar_height(window)
-+        };
++        let in_status_bar = workspace::title_bar_in_status_bar(cx);
++        let header_height = sidebar_header_height(window, cx);
  
          h_flex()
              .h(header_height)
-@@ -7384,6 +7389,7 @@ impl Sidebar {
+@@ -7384,6 +7384,7 @@ impl Sidebar {
                      right_window_controls,
                      no_open_projects,
                  ),
@@ -180,43 +299,35 @@ index 890248d674..9fb6380ff3 100644
                  Decorations::Server => header.mt_px().pb_px(),
              })
              .when(left_window_controls, |this| {
-@@ -7398,6 +7404,16 @@ impl Sidebar {
+@@ -7398,6 +7399,9 @@ impl Sidebar {
                      this
                  }
              })
 +            .when(traffic_lights && in_status_bar, |this| {
-+                this.child(
-+                    workspace::move_window_on_drag(div().id("traffic-light-area"), window, cx)
-+                        .absolute()
-+                        .top_0()
-+                        .left_0()
-+                        .h_full()
-+                        .w(px(ui::utils::TRAFFIC_LIGHT_PADDING)),
-+                )
++                this.child(traffic_light_drag_area(window, cx))
 +            })
              .when(!right_window_controls, |this| this.pr_1p5())
              .gap_1()
              .when(!no_open_projects, |this| {
 diff --git a/crates/title_bar/src/title_bar.rs b/crates/title_bar/src/title_bar.rs
-index 09c36b3855..9c22ef4d7e 100644
+index 09c36b3855..95a70f5b9e 100644
 --- a/crates/title_bar/src/title_bar.rs
 +++ b/crates/title_bar/src/title_bar.rs
-@@ -53,7 +53,7 @@ use ui::{
- use update_version::UpdateVersion;
- use util::ResultExt;
+@@ -55,6 +55,7 @@ use util::ResultExt;
  use workspace::{
--    AccessibleMode, MultiWorkspace, ToggleWorktreeSecurity, Workspace,
-+    AccessibleMode, MultiWorkspace, ToggleWorktreeSecurity, Workspace, WorkspaceSettings,
+     AccessibleMode, MultiWorkspace, ToggleWorktreeSecurity, Workspace,
      notifications::{NotifyResultExt, NotifyTaskExt as _},
++    title_bar_in_status_bar,
  };
  
-@@ -207,6 +207,15 @@ fn set_window_layout(layout: WindowLayout, cx: &App) {
+ use zed_actions::OpenRemote;
+@@ -207,6 +208,15 @@ fn set_window_layout(layout: WindowLayout, cx: &App) {
      drop(AgentSettings::set_layout(layout, fs, cx));
  }
  
 +/// The status bar is at the bottom of the window, so popovers open upward from it.
 +fn popover_anchor(anchor: Anchor, cx: &App) -> Anchor {
-+    if WorkspaceSettings::get_global(cx).title_bar_to_status_bar {
++    if title_bar_in_status_bar(cx) {
 +        anchor.other_side_along(gpui::Axis::Vertical)
 +    } else {
 +        anchor
@@ -226,11 +337,11 @@ index 09c36b3855..9c22ef4d7e 100644
  pub struct TitleBar {
      platform_titlebar: Entity<PlatformTitleBar>,
      project: Entity<Project>,
-@@ -409,6 +418,18 @@ impl Render for TitleBar {
+@@ -409,6 +419,18 @@ impl Render for TitleBar {
                  .into_any_element(),
          );
  
-+        if WorkspaceSettings::get_global(cx).title_bar_to_status_bar {
++        if title_bar_in_status_bar(cx) {
 +            // In the status bar, the platform title bar (window controls, drag area) has no place.
 +            return h_flex()
 +                .w_full()
@@ -245,7 +356,7 @@ index 09c36b3855..9c22ef4d7e 100644
          if show_menus {
              self.platform_titlebar.update(cx, |this, _| {
                  this.set_button_layout(button_layout);
-@@ -697,7 +718,7 @@ impl TitleBar {
+@@ -697,7 +719,7 @@ impl TitleBar {
                          )
                      },
                  )
@@ -254,7 +365,7 @@ index 09c36b3855..9c22ef4d7e 100644
                  .into_any_element(),
          )
      }
-@@ -871,7 +892,7 @@ impl TitleBar {
+@@ -871,7 +893,7 @@ impl TitleBar {
                      Tooltip::for_action("Recent Projects", &zed_actions::OpenRecent::default(), cx)
                  },
              )
@@ -263,7 +374,7 @@ index 09c36b3855..9c22ef4d7e 100644
              .into_any_element()
      }
  
-@@ -923,7 +944,7 @@ impl TitleBar {
+@@ -923,7 +945,7 @@ impl TitleBar {
                      Tooltip::for_action("Recent Projects", &zed_actions::OpenRecent::default(), cx)
                  },
              )
@@ -272,7 +383,7 @@ index 09c36b3855..9c22ef4d7e 100644
      }
  
      fn render_worktree_and_branch(
-@@ -1029,7 +1050,7 @@ impl TitleBar {
+@@ -1029,7 +1051,7 @@ impl TitleBar {
                          )
                      },
                  )
@@ -281,7 +392,7 @@ index 09c36b3855..9c22ef4d7e 100644
          });
  
          let branch_picker = branch_name.and_then(|branch_name| {
-@@ -1086,7 +1107,7 @@ impl TitleBar {
+@@ -1086,7 +1108,7 @@ impl TitleBar {
                              cx,
                          )
                      })
@@ -290,7 +401,7 @@ index 09c36b3855..9c22ef4d7e 100644
              })
          });
  
-@@ -1436,7 +1457,7 @@ impl TitleBar {
+@@ -1436,7 +1458,7 @@ impl TitleBar {
                  })
                  .into()
              })
@@ -300,7 +411,7 @@ index 09c36b3855..9c22ef4d7e 100644
  }
  
 diff --git a/crates/workspace/src/dock.rs b/crates/workspace/src/dock.rs
-index 918607c0cd..ac9efd534a 100644
+index 918607c0cd..1a6059cbf4 100644
 --- a/crates/workspace/src/dock.rs
 +++ b/crates/workspace/src/dock.rs
 @@ -1,7 +1,10 @@
@@ -309,22 +420,13 @@ index 918607c0cd..ac9efd534a 100644
  use crate::status_bar::HideStatusItem;
 -use crate::{DraggedDock, Event, FocusFollowsMouse, ModalLayer, Pane, WorkspaceSettings};
 +use crate::{
-+    DraggedDock, Event, FocusFollowsMouse, ModalLayer, Pane, WorkspaceSettings,
-+    move_window_on_drag, traffic_lights_overlay_workspace,
++    DraggedDock, Event, FocusFollowsMouse, ModalLayer, Pane, WorkspaceSettings, traffic_light_row,
++    traffic_lights_overlay_workspace,
 +};
  use crate::{Workspace, status_bar::StatusItemView};
  use anyhow::Context as _;
  use client::proto;
-@@ -17,7 +20,7 @@ use serde::{Deserialize, Serialize};
- use settings::{Settings, SettingsStore, TerminalDockPosition};
- use std::sync::Arc;
- use ui::{
--    ContextMenu, CountBadge, Divider, DividerColor, IconButton, Tooltip, prelude::*,
-+    ContextMenu, CountBadge, Divider, DividerColor, IconButton, Tab, Tooltip, prelude::*,
-     right_click_menu,
- };
- use util::ResultExt as _;
-@@ -1268,10 +1271,21 @@ impl Dock {
+@@ -1268,10 +1271,14 @@ impl Dock {
  }
  
  impl Render for Dock {
@@ -335,19 +437,12 @@ index 918607c0cd..ac9efd534a 100644
              let position = self.position;
 +            let top_spacer = (position == DockPosition::Left
 +                && traffic_lights_overlay_workspace(window, cx))
-+            .then(|| {
-+                move_window_on_drag(div().id("traffic-light-spacer"), window, cx)
-+                    .flex_none()
-+                    .h(Tab::container_height(cx))
-+                    .bg(cx.theme().colors().tab_bar_background)
-+                    .border_b_1()
-+                    .border_color(cx.theme().colors().border)
-+            });
++            .then(|| traffic_light_row(window, cx));
 +            let has_top_spacer = top_spacer.is_some();
              let create_resize_handle = || {
                  let handle = div()
                      .id("resize-handle")
-@@ -1343,6 +1357,7 @@ impl Render for Dock {
+@@ -1343,6 +1350,7 @@ impl Render for Dock {
                  .map(|this| match self.position().axis() {
                      // Width and height are always set on the workspace wrapper in
                      // render_dock, so fill whatever space the wrapper provides.
@@ -355,7 +450,7 @@ index 918607c0cd..ac9efd534a 100644
                      Axis::Horizontal => this.w_full().h_full().flex_row(),
                      Axis::Vertical => this.h_full().w_full().flex_col(),
                  })
-@@ -1351,9 +1366,11 @@ impl Render for Dock {
+@@ -1351,9 +1359,11 @@ impl Render for Dock {
                      DockPosition::Right => this.border_l_1(),
                      DockPosition::Bottom => this.border_t_1(),
                  })
@@ -368,35 +463,59 @@ index 918607c0cd..ac9efd534a 100644
                              Axis::Vertical => this.h_full().w_full(),
                          })
 diff --git a/crates/workspace/src/pane.rs b/crates/workspace/src/pane.rs
-index 25771a8ee1..4f16ab577f 100644
+index 25771a8ee1..528dfa2976 100644
 --- a/crates/workspace/src/pane.rs
 +++ b/crates/workspace/src/pane.rs
-@@ -9,9 +9,10 @@ use crate::{
+@@ -9,9 +9,11 @@ use crate::{
          PreviewTabsSettings, ProjectItemKind, SaveOptions, ShowCloseButton, ShowDiagnostics,
          TabContentParams, TabTooltipContent, WeakItemHandle,
      },
 -    move_item,
 +    move_item, move_window_on_drag,
      notifications::NotifyResultExt,
++    title_bar_area, title_bar_in_status_bar,
      toolbar::Toolbar,
-+    traffic_lights_overlay_workspace,
++    traffic_light_row, traffic_lights_overlay_workspace,
      workspace_settings::{AutosaveSetting, FocusFollowsMouse, TabBarSettings, WorkspaceSettings},
  };
  use anyhow::Result;
-@@ -3575,7 +3576,20 @@ impl Pane {
+@@ -3567,6 +3569,27 @@ impl Pane {
+         }
+     }
+ 
++    /// Whether this pane's header is the one the traffic lights sit in: the top-left pane, unless
++    /// the left dock covers that corner, or the pane the zoom overlay shows over everything.
++    fn holds_traffic_lights(&self, window: &Window, cx: &Context<Pane>) -> bool {
++        traffic_lights_overlay_workspace(window, cx)
++            && self.workspace.upgrade().is_some_and(|workspace| {
++                let workspace = workspace.read(cx);
++                let this = cx.entity();
++                // The zoom overlay covers the left dock too, so a zoomed pane needs the spacer
++                // whatever the dock shows.
++                let zoomed = workspace.zoomed.as_ref() == Some(&this.downgrade().into());
++                let maximized = workspace
++                    .maximized_pane
++                    .as_ref()
++                    .and_then(|pane| pane.upgrade())
++                    .is_some_and(|pane| pane == this);
++                zoomed
++                    || ((maximized || workspace.center.first_pane() == this)
++                        && workspace.left_dock.read(cx).visible_panel().is_none())
++            })
++    }
++
+     fn configure_tab_bar_start(
+         &mut self,
+         tab_bar: TabBar,
+@@ -3575,7 +3598,15 @@ impl Pane {
          window: &mut Window,
          cx: &mut Context<Pane>,
      ) -> TabBar {
-+        let traffic_light_spacer = traffic_lights_overlay_workspace(window, cx)
-+            && self.workspace.upgrade().is_some_and(|workspace| {
-+                let workspace = workspace.read(cx);
-+                workspace.center.first_pane() == cx.entity()
-+                    && workspace.left_dock.read(cx).visible_panel().is_none()
-+            });
++        let traffic_light_spacer = self.holds_traffic_lights(window, cx);
          tab_bar
 +            .when(traffic_light_spacer, |tab_bar| {
 +                tab_bar.start_child(
-+                    move_window_on_drag(div().id("traffic-light-spacer"), window, cx)
++                    title_bar_area(div().id("traffic-light-spacer"), window, cx)
 +                        .h_full()
 +                        .w(px(ui::utils::TRAFFIC_LIGHT_PADDING)),
 +                )
@@ -404,7 +523,7 @@ index 25771a8ee1..4f16ab577f 100644
              .when(
                  self.display_nav_history_buttons.unwrap_or_default(),
                  |tab_bar| {
-@@ -3631,7 +3645,7 @@ impl Pane {
+@@ -3631,7 +3662,7 @@ impl Pane {
                              .border_color(cx.theme().colors().border)
                      })
              }))
@@ -413,7 +532,7 @@ index 25771a8ee1..4f16ab577f 100644
          tab_bar.into_any_element()
      }
  
-@@ -3660,7 +3674,7 @@ impl Pane {
+@@ -3660,7 +3691,7 @@ impl Pane {
                      .overflow_x_scroll()
                      .w_full()
                      .children(pinned_tabs)
@@ -422,7 +541,7 @@ index 25771a8ee1..4f16ab577f 100644
              );
          v_flex()
              .w_full()
-@@ -3670,6 +3684,7 @@ impl Pane {
+@@ -3670,6 +3701,7 @@ impl Pane {
                  TabBar::new("unpinned_tab_bar").child(self.render_unpinned_tabs_container(
                      unpinned_tabs,
                      tab_count,
@@ -430,7 +549,7 @@ index 25771a8ee1..4f16ab577f 100644
                      cx,
                  )),
              )
-@@ -3680,6 +3695,7 @@ impl Pane {
+@@ -3680,6 +3712,7 @@ impl Pane {
          &mut self,
          unpinned_tabs: Vec<AnyElement>,
          tab_count: usize,
@@ -438,7 +557,7 @@ index 25771a8ee1..4f16ab577f 100644
          cx: &mut Context<Pane>,
      ) -> impl IntoElement {
          h_flex()
-@@ -3691,16 +3707,21 @@ impl Pane {
+@@ -3691,16 +3724,20 @@ impl Pane {
                  this.suppress_scroll = true;
              }))
              .children(unpinned_tabs)
@@ -454,14 +573,13 @@ index 25771a8ee1..4f16ab577f 100644
      ) -> impl IntoElement {
          div()
              .id("tab_bar_drop_target")
-+            .when(
-+                WorkspaceSettings::get_global(cx).title_bar_to_status_bar,
-+                |this| move_window_on_drag(this, window, cx),
-+            )
++            .when(title_bar_in_status_bar(cx), |this| {
++                move_window_on_drag(this, window, cx)
++            })
              .min_w_6()
              .h(Tab::container_height(cx))
              .flex_grow_1()
-@@ -3741,9 +3762,17 @@ impl Pane {
+@@ -3741,9 +3778,16 @@ impl Pane {
              }))
      }
  
@@ -473,32 +591,48 @@ index 25771a8ee1..4f16ab577f 100644
 +    ) -> impl IntoElement {
          div()
              .id("pinned_tabs_border")
-+            .when(
-+                WorkspaceSettings::get_global(cx).title_bar_to_status_bar,
-+                |this| move_window_on_drag(this, window, cx),
-+            )
++            .when(title_bar_in_status_bar(cx), |this| {
++                move_window_on_drag(this, window, cx)
++            })
              .debug_selector(|| "pinned_tabs_border".into())
              .min_w_6()
              .h(Tab::container_height(cx))
+@@ -4428,6 +4472,11 @@ impl Render for Pane {
+             let project = project.read(cx);
+             project.is_local() || project.is_via_wsl(cx)
+         };
++        let has_tab_bar = self.active_item().is_some() && display_tab_bar;
++        // Without a tab bar to hold the traffic-light spacer, the top-left pane gets a tab-bar-high
++        // header of its own so the lights keep off its toolbar and content.
++        let traffic_light_header = (!has_tab_bar && self.holds_traffic_lights(window, cx))
++            .then(|| traffic_light_row(window, cx));
+ 
+         v_flex()
+             .key_context(key_context)
+@@ -4591,9 +4640,10 @@ impl Render for Pane {
+                     cx.propagate();
+                 }
+             }))
+-            .when(self.active_item().is_some() && display_tab_bar, |pane| {
++            .when(has_tab_bar, |pane| {
+                 pane.child((self.render_tab_bar.clone())(self, window, cx))
+             })
++            .children(traffic_light_header)
+             .child({
+                 let has_worktrees = project.read(cx).visible_worktrees(cx).next().is_some();
+                 // main content
 diff --git a/crates/workspace/src/status_bar.rs b/crates/workspace/src/status_bar.rs
-index 0cf9e97b13..aa672d35cd 100644
+index 0cf9e97b13..a3966a06a3 100644
 --- a/crates/workspace/src/status_bar.rs
 +++ b/crates/workspace/src/status_bar.rs
-@@ -1,12 +1,12 @@
+@@ -1,6 +1,6 @@
  use crate::{
--    ItemHandle, MultiWorkspace, Pane, SidebarSide, ToggleWorkspaceSidebar,
-+    ItemHandle, MultiWorkspace, Pane, SidebarSide, ToggleWorkspaceSidebar, WorkspaceSettings,
-     sidebar_side_context_menu,
+     ItemHandle, MultiWorkspace, Pane, SidebarSide, ToggleWorkspaceSidebar,
+-    sidebar_side_context_menu,
++    sidebar_side_context_menu, title_bar_in_status_bar,
  };
  use gpui::{
      Anchor, AnyView, App, Context, Decorations, Entity, FocusHandle, Focusable, IntoElement,
-     ParentElement, Render, Role, SharedString, Styled, Subscription, WeakEntity, Window,
- };
--use settings::{SettingsContent, update_settings_file};
-+use settings::{Settings as _, SettingsContent, update_settings_file};
- use std::{any::TypeId, sync::Arc};
- use theme::CLIENT_SIDE_DECORATION_ROUNDING;
- use ui::{ContextMenu, Divider, IconPosition, Indicator, Tooltip, prelude::*, right_click_menu};
 @@ -100,6 +100,7 @@ impl SidebarStatus {
  pub struct StatusBar {
      left_items: Vec<Box<dyn StatusItemViewHandle>>,
@@ -514,7 +648,7 @@ index 0cf9e97b13..aa672d35cd 100644
 +            .children(
 +                self.titlebar_item
 +                    .clone()
-+                    .filter(|_| WorkspaceSettings::get_global(cx).title_bar_to_status_bar)
++                    .filter(|_| title_bar_in_status_bar(cx))
 +                    .map(|item| div().flex_1().min_w_0().overflow_x_hidden().child(item)),
 +            )
              .child(self.render_right_tools(&sidebar, cx))
@@ -541,36 +675,52 @@ index 0cf9e97b13..aa672d35cd 100644
          &mut self,
          multi_workspace: WeakEntity<MultiWorkspace>,
 diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
-index 7d50ce7297..890b17b3f7 100644
+index 7d50ce7297..715ed113bf 100644
 --- a/crates/workspace/src/workspace.rs
 +++ b/crates/workspace/src/workspace.rs
-@@ -325,6 +325,51 @@ static ZED_WINDOW_POSITION: LazyLock<Option<Point<Pixels>>> = LazyLock::new(|| {
+@@ -325,6 +325,99 @@ static ZED_WINDOW_POSITION: LazyLock<Option<Point<Pixels>>> = LazyLock::new(|| {
          .and_then(parse_pixel_position_env_var)
  });
  
-+/// Without the title bar the traffic lights sit closer to the window corner.
-+pub fn traffic_light_position(cx: &App) -> Point<Pixels> {
-+    let inset = if WorkspaceSettings::get_global(cx).title_bar_to_status_bar {
-+        px(6.)
-+    } else {
-+        px(9.)
++/// Whether the title bar's contents live in the status bar. Only macOS supports this: Windows and
++/// Linux draw their window controls in the title bar, so it has to stay there.
++pub fn title_bar_in_status_bar(cx: &App) -> bool {
++    cfg!(target_os = "macos") && WorkspaceSettings::get_global(cx).title_bar_to_status_bar
++}
++
++/// Where stock Zed puts the traffic lights; the title bar is centred on them.
++pub const TRAFFIC_LIGHT_INSET: Pixels = px(9.);
++
++/// Without the title bar the traffic lights are centred between the window's top edge and the
++/// bottom border of the tab-height header beside them, as far from the left edge as from the top.
++/// The button size depends on the macOS SDK, so it is only known once the window exists; until
++/// then (and with the title bar in place) they keep the stock inset. The headers' reserved width
++/// (`TRAFFIC_LIGHT_PADDING`) assumes that stock inset, so the centred lights leave up to ~2.5px
++/// more room before the first tab (compact density): not worth reading the live size every frame.
++#[cfg(target_os = "macos")]
++fn update_traffic_light_position(window: &Window, cx: &App) {
++    let inset = match window.traffic_light_size() {
++        Some(button) if title_bar_in_status_bar(cx) => {
++            // A header shorter than the buttons (tiny UI font) would push them off the window.
++            ((ui::Tab::content_height(cx) - button.height) / 2.).max(px(0.))
++        }
++        _ => TRAFFIC_LIGHT_INSET,
 +    };
-+    point(inset, inset)
++    window.set_traffic_light_position(point(inset, inset));
 +}
 +
 +/// Without the title bar the traffic lights overlay the workspace's top-left corner,
 +/// unless the sidebar beside them holds them in its header.
 +pub fn traffic_lights_overlay_workspace(window: &Window, cx: &App) -> bool {
++    if !title_bar_in_status_bar(cx) || window.is_fullscreen() || window.is_simple_fullscreen() {
++        return false;
++    }
 +    let sidebar = window
 +        .root::<MultiWorkspace>()
 +        .flatten()
 +        .map(|multi_workspace| multi_workspace.read(cx).sidebar_render_state(cx))
 +        .unwrap_or_default();
-+    cfg!(target_os = "macos")
-+        && !window.is_fullscreen()
-+        && !window.is_simple_fullscreen()
-+        && WorkspaceSettings::get_global(cx).title_bar_to_status_bar
-+        && !(sidebar.open && sidebar.side == SidebarSide::Left)
++    !(sidebar.open && sidebar.side == SidebarSide::Left)
 +}
 +
 +/// Lets a drag that starts on `element` move the window, as the title bar does.
@@ -586,6 +736,14 @@ index 7d50ce7297..890b17b3f7 100644
 +            let drag_started = drag_started.clone();
 +            move |_, _, cx| drag_started.update(cx, |started, _| *started = true)
 +        })
++        .on_mouse_up(MouseButton::Left, {
++            let drag_started = drag_started.clone();
++            move |_, _, cx| drag_started.update(cx, |started, _| *started = false)
++        })
++        .on_mouse_down_out({
++            let drag_started = drag_started.clone();
++            move |_, _, cx| drag_started.update(cx, |started, _| *started = false)
++        })
 +        .on_mouse_move(move |event, window, cx| {
 +            if drag_started.update(cx, |started, _| std::mem::take(started)) && event.dragging() {
 +                window.start_window_move();
@@ -593,41 +751,93 @@ index 7d50ce7297..890b17b3f7 100644
 +        })
 +}
 +
++/// Makes `element` an empty stretch of the title bar again: a drag moves the window and a
++/// double-click zooms it. Not for areas whose double-click already does something else.
++#[track_caller]
++pub fn title_bar_area(element: Stateful<Div>, window: &mut Window, cx: &mut App) -> Stateful<Div> {
++    move_window_on_drag(element, window, cx).on_click(|event, window, _| {
++        if event.click_count() == 2 {
++            window.titlebar_double_click();
++        }
++    })
++}
++
++/// A tab-bar-high strip that keeps the traffic lights off the content below it, for headers that
++/// have no tab bar of their own to hold the spacer: the left dock, zoomed panels and a top-left
++/// pane that shows no tab bar.
++#[track_caller]
++pub(crate) fn traffic_light_row(window: &mut Window, cx: &mut App) -> Stateful<Div> {
++    title_bar_area(div().id("traffic-light-spacer"), window, cx)
++        .flex_none()
++        .h(ui::Tab::container_height(cx))
++        .bg(cx.theme().colors().tab_bar_background)
++        .border_b_1()
++        .border_color(cx.theme().colors().border)
++}
++
  pub trait TerminalProvider {
      fn spawn(
          &self,
-@@ -1611,6 +1656,7 @@ pub struct Workspace {
+@@ -1611,6 +1704,12 @@ pub struct Workspace {
      /// the window, used to skip title recomputation when unrelated settings
      /// change.
      last_window_title_settings: Option<(String, String)>,
++    /// Last seen `title_bar_in_status_bar`, to notice when it is toggled.
 +    title_bar_to_status_bar: bool,
++    /// The header height the traffic lights were last centred in. UI font size shortcuts change
++    /// it without touching the settings.
++    #[cfg(target_os = "macos")]
++    traffic_light_header_height: Pixels,
      dirty_items: HashMap<EntityId, Subscription>,
      active_call: Option<(GlobalAnyActiveCall, Vec<Subscription>)>,
      leader_updates_tx: mpsc::UnboundedSender<(PeerId, proto::UpdateFollowers)>,
-@@ -2022,6 +2068,14 @@ impl Workspace {
+@@ -2022,6 +2121,21 @@ impl Workspace {
                  if last_title_settings != Some(title_settings) {
                      this.update_window_title(window, cx);
                  }
 +
-+                let title_bar_to_status_bar =
-+                    WorkspaceSettings::get_global(cx).title_bar_to_status_bar;
-+                if this.title_bar_to_status_bar != title_bar_to_status_bar {
-+                    this.title_bar_to_status_bar = title_bar_to_status_bar;
-+                    window.set_traffic_light_position(traffic_light_position(cx));
++                let title_bar_to_status_bar = title_bar_in_status_bar(cx);
++                let title_bar_toggled = this.title_bar_to_status_bar != title_bar_to_status_bar;
++                this.title_bar_to_status_bar = title_bar_to_status_bar;
++                // The header the buttons are centred in follows the UI font size and density.
++                #[cfg(target_os = "macos")]
++                {
++                    if title_bar_toggled || title_bar_to_status_bar {
++                        this.traffic_light_header_height = ui::Tab::content_height(cx);
++                        update_traffic_light_position(window, cx);
++                    }
++                }
++                if title_bar_toggled {
 +                    cx.notify();
 +                }
              }),
              cx.subscribe_in(
                  &project.read(cx).git_store().clone(),
-@@ -2118,6 +2172,7 @@ impl Workspace {
+@@ -2082,6 +2196,13 @@ impl Workspace {
+             this.show_initial_notifications(cx);
+         });
+ 
++        #[cfg(target_os = "macos")]
++        {
++            if title_bar_in_status_bar(cx) {
++                update_traffic_light_position(window, cx);
++            }
++        }
++
+         let mut center = PaneGroup::new(center_pane.clone());
+         center.set_is_center(true);
+         center.mark_positions(cx);
+@@ -2118,6 +2239,9 @@ impl Workspace {
              window_edited: false,
              last_window_title: None,
              last_window_title_settings: None,
-+            title_bar_to_status_bar: WorkspaceSettings::get_global(cx).title_bar_to_status_bar,
++            title_bar_to_status_bar: title_bar_in_status_bar(cx),
++            #[cfg(target_os = "macos")]
++            traffic_light_header_height: ui::Tab::content_height(cx),
              dirty_items: Default::default(),
              active_call,
              database_id: workspace_id,
-@@ -3325,6 +3380,9 @@ impl Workspace {
+@@ -3325,6 +3449,9 @@ impl Workspace {
      }
  
      pub fn set_titlebar_item(&mut self, item: AnyView, _: &mut Window, cx: &mut Context<Self>) {
@@ -637,7 +847,7 @@ index 7d50ce7297..890b17b3f7 100644
          self.titlebar_item = Some(item);
          cx.notify();
      }
-@@ -8753,7 +8811,7 @@ impl Workspace {
+@@ -8753,7 +8880,7 @@ impl Workspace {
          };
  
          let mut parts = Vec::new();
@@ -646,7 +856,7 @@ index 7d50ce7297..890b17b3f7 100644
              // The title bar is an ARIA toolbar, so region navigation lands on
              // its first control rather than the toolbar container.
              parts.push(FocusablePart::toolbar(self.titlebar_focus_handle.clone()));
-@@ -9562,6 +9620,10 @@ impl Render for Workspace {
+@@ -9562,6 +9689,10 @@ impl Render for Workspace {
              && self.active_item(cx).is_some();
          let pad_zoomed_pane =
              self.centered_layout && self.zoomed.is_some() && self.zoomed_position.is_none();
@@ -657,7 +867,26 @@ index 7d50ce7297..890b17b3f7 100644
          let render_padding = |size| {
              (size > 0.0).then(|| {
                  div()
-@@ -9625,7 +9687,7 @@ impl Render for Workspace {
+@@ -9588,6 +9719,18 @@ impl Render for Workspace {
+         };
+         let centered_paddings = render_centered_paddings(pad_center_pane);
+         let zoomed_paddings = render_centered_paddings(pad_zoomed_pane);
++        // The zoom shortcuts change the UI font size without touching the settings, so the
++        // settings observer cannot see the header (and the buttons' centre) move.
++        #[cfg(target_os = "macos")]
++        {
++            if title_bar_in_status_bar(cx) {
++                let header_height = ui::Tab::content_height(cx);
++                if self.traffic_light_header_height != header_height {
++                    self.traffic_light_header_height = header_height;
++                    update_traffic_light_position(window, cx);
++                }
++            }
++        }
+         let ui_font = theme_settings::setup_ui_font(window, cx);
+ 
+         let theme = cx.theme().clone();
+@@ -9625,7 +9768,7 @@ impl Render for Workspace {
              // a tab group: region navigation lands on the first control (per
              // the ARIA toolbar pattern), Tab steps through them, and arrow keys
              // move between them once focus is inside.
@@ -666,7 +895,7 @@ index 7d50ce7297..890b17b3f7 100644
                  this.child(
                      div()
                          .id("titlebar-region")
-@@ -9677,7 +9739,7 @@ impl Render for Workspace {
+@@ -9677,7 +9820,7 @@ impl Render for Workspace {
                              .flex()
                              .flex_col()
                              .overflow_hidden()
@@ -675,10 +904,51 @@ index 7d50ce7297..890b17b3f7 100644
                              .border_b_1()
                              .border_color(colors.border)
                              .child({
-@@ -12996,6 +13058,66 @@ mod tests {
+@@ -10028,6 +10171,17 @@ impl Render for Workspace {
+                                         })
+                                         .into_any_element(),
+                                 };
++                                let traffic_lights = traffic_lights_overlay_workspace(window, cx);
++                                let zoomed_element =
++                                    if traffic_lights && self.zoomed_position.is_some() {
++                                        v_flex()
++                                            .size_full()
++                                            .child(traffic_light_row(window, cx))
++                                            .child(div().flex_1().min_h_0().child(zoomed_element))
++                                            .into_any_element()
++                                    } else {
++                                        zoomed_element
++                                    };
+                                 let overlay = div()
+                                     .occlude()
+                                     .absolute()
+@@ -10042,13 +10196,20 @@ impl Render for Workspace {
+                                     return Some(overlay);
+                                 }
+ 
+-                                Some(match self.zoomed_position {
++                                let overlay = match self.zoomed_position {
+                                     Some(DockPosition::Left) => overlay.right_2().border_r_1(),
+                                     Some(DockPosition::Right) => overlay.left_2().border_l_1(),
+                                     Some(DockPosition::Bottom) => overlay.top_2().border_t_1(),
+                                     None => {
+                                         overlay.top_2().bottom_2().left_2().right_2().border_1()
+                                     }
++                                };
++                                // The traffic lights are centred in a header that starts at the
++                                // window's top edge, as it does unzoomed.
++                                Some(if traffic_lights {
++                                    overlay.top_0().border_t_0()
++                                } else {
++                                    overlay
+                                 })
+                             }))
+                             .children(self.render_notifications(window, cx)),
+@@ -12996,6 +13157,68 @@ mod tests {
          );
      }
  
++    #[cfg(target_os = "macos")]
 +    fn set_title_bar_to_status_bar(enabled: bool, cx: &mut VisualTestContext) {
 +        cx.update(|_, cx| {
 +            SettingsStore::update_global(cx, |store, cx| {
@@ -690,6 +960,7 @@ index 7d50ce7297..890b17b3f7 100644
 +        cx.run_until_parked();
 +    }
 +
++    #[cfg(target_os = "macos")]
 +    #[gpui::test]
 +    async fn test_title_bar_to_status_bar(cx: &mut TestAppContext) {
 +        struct TestTitleBar;
@@ -763,20 +1034,23 @@ index eff3a0a93c..cf162095b1 100644
                  enabled: workspace
                      .focus_follows_mouse
 diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
-index a5d947b967..b388a55748 100644
+index a5d947b967..7253fce1e3 100644
 --- a/crates/zed/src/zed.rs
 +++ b/crates/zed/src/zed.rs
-@@ -394,7 +394,7 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
+@@ -394,7 +394,10 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
          titlebar: Some(TitlebarOptions {
              title: None,
              appears_transparent: true,
 -            traffic_light_position: Some(point(px(9.0), px(9.0))),
-+            traffic_light_position: Some(workspace::traffic_light_position(cx)),
++            traffic_light_position: Some(point(
++                workspace::TRAFFIC_LIGHT_INSET,
++                workspace::TRAFFIC_LIGHT_INSET,
++            )),
          }),
          window_bounds: None,
          focus: false,
 diff --git a/docs/src/reference/all-settings.md b/docs/src/reference/all-settings.md
-index 9ce09d7ea5..29e73d762a 100644
+index 9ce09d7ea5..5098c651ca 100644
 --- a/docs/src/reference/all-settings.md
 +++ b/docs/src/reference/all-settings.md
 @@ -5493,6 +5493,16 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a
@@ -785,7 +1059,7 @@ index 9ce09d7ea5..29e73d762a 100644
  
 +## Title Bar to Status Bar
 +
-+- Description: Whether to hide the title bar and show its contents in the status bar instead
++- Description: Whether to hide the title bar and show its contents in the status bar instead (macOS only). Other platforms ignore it, as their window controls are drawn in the title bar
 +- Setting: `title_bar_to_status_bar`
 +- Default: `false`
 +
@@ -797,14 +1071,14 @@ index 9ce09d7ea5..29e73d762a 100644
  
  - Description: Template for the window title. Use `${separator}` to insert a
 diff --git a/docs/src/visual-customization.md b/docs/src/visual-customization.md
-index c727ee4f17..4a5937f635 100644
+index c727ee4f17..85138e7e2b 100644
 --- a/docs/src/visual-customization.md
 +++ b/docs/src/visual-customization.md
 @@ -133,6 +133,8 @@ To disable this behavior use:
  ### Titlebar
  
  ```json [settings]
-+  // Hide the title bar and show its contents in the status bar instead
++  // Hide the title bar and show its contents in the status bar instead (macOS only)
 +  "title_bar_to_status_bar": false,
    // Control which items are shown/hidden in the title bar
    "title_bar": {

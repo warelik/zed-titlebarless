@@ -1,0 +1,413 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: warelik <warelik@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 11:28:27 +0300
+Subject: [PATCH 3/8] Add compact threads sidebar and halve its minimum width
+
+Each sidebar thread takes two lines even when its only metadata is a
+timestamp, so few threads fit on screen. With
+agent.threads_sidebar.compact a thread is one row at the tab bar
+height, and hovering it trades the title for the metadata and actions.
+Project group headers take the same height, and so does the "No threads
+yet" row of an empty group; the search header keeps only the input;
+Escape still clears the query. The setting defaults to false, which
+keeps the two-line rows.
+
+The minimum width of the threads sidebar drops from 200 to 100 pixels
+for every user. One-line rows stay readable that narrow, so the sidebar
+can be dragged narrower and leave more room for the editor. The clamp
+also applies to agent.threads_sidebar.default_width, so its schema
+range and documentation now start at 100.
+---
+ assets/settings/default.json                |  2 +
+ crates/agent/src/tool_permissions.rs        |  1 +
+ crates/agent_settings/src/agent_settings.rs |  4 +-
+ crates/agent_ui/src/agent_ui.rs             |  1 +
+ crates/settings_content/src/agent.rs        |  9 +-
+ crates/sidebar/src/sidebar.rs               | 40 ++++++---
+ crates/ui/src/components/ai/thread_item.rs  | 94 ++++++++++++++-------
+ docs/src/reference/all-settings.md          |  2 +-
+ 8 files changed, 107 insertions(+), 46 deletions(-)
+
+diff --git a/assets/settings/default.json b/assets/settings/default.json
+index bbc8f654c9..470efc3d33 100644
+--- a/assets/settings/default.json
++++ b/assets/settings/default.json
+@@ -1179,6 +1179,8 @@
+       "default_width": 300,
+       // Automatically open the Threads Sidebar when opening a folder in an existing window.
+       "auto_open": true,
++      // Show each thread on a single line at the height of the tab bar, with its details on hover.
++      "compact": false,
+     },
+     // Default fixed width when the agent panel is docked to the left or right and
+     // `flexible` is false.
+diff --git a/crates/agent/src/tool_permissions.rs b/crates/agent/src/tool_permissions.rs
+index fa38a0b0bb..750154a1fe 100644
+--- a/crates/agent/src/tool_permissions.rs
++++ b/crates/agent/src/tool_permissions.rs
+@@ -613,6 +613,7 @@ mod tests {
+                 auto_open: true,
+                 default_width: px(300.),
+                 position: settings::SidebarDockPosition::Left,
++                compact: false,
+             },
+             thinking_display: Default::default(),
+         }
+diff --git a/crates/agent_settings/src/agent_settings.rs b/crates/agent_settings/src/agent_settings.rs
+index 331480c2e6..e88b9a9e33 100644
+--- a/crates/agent_settings/src/agent_settings.rs
++++ b/crates/agent_settings/src/agent_settings.rs
+@@ -34,7 +34,7 @@ pub const COMPACTION_PROMPT: &str = include_str!("prompts/compaction_prompt.txt"
+ /// Bounds on the width of the threads list. They constrain the configured
+ /// default as well as the width the user drags to, so that no width the sidebar
+ /// can hold is able to crowd out the editor or collapse the list.
+-pub const THREADS_LIST_MIN_WIDTH: Pixels = px(200.0);
++pub const THREADS_LIST_MIN_WIDTH: Pixels = px(100.0);
+ pub const THREADS_LIST_MAX_WIDTH: Pixels = px(800.0);
+ 
+ #[derive(Debug, Clone, Default, PartialEq, Eq)]
+@@ -257,6 +257,7 @@ pub struct ThreadsSidebarSettings {
+     pub auto_open: bool,
+     pub position: SidebarDockPosition,
+     pub default_width: Pixels,
++    pub compact: bool,
+ }
+ 
+ impl AgentSettings {
+@@ -785,6 +786,7 @@ impl Settings for AgentSettings {
+                     .unwrap()
+                     .into_gpui()
+                     .clamp(THREADS_LIST_MIN_WIDTH, THREADS_LIST_MAX_WIDTH),
++                compact: threads_sidebar.compact.unwrap(),
+             },
+             default_width: agent.default_width.unwrap().into_gpui(),
+             default_height: agent.default_height.unwrap().into_gpui(),
+diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
+index 7d28603d46..d9bcdf1811 100644
+--- a/crates/agent_ui/src/agent_ui.rs
++++ b/crates/agent_ui/src/agent_ui.rs
+@@ -1014,6 +1014,7 @@ mod tests {
+                 auto_open: true,
+                 default_width: px(300.),
+                 position: settings::SidebarDockPosition::Left,
++                compact: false,
+             },
+             thinking_display: Default::default(),
+         };
+diff --git a/crates/settings_content/src/agent.rs b/crates/settings_content/src/agent.rs
+index 6bafc029cb..b23be559ce 100644
+--- a/crates/settings_content/src/agent.rs
++++ b/crates/settings_content/src/agent.rs
+@@ -51,12 +51,17 @@ pub struct ThreadsSidebarSettingsContent {
+     pub position: Option<SidebarDockPosition>,
+     /// Default width of the threads sidebar in pixels.
+     ///
+-    /// Values range from 200 to 800, matching the widths the sidebar can be
++    /// Values range from 100 to 800, matching the widths the sidebar can be
+     /// dragged to. Values outside that range are clamped into it.
+     ///
+     /// Default: 300
+-    #[schemars(range(min = 200, max = 800))]
++    #[schemars(range(min = 100, max = 800))]
+     pub default_width: Option<crate::PixelSetting>,
++    /// Whether to show each thread on a single line at the height of the tab bar, with its
++    /// details on hover.
++    ///
++    /// Default: false
++    pub compact: Option<bool>,
+ }
+ 
+ #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index cb12edd25b..3c09915d4c 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -2385,7 +2385,13 @@ impl Sidebar {
+             .group(&group_name)
+             .when(!has_filter, |this| this.cursor_pointer())
+             .relative()
+-            .h(Tab::content_height(cx))
++            // Every header but the first also gets 1px from its separator wrapper (or the sticky
++            // copy's bottom border), so only the first one has to supply the full tab height.
++            .h(if Self::is_compact(cx) && !is_sticky && ix == 0 {
++                Tab::container_height(cx)
++            } else {
++                Tab::content_height(cx)
++            })
+             .w_full()
+             .pl_2()
+             .pr_1p5()
+@@ -2517,15 +2523,16 @@ impl Sidebar {
+             .block_mouse_except_scroll();
+ 
+         if !is_collapsed && !has_threads {
++            let compact = Self::is_compact(cx);
+             v_flex()
+                 .w_full()
+                 .child(header)
+                 .child(
+                     h_flex()
+                         .px_2()
+-                        .pt_1()
+-                        .pb_2()
+                         .gap(px(7.))
++                        .when(compact, |this| this.h(Tab::container_height(cx)))
++                        .when(!compact, |this| this.pt_1().pb_2())
+                         .child(Icon::new(IconName::Circle).size(IconSize::Small).color(
+                             Color::Custom(cx.theme().colors().icon_placeholder.opacity(0.1)),
+                         ))
+@@ -3415,6 +3422,10 @@ impl Sidebar {
+         !self.filter_editor.read(cx).text(cx).is_empty()
+     }
+ 
++    fn is_compact(cx: &App) -> bool {
++        AgentSettings::get_global(cx).threads_sidebar.compact
++    }
++
+     fn start_renaming_entry(
+         &mut self,
+         ix: usize,
+@@ -6302,6 +6313,7 @@ impl Sidebar {
+ 
+         let thread_item = ThreadItem::new(id, title.clone())
+             .base_bg(sidebar_bg)
++            .compact(Self::is_compact(cx))
+             .icon(icon)
+             .when(is_draft, |this| {
+                 this.icon_color(Color::Custom(cx.theme().colors().icon_muted.opacity(0.2)))
+@@ -6625,6 +6637,7 @@ impl Sidebar {
+ 
+         let terminal_item = ThreadItem::new(id, title)
+             .base_bg(sidebar_bg)
++            .compact(Self::is_compact(cx))
+             .icon(IconName::Terminal)
+             .when_some(icon_char, |this, icon_char| this.icon_char(icon_char))
+             .is_remote(is_remote)
+@@ -7364,6 +7377,7 @@ impl Sidebar {
+         cx: &mut Context<Self>,
+     ) -> impl IntoElement {
+         let has_query = self.has_filter_query(cx);
++        let compact = Self::is_compact(cx);
+         let sidebar_on_left = self.side(cx) == SidebarSide::Left;
+         let sidebar_on_right = self.side(cx) == SidebarSide::Right;
+         let not_fullscreen = !window.is_fullscreen() && !window.is_simple_fullscreen();
+@@ -7407,16 +7421,18 @@ impl Sidebar {
+             .when(!no_open_projects, |this| {
+                 this.border_b_1()
+                     .border_color(cx.theme().colors().border)
+-                    .when(traffic_lights, |this| {
++                    .when(traffic_lights && !compact, |this| {
+                         this.child(Divider::vertical().color(ui::DividerColor::Border))
+                     })
+-                    .child(
+-                        div().ml_1().child(
+-                            Icon::new(IconName::MagnifyingGlass)
+-                                .size(IconSize::Small)
+-                                .color(Color::Muted),
+-                        ),
+-                    )
++                    .when(!compact, |this| {
++                        this.child(
++                            div().ml_1().child(
++                                Icon::new(IconName::MagnifyingGlass)
++                                    .size(IconSize::Small)
++                                    .color(Color::Muted),
++                            ),
++                        )
++                    })
+                     .child(self.render_filter_input(cx))
+                     .child(
+                         h_flex()
+@@ -7426,7 +7442,7 @@ impl Sidebar {
+                                     && !self.filter_editor.focus_handle(cx).is_focused(window),
+                                 |this| this.child(KeyBinding::for_action(&FocusSidebarFilter, cx)),
+                             )
+-                            .when(has_query, |this| {
++                            .when(has_query && !compact, |this| {
+                                 this.child(
+                                     IconButton::new("clear_filter", IconName::Close)
+                                         .icon_size(IconSize::Small)
+diff --git a/crates/ui/src/components/ai/thread_item.rs b/crates/ui/src/components/ai/thread_item.rs
+index 7cf574848a..65b2c66b1f 100644
+--- a/crates/ui/src/components/ai/thread_item.rs
++++ b/crates/ui/src/components/ai/thread_item.rs
+@@ -64,6 +64,7 @@ pub struct ThreadItem {
+     on_hover: Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>,
+     action_slot: Option<AnyElement>,
+     base_bg: Option<Hsla>,
++    compact: bool,
+ }
+ 
+ impl ThreadItem {
+@@ -99,6 +100,7 @@ impl ThreadItem {
+             on_hover: Box::new(|_, _, _| {}),
+             action_slot: None,
+             base_bg: None,
++            compact: false,
+         }
+     }
+ 
+@@ -246,10 +248,18 @@ impl ThreadItem {
+         self.base_bg = Some(color);
+         self
+     }
++
++    /// Renders a single line at the height of the tab bar; the metadata appears on hover.
++    pub fn compact(mut self, compact: bool) -> Self {
++        self.compact = compact;
++        self
++    }
+ }
+ 
+ impl RenderOnce for ThreadItem {
+     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
++        let compact = self.compact;
++        let hovered = self.hovered;
+         let color = cx.theme().colors();
+         let raw_bg = self.base_bg.unwrap_or(color.surface_background);
+         // The fade gradient paints a solid color over the title to blend it into
+@@ -419,6 +429,35 @@ impl RenderOnce for ThreadItem {
+             || has_worktree
+             || has_diff_stats
+             || has_timestamp;
++        // A compact row has room for one line: on hover it trades the always visible title
++        // for the metadata a regular row shows on its second line.
++        let show_title = !(compact && hovered && has_metadata);
++
++        let action_slot = self.action_slot.filter(|_| hovered).map(|slot| {
++            h_flex()
++                .relative()
++                // In compact mode the metadata sits right before the actions; the fade would hide it.
++                .when(opaque_window && !compact, |this| {
++                    this.child(
++                        GradientFade::new(base_bg, hover_bg, active_bg)
++                            .width(px(120.0))
++                            .right(px(8.))
++                            .gradient_stop(0.90)
++                            .group_name("thread-item"),
++                    )
++                })
++                .child(
++                    h_flex()
++                        .pr_1p5()
++                        .child(slot)
++                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
++                )
++        });
++        let (title_row_action_slot, trailing_action_slot) = if compact {
++            (None, action_slot.map(|slot| slot.flex_none()))
++        } else {
++            (action_slot, None)
++        };
+ 
+         v_flex()
+             .id(self.id.clone())
+@@ -428,8 +467,17 @@ impl RenderOnce for ThreadItem {
+             .flex_shrink_0()
+             .overflow_hidden()
+             .w_full()
+-            .py_1()
+             .px_1p5()
++            .map(|this| {
++                if compact {
++                    this.flex_row()
++                        .items_center()
++                        .gap_2()
++                        .h(crate::Tab::container_height(cx))
++                } else {
++                    this.py_1()
++                }
++            })
+             .when(self.selected, |s| s.bg(color.ghost_element_selected))
+             .border_1()
+             .border_r_2()
+@@ -443,6 +491,13 @@ impl RenderOnce for ThreadItem {
+                 h_flex()
+                     .min_w_0()
+                     .w_full()
++                    .when(compact, |this| {
++                        if show_title {
++                            this.w_auto().flex_auto().relative()
++                        } else {
++                            this.w_auto().flex_none()
++                        }
++                    })
+                     .h_6()
+                     .gap_2()
+                     .justify_between()
+@@ -451,44 +506,22 @@ impl RenderOnce for ThreadItem {
+                             .id("content")
+                             .min_w_0()
+                             .flex_1()
++                            .when(compact, |this| this.overflow_hidden())
+                             .gap_1p5()
+                             .child(icon)
+-                            .child(title_label),
++                            .when(show_title, |this| this.child(title_label)),
+                     )
+-                    .when(self.is_truncated && opaque_window, |this| {
++                    .when(self.is_truncated && opaque_window && show_title, |this| {
+                         this.child(gradient_overlay)
+                     })
+-                    .when(self.hovered, |this| {
+-                        this.when_some(self.action_slot, |this, slot| {
+-                            this.child(
+-                                h_flex()
+-                                    .relative()
+-                                    .when(opaque_window, |this| {
+-                                        this.child(
+-                                            GradientFade::new(base_bg, hover_bg, active_bg)
+-                                                .width(px(120.0))
+-                                                .right(px(8.))
+-                                                .gradient_stop(0.90)
+-                                                .group_name("thread-item"),
+-                                        )
+-                                    })
+-                                    .child(
+-                                        h_flex()
+-                                            .pr_1p5()
+-                                            .child(slot)
+-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+-                                                cx.stop_propagation()
+-                                            }),
+-                                    ),
+-                            )
+-                        })
+-                    }),
++                    .children(title_row_action_slot),
+             )
+-            .when(has_metadata, |this| {
++            .when(has_metadata && (!compact || hovered), |this| {
+                 this.child(
+                     h_flex()
+                         .gap_1p5()
+-                        .child(icon_container()) // Icon Spacing
++                        .when(compact, |this| this.flex_1().min_w_0().overflow_hidden())
++                        .when(!compact, |this| this.child(icon_container())) // Icon Spacing
+                         .when(self.archived, |this| {
+                             this.child(
+                                 Icon::new(IconName::Archive).size(IconSize::XSmall).color(
+@@ -607,6 +640,7 @@ impl RenderOnce for ThreadItem {
+                         }),
+                 )
+             })
++            .children(trailing_action_slot)
+             .when(show_tooltip, |this| {
+                 let status = self.status;
+                 this.tooltip(Tooltip::element(move |_, _| match status {
+diff --git a/docs/src/reference/all-settings.md b/docs/src/reference/all-settings.md
+index 5098c651ca..7d5b0563d4 100644
+--- a/docs/src/reference/all-settings.md
++++ b/docs/src/reference/all-settings.md
+@@ -151,7 +151,7 @@ Open the Settings Editor and search for “Threads Sidebar Position”. Or add t
+ 
+ **Options**
+ 
+-Numbers from `200` to `800` pixels (inclusive). Values outside this range are clamped to the nearest limit.
++Numbers from `100` to `800` pixels (inclusive). Values outside this range are clamped to the nearest limit.
+ 
+ Open the Settings Editor and search for “Threads Sidebar Default Width”. Or add this to your `settings.json`:
+ 
+-- 
+2.55.0
+
