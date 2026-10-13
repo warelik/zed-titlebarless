@@ -19,12 +19,12 @@ the stock tab layout, including terminal titles in the tab switcher.
  crates/settings/src/vscode_import.rs       |  4 ++
  crates/settings_content/src/workspace.rs   | 17 ++++++
  crates/terminal_view/src/terminal_view.rs  | 12 +++-
- crates/ui/src/components/tab.rs            | 66 ++++++++++++++++++++++
+ crates/ui/src/components/tab.rs            | 69 ++++++++++++++++++++++
  crates/workspace/src/item.rs               |  4 ++
  crates/workspace/src/pane.rs               | 30 ++++++++--
- crates/workspace/src/workspace.rs          | 38 +++++++++++++
+ crates/workspace/src/workspace.rs          | 38 ++++++++++++
  crates/workspace/src/workspace_settings.rs |  4 ++
- 9 files changed, 176 insertions(+), 7 deletions(-)
+ 9 files changed, 179 insertions(+), 7 deletions(-)
 
 diff --git a/assets/settings/default.json b/assets/settings/default.json
 index 67798e5099..bbc8f654c9 100644
@@ -155,7 +155,7 @@ index c821c4b0f3..223c5fa607 100644
                      )
                      .when_some(self.rename_editor.clone(), |this, editor| {
 diff --git a/crates/ui/src/components/tab.rs b/crates/ui/src/components/tab.rs
-index 6a25ad4345..64a4819d17 100644
+index 6a25ad4345..8b197a91d1 100644
 --- a/crates/ui/src/components/tab.rs
 +++ b/crates/ui/src/components/tab.rs
 @@ -38,6 +38,8 @@ pub struct Tab {
@@ -227,7 +227,7 @@ index 6a25ad4345..64a4819d17 100644
                  .justify_center()
                  .children(self.end_slot);
  
-@@ -141,6 +171,42 @@ impl RenderOnce for Tab {
+@@ -141,6 +171,45 @@ impl RenderOnce for Tab {
              }
          };
  
@@ -245,6 +245,9 @@ index 6a25ad4345..64a4819d17 100644
 +                .cursor_pointer()
 +                .child(
 +                    h_flex()
++                        // Without an id the hover style gets no element state, so hovering does
++                        // not repaint and the highlight waits for an unrelated redraw.
++                        .id("chip")
 +                        .group("")
 +                        .relative()
 +                        .min_w_0()
