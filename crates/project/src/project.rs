@@ -4006,6 +4006,10 @@ impl Project {
         }
     }
 
+    pub fn disconnected_from_remote(&mut self, server_not_running: bool, cx: &mut Context<Self>) {
+        cx.emit(Event::DisconnectedFromRemote { server_not_running });
+    }
+
     fn on_settings_observer_event(
         &mut self,
         _: Entity<SettingsObserver>,
