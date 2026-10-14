@@ -1129,6 +1129,31 @@ async fn test_restored_width_preserves_legacy_resizes(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_sidebar_width_minimum_is_independent_of_layout_opt_ins(cx: &mut TestAppContext) {
+    let project = init_test_project("/my-project", cx).await;
+    let (multi_workspace, cx) = cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+    for (compact, in_agent_panel) in [(false, false), (false, true), (true, false), (true, true)] {
+        cx.update(|_window, cx| {
+            let content = serde_json::json!({"agent": {"threads_sidebar": {
+                "compact": compact, "in_agent_panel": in_agent_panel, "default_width": 300
+            }}}).to_string();
+            SettingsStore::update_global(cx, |store, cx| {
+                store.set_user_settings(&content, cx).expect("valid layout settings");
+            });
+        });
+        cx.run_until_parked();
+        sidebar.update_in(cx, |sidebar, _, cx| sidebar.set_width(Some(px(5.0)), cx));
+        assert_eq!(sidebar.read_with(cx, |sidebar, _| sidebar.width), px(100.0));
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.restore_serialized_state(r#"{"width":5,"width_set_by_user":true}"#, window, cx);
+        });
+        assert_eq!(sidebar.read_with(cx, |sidebar, _| sidebar.width), px(100.0));
+        assert!(sidebar.read_with(cx, |sidebar, _| sidebar.width_set_by_user));
+    }
+}
+
+#[gpui::test]
 async fn test_configured_width_is_clamped_into_range(cx: &mut TestAppContext) {
     let project = init_test_project("/my-project", cx).await;
     cx.update(|cx| set_threads_sidebar_default_width(5000.0, cx));
@@ -16025,4 +16050,505 @@ fn sidebar_painted_background_at(position: Point<Pixels>, cx: &mut VisualTestCon
             .expect("solid background at pointer");
         u32::from(Rgba::from(color))
     })
+}
+
+fn set_threads_sidebar_in_agent_panel(in_agent_panel: bool, cx: &mut VisualTestContext) {
+    cx.update(|_window, cx| {
+        SettingsStore::update_global(cx, |store, cx| {
+            store
+                .set_user_settings(
+                    &format!(r#"{{"agent": {{"threads_sidebar": {{"in_agent_panel": {in_agent_panel}}}}}}}"#),
+                    cx,
+                )
+                .unwrap();
+        });
+    });
+}
+
+#[gpui::test]
+async fn test_agent_panel_sidebar_keeps_empty_workspace_transient(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+    let project = project::Project::test(fs, [], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
+    let workspace = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+
+    for in_agent_panel in [true, false, true] {
+        set_threads_sidebar_in_agent_panel(in_agent_panel, cx);
+        cx.run_until_parked();
+        sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+        cx.run_until_parked();
+        multi_workspace.read_with(cx, |mw, _cx| {
+            assert_eq!(mw.workspace(), &workspace);
+            assert_eq!(mw.workspaces().count(), 1);
+            assert!(mw.project_group_keys().is_empty());
+            assert!(!mw.active_workspace_is_retained());
+        });
+    }
+}
+
+#[gpui::test]
+async fn test_m2_in_agent_panel_does_not_clobber_sidebar_open_state(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
+
+    assert!(!multi_workspace.read_with(cx, |mw, _| mw.sidebar_open()));
+
+    set_threads_sidebar_in_agent_panel(true, cx);
+
+    sidebar.update(cx, |s, cx| s.update_entries(cx));
+    cx.run_until_parked();
+
+    assert!(
+        !multi_workspace.read_with(cx, |mw, _| mw.sidebar_open()),
+        "sidebar_open must not be forced to true when in_agent_panel is true"
+    );
+}
+
+#[gpui::test]
+async fn test_m2_in_agent_panel_tab_order_stable_across_thread_updates(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    let paths = PathList::new(&[PathBuf::from("/my-project")]);
+
+    let t0 = chrono::DateTime::parse_from_rfc3339("2024-01-01T10:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let t1 = chrono::DateTime::parse_from_rfc3339("2024-01-01T10:00:10Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let t2 = chrono::DateTime::parse_from_rfc3339("2024-01-01T10:00:20Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
+    // Thread 1: legacy thread without created_at, initially updated_at = t0
+    let metadata1 = ThreadMetadata {
+        thread_id: ThreadId::new(),
+        session_id: Some(acp::SessionId::new("t0".to_string())),
+        agent_id: agent::ZED_AGENT_ID.clone(),
+        title: Some(SharedString::from("Thread 1")),
+        title_override: None,
+        updated_at: t0,
+        created_at: None,
+        interacted_at: None,
+        worktree_paths: WorktreePaths::from_path_lists(paths.clone(), paths.clone()).unwrap(),
+        archived: false,
+        remote_connection: None,
+    };
+    // Thread 2: created_at = t1, updated_at = t1
+    let metadata2 = ThreadMetadata {
+        thread_id: ThreadId::new(),
+        session_id: Some(acp::SessionId::new("t1".to_string())),
+        agent_id: agent::ZED_AGENT_ID.clone(),
+        title: Some(SharedString::from("Thread 2")),
+        title_override: None,
+        updated_at: t1,
+        created_at: Some(t1),
+        interacted_at: None,
+        worktree_paths: WorktreePaths::from_path_lists(paths.clone(), paths).unwrap(),
+        archived: false,
+        remote_connection: None,
+    };
+    cx.update(|cx| {
+        let store = ThreadMetadataStore::global(cx);
+        store.update(cx, |store, cx| {
+            store.save(metadata1, cx);
+            store.save(metadata2, cx);
+        });
+    });
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
+
+    multi_workspace.update(cx, |mw, cx| {
+        mw.retain_active_workspace(cx);
+    });
+
+    set_threads_sidebar_in_agent_panel(true, cx);
+
+    sidebar.update(cx, |s, cx| s.update_entries(cx));
+    cx.run_until_parked();
+
+    let initial_tabs = sidebar.read_with(cx, |s, _cx| {
+        s.ordered_thread_tab_entries()
+            .into_iter()
+            .filter_map(|(_, entry)| match entry {
+                ListEntry::Thread(t) => t.metadata.title.as_ref().map(|title| title.to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(initial_tabs, vec!["Thread 1", "Thread 2"]);
+
+    // Update Thread 1's updated_at to t2 (which is AFTER Thread 2's created_at)
+    cx.update(|_window, cx| {
+        let store = ThreadMetadataStore::global(cx);
+        let mut m = store
+            .read(cx)
+            .entries()
+            .find(|e| e.title.as_deref() == Some("Thread 1"))
+            .cloned()
+            .unwrap();
+        m.updated_at = t2;
+        store.update(cx, |store, cx| store.save(m, cx));
+    });
+
+    sidebar.update(cx, |s, cx| s.update_entries(cx));
+    cx.run_until_parked();
+
+    let after_tabs = sidebar.read_with(cx, |s, _cx| {
+        s.ordered_thread_tab_entries()
+            .into_iter()
+            .filter_map(|(_, entry)| match entry {
+                ListEntry::Thread(t) => t.metadata.title.as_ref().map(|title| title.to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        after_tabs,
+        vec!["Thread 1", "Thread 2"],
+        "Tab order must remain stable when thread is updated"
+    );
+}
+
+#[gpui::test]
+async fn test_m2_empty_draft_not_dropped_during_pending_activation(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    let paths = PathList::new(&[PathBuf::from("/my-project")]);
+    let draft_thread_id =
+        save_draft_metadata_with_main_paths(None, paths.clone(), paths, Utc::now(), cx);
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
+
+    set_threads_sidebar_in_agent_panel(true, cx);
+
+    // Set pending activation to this draft
+    sidebar.update(cx, |s, cx| {
+        s.pending_thread_activation = Some(draft_thread_id);
+        s.update_entries(cx);
+    });
+    cx.run_until_parked();
+
+    let has_draft = sidebar.read_with(cx, |s, _| {
+        s.contents.entries.iter().any(|e| match e {
+            ListEntry::Thread(t) => t.metadata.thread_id == draft_thread_id,
+            _ => false,
+        })
+    });
+    assert!(
+        has_draft,
+        "Empty draft should not be dropped while it is the pending activation target"
+    );
+}
+
+#[gpui::test]
+async fn test_stock_empty_draft_dropped_during_pending_activation_when_not_in_agent_panel(
+    cx: &mut TestAppContext,
+) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    let paths = PathList::new(&[PathBuf::from("/my-project")]);
+    let draft_thread_id =
+        save_draft_metadata_with_main_paths(None, paths.clone(), paths, Utc::now(), cx);
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    set_threads_sidebar_in_agent_panel(false, cx);
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+
+    sidebar.update(cx, |s, cx| {
+        s.pending_thread_activation = Some(draft_thread_id);
+        s.update_entries(cx);
+    });
+    cx.run_until_parked();
+
+    let has_draft = sidebar.read_with(cx, |s, _| {
+        s.contents
+            .entries
+            .iter()
+            .any(|e| matches!(e, ListEntry::Thread(t) if t.metadata.thread_id == draft_thread_id))
+    });
+    assert!(
+        !has_draft,
+        "Stock behavior requires empty draft to be dropped during pending activation"
+    );
+}
+
+#[gpui::test]
+async fn test_m2_active_entry_synced_from_agent_panel_on_startup(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    let panel = add_agent_panel(&workspace, cx);
+
+    let terminal_id = panel
+        .update_in(cx, |panel, window, cx| {
+            panel.insert_test_terminal("Dev Terminal", true, window, cx)
+        })
+        .expect("test terminal should be inserted");
+    cx.run_until_parked();
+
+    set_threads_sidebar_in_agent_panel(true, cx);
+
+    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
+    sidebar.update(cx, |s, cx| s.update_entries(cx));
+    cx.run_until_parked();
+
+    let active_terminal = sidebar.read_with(cx, |s, _| match &s.active_entry {
+        Some(ActiveEntry::Terminal {
+            terminal_id: tid, ..
+        }) => Some(*tid),
+        _ => None,
+    });
+    assert_eq!(
+        active_terminal,
+        Some(terminal_id),
+        "Sidebar active_entry should be synchronized from AgentPanel on startup"
+    );
+}
+
+#[gpui::test]
+async fn test_stock_active_entry_not_synced_from_agent_panel_when_not_in_agent_panel(
+    cx: &mut TestAppContext,
+) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    let panel = add_agent_panel(&workspace, cx);
+
+    let _terminal_id = panel
+        .update_in(cx, |panel, window, cx| {
+            panel.insert_test_terminal("Dev Terminal", true, window, cx)
+        })
+        .expect("test terminal should be inserted");
+    cx.run_until_parked();
+
+    set_threads_sidebar_in_agent_panel(false, cx);
+
+    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
+    sidebar.update(cx, |s, cx| s.update_entries(cx));
+    cx.run_until_parked();
+
+    let active_terminal = sidebar.read_with(cx, |s, _| match &s.active_entry {
+        Some(ActiveEntry::Terminal {
+            terminal_id: tid, ..
+        }) => Some(*tid),
+        _ => None,
+    });
+    assert_eq!(
+        active_terminal, None,
+        "Sidebar active_entry should remain None on startup when in_agent_panel is false"
+    );
+}
+
+#[gpui::test]
+async fn test_agent_panel_thread_tabs_wrap_while_project_tabs_stay_single_row(
+    cx: &mut TestAppContext,
+) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    cx.update(|cx| {
+        let content = serde_json::json!({
+            "agent": {
+                "flexible": false,
+                "default_width": 300.0,
+                "dock": "left",
+                "threads_sidebar": {
+                    "in_agent_panel": true
+                }
+            },
+            "tabs": {
+                "min_width": 136.0,
+                "max_width": 180.0
+            },
+            "tab_bar": {
+                "max_tab_rows": 3
+            },
+            "title_bar_to_status_bar": true
+        })
+        .to_string();
+        SettingsStore::update_global(cx, |store, cx| {
+            store.set_user_settings(&content, cx).unwrap();
+        });
+    });
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+    multi_workspace.update(cx, |mw, cx| {
+        mw.retain_active_workspace(cx);
+        for ix in 1..5 {
+            let path = PathList::new(&[PathBuf::from(format!("/other-project-{ix}"))]);
+            mw.test_add_project_group(workspace::ProjectGroup {
+                key: ProjectGroupKey::new(None, path),
+                workspaces: Vec::new(),
+                expanded: false,
+            });
+        }
+    });
+
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.open_panel::<AgentPanel>(window, cx);
+    });
+
+    save_n_test_threads(6, &project, cx).await;
+    panel
+        .update_in(cx, |panel, window, cx| {
+            panel.insert_test_terminal("Term 1", false, window, cx)
+        })
+        .expect("first test terminal should be inserted");
+    panel
+        .update_in(cx, |panel, window, cx| {
+            panel.insert_test_terminal("Term 2", true, window, cx)
+        })
+        .expect("second test terminal should be inserted");
+
+    sidebar.update(cx, |s, cx| s.update_entries(cx));
+    cx.run_until_parked();
+    cx.update(|window, _cx| window.refresh());
+    cx.run_until_parked();
+    cx.update(|window, _cx| window.refresh());
+    cx.run_until_parked();
+
+    let debug_bounds = |cx: &mut VisualTestContext, selector: String| -> Option<Bounds<Pixels>> {
+        let s: &'static str = Box::leak(selector.into_boxed_str());
+        cx.debug_bounds(s)
+    };
+
+    // 1. All 5 project tabs ("projects" row) must stay on a single row despite overflowing 300px.
+    let proj0 = cx
+        .debug_bounds("TAB-project-tab-0")
+        .expect("TAB-project-tab-0 should be rendered");
+    for ix in 1..5 {
+        let proj_ix = debug_bounds(cx, format!("TAB-project-tab-{ix}"))
+            .unwrap_or_else(|| panic!("TAB-project-tab-{ix} should be rendered"));
+        assert_eq!(
+            proj_ix.origin.y, proj0.origin.y,
+            "project tab {ix} must remain on the single projects row"
+        );
+    }
+
+    // 2. The 6 thread tabs + 2 terminal tabs ("threads + terminals" row) must wrap across 3 rows
+    //    below the projects row, with no 4th row created.
+    let mut thread_tab_bounds: Vec<Bounds<Pixels>> = Vec::with_capacity(8);
+    for ix in 0..6 {
+        thread_tab_bounds.push(
+            debug_bounds(cx, format!("TAB-thread-tab-{ix}"))
+                .unwrap_or_else(|| panic!("TAB-thread-tab-{ix} should be rendered")),
+        );
+    }
+    for ix in 6..8 {
+        thread_tab_bounds.push(
+            debug_bounds(cx, format!("TAB-terminal-tab-{ix}"))
+                .unwrap_or_else(|| panic!("TAB-terminal-tab-{ix} should be rendered")),
+        );
+    }
+
+    let mut distinct_row_ys: Vec<Pixels> = Vec::new();
+    for bounds in &thread_tab_bounds {
+        if !distinct_row_ys.iter().any(|&y| (y - bounds.origin.y).abs() < px(1.)) {
+            distinct_row_ys.push(bounds.origin.y);
+        }
+    }
+    assert_eq!(
+        distinct_row_ys.len(),
+        3,
+        "threads + terminals tabs must wrap across exactly 3 rows when max_tab_rows = 3, got rows: {distinct_row_ys:?}"
+    );
+    let (row1_y, row2_y, row3_y) = (distinct_row_ys[0], distinct_row_ys[1], distinct_row_ys[2]);
+    assert!(proj0.origin.y < row1_y, "threads row 1 must be below projects row");
+    assert!(row1_y < row2_y && row2_y < row3_y, "thread tab rows must increase in y top-to-bottom");
+
+    // On macOS with title_bar_to_status_bar = true and left panel, row 1 is inset by threads_inset
+    // (cap1 = 1) while rows 2 and 3 span the full 300px panel width (cap2 = 2).
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(thread_tab_bounds[0].origin.y, row1_y);
+        assert_eq!(thread_tab_bounds[1].origin.y, row2_y);
+        assert_eq!(thread_tab_bounds[2].origin.y, row2_y);
+        assert!(
+            thread_tab_bounds[0].origin.x > thread_tab_bounds[1].origin.x,
+            "row 1 must be indented by threads_inset ({:?}) while row 2 starts at full panel left edge ({:?})",
+            thread_tab_bounds[0].origin.x,
+            thread_tab_bounds[1].origin.x
+        );
+    }
+
+    // All tabs in row 3 must compress to min_width (136px) and the active last terminal tab must be scrolled into view.
+    for (ix, bounds) in thread_tab_bounds.iter().enumerate() {
+        if (bounds.origin.y - row3_y).abs() < px(1.) {
+            assert!(
+                (bounds.size.width - px(136.)).abs() < px(1.5),
+                "overflowing row 3 tab {ix} must compress to min_width (136px), got {:?}",
+                bounds.size.width
+            );
+        }
+    }
+    let last_terminal_bounds = thread_tab_bounds[7];
+    assert_eq!(last_terminal_bounds.origin.y, row3_y);
+    let row2_first_x = thread_tab_bounds
+        .iter()
+        .find(|b| (b.origin.y - row2_y).abs() < px(1.))
+        .unwrap()
+        .origin
+        .x;
+    assert!(
+        last_terminal_bounds.left() >= row2_first_x - px(1.)
+            && last_terminal_bounds.right() <= row2_first_x + px(300.) + px(2.),
+        "active terminal tab at end of row 3 ({last_terminal_bounds:?}) must be scrolled into panel view"
+    );
+
+    // 3. Setting tab_bar.max_tab_rows = 1 returns all thread + terminal tabs to a single row.
+    cx.update(|_window, cx| {
+        let content = serde_json::json!({
+            "agent": {
+                "flexible": false,
+                "default_width": 300.0,
+                "dock": "left",
+                "threads_sidebar": {
+                    "in_agent_panel": true
+                }
+            },
+            "tabs": {
+                "min_width": 136.0,
+                "max_width": 180.0
+            },
+            "tab_bar": {
+                "max_tab_rows": 1
+            },
+            "title_bar_to_status_bar": true
+        })
+        .to_string();
+        SettingsStore::update_global(cx, |store, cx| {
+            store.set_user_settings(&content, cx).unwrap();
+        });
+    });
+    cx.run_until_parked();
+    cx.update(|window, _cx| window.refresh());
+    cx.run_until_parked();
+
+    let single_row_y = cx.debug_bounds("TAB-thread-tab-0").unwrap().origin.y;
+    for ix in 1..6 {
+        assert_eq!(
+            debug_bounds(cx, format!("TAB-thread-tab-{ix}")).unwrap().origin.y,
+            single_row_y,
+            "thread tab {ix} must return to single row when max_tab_rows = 1"
+        );
+    }
+    for ix in 6..8 {
+        assert_eq!(
+            debug_bounds(cx, format!("TAB-terminal-tab-{ix}")).unwrap().origin.y,
+            single_row_y,
+            "terminal tab {ix} must return to single row when max_tab_rows = 1"
+        );
+    }
 }
