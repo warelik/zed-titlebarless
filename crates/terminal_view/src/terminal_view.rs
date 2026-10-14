@@ -93,6 +93,13 @@ pub struct SendText(String);
 #[action(namespace = terminal)]
 pub struct SendKeystroke(String);
 
+impl SendKeystroke {
+    pub fn keystroke(&self) -> &str {
+        &self.0
+    }
+}
+
+
 actions!(
     terminal,
     [
@@ -1333,6 +1340,7 @@ fn subscribe_for_terminal_events(
                     ),
                 },
                 Event::BreadcrumbsChanged => cx.emit(ItemEvent::UpdateBreadcrumbs),
+                Event::ProcessExited => {}
                 Event::CloseTerminal => cx.emit(ItemEvent::CloseItem),
                 Event::SelectionsChanged => {
                     window.invalidate_character_coordinates();

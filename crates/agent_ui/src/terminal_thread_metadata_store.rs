@@ -14,13 +14,28 @@ use futures::{FutureExt, future::Shared};
 use gpui::{AppContext as _, Entity, Global, Task};
 use remote::{RemoteConnectionOptions, same_remote_connection_identity};
 use ui::{App, Context, SharedString};
-use util::ResultExt as _;
+use util::{ResultExt as _, paths::PathStyle};
 use workspace::PathList;
 
 use crate::{TerminalId, thread_metadata_store::WorktreePaths};
 
 pub fn init(cx: &mut App) {
     TerminalThreadMetadataStore::init_global(cx);
+}
+
+fn same_terminal_remote_connection(
+    left: Option<&RemoteConnectionOptions>,
+    right: Option<&RemoteConnectionOptions>,
+) -> bool {
+    if !same_remote_connection_identity(left, right) {
+        return false;
+    }
+    match (left, right) {
+        (Some(RemoteConnectionOptions::Ssh(left)), Some(RemoteConnectionOptions::Ssh(right))) => {
+            left.args.as_deref().unwrap_or_default() == right.args.as_deref().unwrap_or_default()
+        }
+        _ => true,
+    }
 }
 
 struct GlobalTerminalThreadMetadataStore(Entity<TerminalThreadMetadataStore>);
@@ -53,6 +68,7 @@ pub struct TerminalThreadMetadata {
     pub worktree_paths: WorktreePaths,
     pub remote_connection: Option<RemoteConnectionOptions>,
     pub working_directory: Option<PathBuf>,
+    pub shpool_context: Option<project::terminals::ShpoolSessionContext>,
 }
 
 impl TerminalThreadMetadata {
@@ -160,8 +176,12 @@ pub struct TerminalThreadMetadataStore {
     terminals_by_paths: HashMap<PathList, HashSet<TerminalId>>,
     terminals_by_main_paths: HashMap<PathList, HashSet<TerminalId>>,
     reload_task: Option<Shared<Task<()>>>,
+    load_error: Option<SharedString>,
     pending_terminal_ops_tx: async_channel::Sender<DbOperation>,
     _db_operations_task: Task<()>,
+    deleted_terminal_ids: HashSet<TerminalId>,
+    closing_terminal_ids: HashSet<TerminalId>,
+    intentionally_closed_terminal_ids: HashSet<TerminalId>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -212,14 +232,33 @@ impl TerminalThreadMetadataStore {
         self.terminals.get(&terminal_id)
     }
 
+    pub(crate) fn entry_for_remote_connection(
+        &self,
+        terminal_id: TerminalId,
+        remote_connection: Option<&RemoteConnectionOptions>,
+    ) -> Option<&TerminalThreadMetadata> {
+        self.entry(terminal_id).filter(|metadata| {
+            same_terminal_remote_connection(metadata.remote_connection.as_ref(), remote_connection)
+        })
+    }
+
     pub fn entries(&self) -> impl Iterator<Item = &TerminalThreadMetadata> + '_ {
         self.terminals.values()
+    }
+
+    pub fn load_error(&self) -> Option<&SharedString> {
+        self.load_error.as_ref()
     }
 
     pub fn reload_task(&self) -> Shared<Task<()>> {
         self.reload_task
             .clone()
             .unwrap_or_else(|| Task::ready(()).shared())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_deleted_terminal_id(&self, terminal_id: TerminalId) -> bool {
+        self.deleted_terminal_ids.contains(&terminal_id)
     }
 
     pub fn entries_for_path<'a>(
@@ -233,7 +272,7 @@ impl TerminalThreadMetadataStore {
             .flatten()
             .filter_map(|id| self.terminals.get(id))
             .filter(move |terminal| {
-                same_remote_connection_identity(
+                same_terminal_remote_connection(
                     terminal.remote_connection.as_ref(),
                     remote_connection,
                 )
@@ -251,7 +290,7 @@ impl TerminalThreadMetadataStore {
             .flatten()
             .filter_map(|id| self.terminals.get(id))
             .filter(move |terminal| {
-                same_remote_connection_identity(
+                same_terminal_remote_connection(
                     terminal.remote_connection.as_ref(),
                     remote_connection,
                 )
@@ -266,7 +305,7 @@ impl TerminalThreadMetadataStore {
     ) -> bool {
         self.entries().any(|terminal| {
             Some(terminal.terminal_id) != terminal_id
-                && same_remote_connection_identity(
+                && same_terminal_remote_connection(
                     terminal.remote_connection.as_ref(),
                     remote_connection,
                 )
@@ -279,8 +318,55 @@ impl TerminalThreadMetadataStore {
     }
 
     pub fn save(&mut self, metadata: TerminalThreadMetadata, cx: &mut Context<Self>) {
+        if self.closing_terminal_ids.contains(&metadata.terminal_id)
+            || self.intentionally_closed_terminal_ids.contains(&metadata.terminal_id)
+        {
+            return;
+        }
+        self.deleted_terminal_ids.remove(&metadata.terminal_id);
         self.save_internal(metadata);
         cx.notify();
+    }
+
+    /// A confirmed newly created session must stay recoverable even if its
+    /// window disappeared or a close is waiting for creation to finish.
+    pub fn retain_created_session(&mut self, metadata: TerminalThreadMetadata, cx: &mut Context<Self>) {
+        let id = metadata.terminal_id;
+        if self.intentionally_closed_terminal_ids.contains(&id) || self.entry(id).is_some() {
+            return;
+        }
+        self.deleted_terminal_ids.remove(&id);
+        self.save_internal(metadata);
+        cx.notify();
+    }
+
+    pub fn begin_intentional_close(&mut self, terminal_id: TerminalId) -> bool {
+        !self.intentionally_closed_terminal_ids.contains(&terminal_id)
+            && self.closing_terminal_ids.insert(terminal_id)
+    }
+
+    pub fn is_intentionally_closing(&self, terminal_id: TerminalId) -> bool {
+        self.closing_terminal_ids.contains(&terminal_id)
+    }
+
+    pub fn is_restore_blocked(&self, terminal_id: TerminalId) -> bool {
+        self.closing_terminal_ids.contains(&terminal_id)
+            || self.intentionally_closed_terminal_ids.contains(&terminal_id)
+    }
+
+    pub fn complete_intentional_close(
+        &mut self,
+        terminal_id: TerminalId,
+        succeeded: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.closing_terminal_ids.remove(&terminal_id);
+        if succeeded {
+            self.intentionally_closed_terminal_ids.insert(terminal_id);
+            self.delete(terminal_id, cx);
+        } else {
+            cx.notify();
+        }
     }
 
     pub fn rename_terminal(
@@ -316,7 +402,7 @@ impl TerminalThreadMetadataStore {
             .flatten()
             .filter(|id| {
                 self.terminals.get(id).is_some_and(|terminal| {
-                    same_remote_connection_identity(
+                    same_terminal_remote_connection(
                         terminal.remote_connection.as_ref(),
                         remote_connection,
                     )
@@ -339,8 +425,111 @@ impl TerminalThreadMetadataStore {
         cx.notify();
     }
 
-    fn save_internal(&mut self, metadata: TerminalThreadMetadata) {
+    pub fn update_worktree_paths_for_project(
+        &mut self,
+        worktree_paths: &WorktreePaths,
+        path_style: PathStyle,
+        remote_connection: Option<&RemoteConnectionOptions>,
+        cx: &mut Context<Self>,
+    ) {
+        if worktree_paths.is_empty() {
+            return;
+        }
+        let mut changed = false;
+        let terminal_ids: Vec<TerminalId> = self.terminals.keys().copied().collect();
+        for terminal_id in terminal_ids {
+            if let Some(terminal) = self.terminals.get(&terminal_id).cloned() {
+                if terminal.folder_paths().is_empty()
+                    && same_terminal_remote_connection(
+                        terminal.remote_connection.as_ref(),
+                        remote_connection,
+                    )
+                    && terminal
+                        .working_directory
+                        .as_ref()
+                        .is_some_and(|working_directory| {
+                            worktree_paths
+                                .folder_path_list()
+                                .paths()
+                                .iter()
+                                .any(|folder_path| {
+                                    path_style.starts_with(working_directory, folder_path)
+                                })
+                        })
+                {
+                    let mut updated = terminal;
+                    updated.worktree_paths = worktree_paths.clone();
+                    self.save_internal(updated);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// Shared legacy records must claim the complete locator atomically,
+    /// before any project starts its attachment. Fresh IDs are unique until
+    /// their creator publishes metadata and therefore have no shared row yet.
+    pub fn reserve_shpool_context(
+        &mut self,
+        terminal_id: TerminalId,
+        context: project::terminals::ShpoolSessionContext,
+        remote_connection: Option<RemoteConnectionOptions>,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        context.validate()?;
+        anyhow::ensure!(!self.intentionally_closed_terminal_ids.contains(&terminal_id),
+            "terminal was already closed before its daemon reservation");
+        if let Some(existing) = self.entry(terminal_id).and_then(|row| row.shpool_context.as_ref()) {
+            anyhow::ensure!(existing == &context,
+                "another project reserved a different original shpool locator");
+            return Ok(());
+        }
+        // No provisional row is created for a failed NEW spawn.
+        self.remember_shpool_context(terminal_id, context, remote_connection, cx);
+        Ok(())
+    }
+
+    /// Pin only an existing row. Pending closes may learn the locator, but
+    /// completed closes must never be resurrected by a late spawn result.
+    pub fn remember_shpool_context(
+        &mut self,
+        terminal_id: TerminalId,
+        context: project::terminals::ShpoolSessionContext,
+        remote_connection: Option<RemoteConnectionOptions>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.intentionally_closed_terminal_ids.contains(&terminal_id) { return; }
+        let Some(mut metadata) = self.entry(terminal_id).cloned() else { return };
+        if let Some(existing) = &metadata.shpool_context {
+            if !existing.same_daemon(&context) {
+                log::warn!("refusing to replace an original shpool context");
+            }
+            return;
+        }
+        if metadata.remote_connection.is_none() {
+            metadata.remote_connection = remote_connection;
+        }
+        metadata.shpool_context = Some(context);
+        self.save_internal(metadata);
+        cx.notify();
+    }
+
+    fn save_internal(&mut self, mut metadata: TerminalThreadMetadata) {
         if let Some(existing) = self.terminals.get(&metadata.terminal_id) {
+            metadata.created_at = existing.created_at;
+            if existing.shpool_context.is_some() {
+                metadata.shpool_context = existing.shpool_context.clone();
+            }
+            if metadata.folder_paths().is_empty() && !existing.folder_paths().is_empty() {
+                metadata.worktree_paths = existing.worktree_paths.clone();
+            }
+            if metadata.remote_connection.is_none() && existing.remote_connection.is_some() {
+                metadata.remote_connection = existing.remote_connection.clone();
+            }
+
             if existing.folder_paths() != metadata.folder_paths()
                 && let Some(ids) = self.terminals_by_paths.get_mut(existing.folder_paths())
             {
@@ -380,6 +569,9 @@ impl TerminalThreadMetadataStore {
     }
 
     pub fn delete(&mut self, terminal_id: TerminalId, cx: &mut Context<Self>) {
+        if self.reload_task.is_some() {
+            self.deleted_terminal_ids.insert(terminal_id);
+        }
         if let Some(terminal) = self.terminals.remove(&terminal_id) {
             if let Some(ids) = self.terminals_by_paths.get_mut(terminal.folder_paths()) {
                 ids.remove(&terminal_id);
@@ -428,7 +620,11 @@ impl TerminalThreadMetadataStore {
             terminals: HashMap::default(),
             terminals_by_paths: HashMap::default(),
             terminals_by_main_paths: HashMap::default(),
+            deleted_terminal_ids: HashSet::default(),
+            closing_terminal_ids: HashSet::default(),
+            intentionally_closed_terminal_ids: HashSet::default(),
             reload_task: None,
+            load_error: None,
             pending_terminal_ops_tx: tx,
             _db_operations_task,
         };
@@ -456,19 +652,33 @@ impl TerminalThreadMetadataStore {
                         db.list()
                             .context("Failed to fetch terminal thread metadata")
                     })
-                    .await
-                    .log_err()
-                    .unwrap_or_default();
+                    .await;
 
                 this.update(cx, |this, cx| {
-                    this.terminals.clear();
-                    this.terminals_by_paths.clear();
-                    this.terminals_by_main_paths.clear();
-
+                    let rows = match rows {
+                        Ok(loaded) => {
+                            this.load_error = (loaded.failed_rows > 0).then(|| {
+                                log::warn!("Unable to decode {} saved terminal metadata rows; originals retained", loaded.failed_rows);
+                                format!("Some saved terminals could not be restored ({}). Their saved data was kept.", loaded.failed_rows).into()
+                            });
+                            loaded.rows
+                        }
+                        Err(error) => {
+                            log::error!("Failed to fetch terminal thread metadata: {error:#}");
+                            this.load_error = Some("Saved terminals could not be loaded. Their saved data was kept.".into());
+                            Vec::new()
+                        }
+                    };
                     for row in rows {
-                        this.cache_terminal_metadata(row);
+                        if !this.deleted_terminal_ids.contains(&row.terminal_id)
+                            && !this.terminals.contains_key(&row.terminal_id)
+                        {
+                            this.cache_terminal_metadata(row);
+                        }
                     }
 
+                    this.deleted_terminal_ids.clear();
+                    this.reload_task = None;
                     cx.notify();
                 })
                 .ok();
@@ -479,6 +689,11 @@ impl TerminalThreadMetadataStore {
 }
 
 struct TerminalThreadMetadataDb(ThreadSafeConnection);
+
+struct LoadedTerminalMetadata {
+    rows: Vec<TerminalThreadMetadata>,
+    failed_rows: usize,
+}
 
 impl Domain for TerminalThreadMetadataDb {
     const NAME: &str = stringify!(TerminalThreadMetadataDb);
@@ -496,20 +711,52 @@ impl Domain for TerminalThreadMetadataDb {
             main_worktree_paths_order TEXT,
             remote_connection TEXT
         ) STRICT;
+    ), r#"
+        UPDATE sidebar_terminal_threads
+        SET remote_connection = CASE WHEN json_valid(remote_connection)
+            THEN json_remove(remote_connection, '$.Ssh.password')
+            ELSE remote_connection END
+        WHERE remote_connection IS NOT NULL;
+    "#, sql!(
+        ALTER TABLE sidebar_terminal_threads ADD COLUMN shpool_context TEXT;
     )];
 }
 
 db::static_connection!(TerminalThreadMetadataDb, []);
 
+fn remote_connection_for_persistence(
+    remote_connection: Option<RemoteConnectionOptions>,
+) -> Option<RemoteConnectionOptions> {
+    remote_connection.map(|connection| match connection {
+        RemoteConnectionOptions::Ssh(mut options) => {
+            options.password = None;
+            RemoteConnectionOptions::Ssh(options)
+        }
+        connection => connection,
+    })
+}
+
 impl TerminalThreadMetadataDb {
-    pub fn list(&self) -> anyhow::Result<Vec<TerminalThreadMetadata>> {
-        self.select::<TerminalThreadMetadata>(
+    fn list(&self) -> anyhow::Result<LoadedTerminalMetadata> {
+        let mut statement = Statement::prepare(
+            &self.0,
             "SELECT terminal_id, title, custom_title, created_at, \
             working_directory, folder_paths, folder_paths_order, main_worktree_paths, \
-            main_worktree_paths_order, remote_connection \
+            main_worktree_paths_order, remote_connection, shpool_context \
             FROM sidebar_terminal_threads \
             ORDER BY created_at DESC",
-        )?()
+        )?;
+        // Decode each row independently. Never treat an invalid remote host as
+        // local, rewrite its payload, or let it hide unrelated valid terminals.
+        let decoded = statement.map(|row| Ok(row.column::<TerminalThreadMetadata>()))?;
+        let mut loaded = LoadedTerminalMetadata { rows: Vec::new(), failed_rows: 0 };
+        for row in decoded {
+            match row {
+                Ok(row) => loaded.rows.push(row),
+                Err(_) => loaded.failed_rows += 1,
+            }
+        }
+        Ok(loaded)
     }
 
     pub async fn save(&self, row: TerminalThreadMetadata) -> anyhow::Result<()> {
@@ -534,26 +781,31 @@ impl TerminalThreadMetadataDb {
             } else {
                 (Some(main_serialized.paths), Some(main_serialized.order))
             };
-        let remote_connection = row
-            .remote_connection
+        let remote_connection = remote_connection_for_persistence(row.remote_connection)
             .as_ref()
             .map(serde_json::to_string)
             .transpose()
             .context("serialize terminal thread remote connection")?;
 
+        let shpool_context = row.shpool_context.as_ref().map(|context| {
+            context.validate()?;
+            serde_json::to_string(context).context("serialize original shpool context")
+        }).transpose()?;
+
         self.write(move |conn| {
-            let sql = "INSERT INTO sidebar_terminal_threads(terminal_id, title, custom_title, created_at, working_directory, folder_paths, folder_paths_order, main_worktree_paths, main_worktree_paths_order, remote_connection) \
-                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+            let sql = "INSERT INTO sidebar_terminal_threads(terminal_id, title, custom_title, created_at, working_directory, folder_paths, folder_paths_order, main_worktree_paths, main_worktree_paths_order, remote_connection, shpool_context) \
+                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
                        ON CONFLICT(terminal_id) DO UPDATE SET \
                            title = excluded.title, \
                            custom_title = excluded.custom_title, \
-                           created_at = excluded.created_at, \
+                           created_at = sidebar_terminal_threads.created_at, \
                            working_directory = excluded.working_directory, \
-                           folder_paths = excluded.folder_paths, \
-                           folder_paths_order = excluded.folder_paths_order, \
-                           main_worktree_paths = excluded.main_worktree_paths, \
-                           main_worktree_paths_order = excluded.main_worktree_paths_order, \
-                           remote_connection = excluded.remote_connection";
+                           folder_paths = COALESCE(excluded.folder_paths, sidebar_terminal_threads.folder_paths), \
+                           folder_paths_order = COALESCE(excluded.folder_paths_order, sidebar_terminal_threads.folder_paths_order), \
+                           main_worktree_paths = COALESCE(excluded.main_worktree_paths, sidebar_terminal_threads.main_worktree_paths), \
+                           main_worktree_paths_order = COALESCE(excluded.main_worktree_paths_order, sidebar_terminal_threads.main_worktree_paths_order), \
+                           remote_connection = COALESCE(excluded.remote_connection, sidebar_terminal_threads.remote_connection), \
+                           shpool_context = COALESCE(sidebar_terminal_threads.shpool_context, excluded.shpool_context)";
             let mut stmt = Statement::prepare(conn, sql)?;
             let mut i = stmt.bind(&terminal_id, 1)?;
             i = stmt.bind(&title, i)?;
@@ -564,7 +816,8 @@ impl TerminalThreadMetadataDb {
             i = stmt.bind(&folder_paths_order, i)?;
             i = stmt.bind(&main_worktree_paths, i)?;
             i = stmt.bind(&main_worktree_paths_order, i)?;
-            stmt.bind(&remote_connection, i)?;
+            i = stmt.bind(&remote_connection, i)?;
+            stmt.bind(&shpool_context, i)?;
             stmt.exec()
         })
         .await
@@ -600,6 +853,12 @@ impl Column for TerminalThreadMetadata {
             Column::column(statement, next)?;
         let (remote_connection_json, next): (Option<String>, i32) =
             Column::column(statement, next)?;
+        let (shpool_context_json, next): (Option<String>, i32) =
+            Column::column(statement, next)?;
+        let shpool_context = shpool_context_json.as_deref()
+            .map(serde_json::from_str::<project::terminals::ShpoolSessionContext>)
+            .transpose().context("deserialize original shpool context")?;
+        if let Some(context) = &shpool_context { context.validate()?; }
 
         let folder_paths = folder_paths_str
             .map(|paths| {
@@ -624,12 +883,15 @@ impl Column for TerminalThreadMetadata {
             .map(serde_json::from_str::<RemoteConnectionOptions>)
             .transpose()
             .context("deserialize terminal thread remote connection")?;
+        // Defense for legacy rows read outside the normal migration/open path.
+        let remote_connection = remote_connection_for_persistence(remote_connection);
 
         let worktree_paths = WorktreePaths::from_path_lists(main_worktree_paths, folder_paths)
-            .unwrap_or_else(|_| WorktreePaths::default());
+            .context("deserialize terminal thread worktree paths")?;
 
         Ok((
             TerminalThreadMetadata {
+                shpool_context,
                 terminal_id: TerminalId::from_key_string(&terminal_id)?,
                 title: SharedString::from(title),
                 custom_title: custom_title
@@ -661,6 +923,7 @@ mod tests {
     fn metadata(title: &str, worktree_paths: WorktreePaths) -> TerminalThreadMetadata {
         let now = Utc::now();
         TerminalThreadMetadata {
+            shpool_context: None,
             terminal_id: TerminalId::new(),
             title: SharedString::from(title.to_string()),
             custom_title: None,
@@ -669,6 +932,383 @@ mod tests {
             remote_connection: None,
             working_directory: None,
         }
+    }
+
+    #[gpui::test]
+    async fn test_intentional_close_blocks_restore_and_tombstones_stale_snapshots(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let metadata = metadata("Closing", WorktreePaths::default());
+        let terminal_id = metadata.terminal_id;
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(metadata.clone(), cx);
+                assert!(store.begin_intentional_close(terminal_id));
+                assert!(store.is_intentionally_closing(terminal_id));
+                store.save(metadata.clone(), cx);
+                store.complete_intentional_close(terminal_id, false, cx);
+                assert!(!store.is_intentionally_closing(terminal_id));
+                assert!(store.begin_intentional_close(terminal_id));
+                store.complete_intentional_close(terminal_id, true, cx);
+                assert!(store.is_restore_blocked(terminal_id));
+                assert!(!store.begin_intentional_close(terminal_id));
+                store.save(metadata, cx);
+                assert!(
+                    store.entry(terminal_id).is_none(),
+                    "a stale restore snapshot must not resurrect an intentionally closed terminal"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn test_terminal_daemon_locator_remains_immutable_in_cache_and_database(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let store = cx.update(|cx| TerminalThreadMetadataStore::global(cx));
+        let paths = PathList::new(&[PathBuf::from("/original")]);
+        let mut original = metadata("Original", WorktreePaths::from_folder_paths(&paths));
+        let context = project::terminals::ShpoolSessionContext::for_test();
+        original.shpool_context = Some(context.clone());
+        let mut changed = original.clone();
+        changed.title = "Retitled".into();
+        changed.remote_connection = Some(RemoteConnectionOptions::Mock(remote::MockConnectionOptions { id: 77 }));
+        changed.shpool_context = Some(project::terminals::ShpoolSessionContext::new(
+            "/different/shpool".into(), "/tmp/different.socket".into(),
+        ).unwrap());
+        let changed_paths = PathList::new(&[PathBuf::from("/reordered")]);
+        changed.worktree_paths = WorktreePaths::from_folder_paths(&changed_paths);
+        store.update(cx, |store, cx| {
+            store.save(original.clone(), cx);
+            store.save(changed.clone(), cx);
+        });
+        store.read_with(cx, |store, _| {
+            let saved = store.entry(original.terminal_id).unwrap();
+            assert_eq!(saved.shpool_context.as_ref(), Some(&context));
+            assert_eq!(saved.remote_connection,
+                Some(RemoteConnectionOptions::Mock(remote::MockConnectionOptions { id: 77 })),
+                "connection routing keeps its existing update contract");
+            assert_eq!(saved.folder_paths(), &changed_paths);
+            assert_eq!(saved.title.as_ref(), "Retitled");
+        });
+        let db = TerminalThreadMetadataDb(
+            db::open_test_db::<TerminalThreadMetadataDb>("TERMINAL_DAEMON_LOCATOR_ROUNDTRIP").await,
+        );
+        db.save(original.clone()).await.unwrap();
+        db.save(changed).await.unwrap();
+        let loaded = db.list().unwrap();
+        assert_eq!(loaded.failed_rows, 0);
+        assert_eq!(loaded.rows.len(), 1);
+        assert_eq!(loaded.rows[0].shpool_context.as_ref(), Some(&context));
+        assert_eq!(loaded.rows[0].remote_connection,
+            Some(RemoteConnectionOptions::Mock(remote::MockConnectionOptions { id: 77 })));
+        assert_eq!(loaded.rows[0].folder_paths(), &changed_paths);
+        let legacy = metadata("Legacy", WorktreePaths::from_folder_paths(&paths));
+        db.save(legacy.clone()).await.unwrap();
+        assert!(db.list().unwrap().rows.iter()
+            .find(|row| row.terminal_id == legacy.terminal_id).unwrap().shpool_context.is_none());
+    }
+
+    #[gpui::test]
+    async fn test_corrupt_daemon_locator_is_isolated_without_rewriting_legacy_rows(
+        _cx: &mut TestAppContext,
+    ) {
+        let db = TerminalThreadMetadataDb(
+            db::open_test_db::<TerminalThreadMetadataDb>("TERMINAL_DAEMON_LOCATOR_CORRUPTION").await,
+        );
+        let paths = PathList::new(&[PathBuf::from("/saved")]);
+        let valid = metadata("Valid legacy", WorktreePaths::from_folder_paths(&paths));
+        let mut invalid = metadata("Invalid locator", WorktreePaths::from_folder_paths(&paths));
+        let context = project::terminals::ShpoolSessionContext::for_test();
+        invalid.shpool_context = Some(context.clone());
+        db.save(valid.clone()).await.unwrap();
+        db.save(invalid.clone()).await.unwrap();
+        for raw in [
+            "not-json",
+            r#"{"program":"relative","socket":"/tmp/original.socket"}"#,
+            r#"{"program":"/shpool","socket":"relative"}"#,
+            r#"{"program":"/shpool","socket":"/tmp/original.socket","env":{"TOKEN":"synthetic"}}"#,
+        ] {
+            let key = invalid.terminal_id.to_key_string();
+            let raw_value = raw.to_string();
+            db.write(move |conn| {
+                let mut statement = Statement::prepare(conn,
+                    "UPDATE sidebar_terminal_threads SET shpool_context = ?1 WHERE terminal_id = ?2")?;
+                let next = statement.bind(&raw_value, 1)?;
+                statement.bind(&key, next)?;
+                statement.exec()
+            }).await.unwrap();
+            let loaded = db.list().unwrap();
+            assert_eq!(loaded.failed_rows, 1);
+            assert_eq!(loaded.rows, vec![valid.clone()]);
+            let raw_values = db.select::<String>(
+                "SELECT shpool_context FROM sidebar_terminal_threads WHERE shpool_context IS NOT NULL",
+            ).unwrap()().unwrap();
+            assert_eq!(raw_values, vec![raw.to_string()]);
+        }
+        let key = invalid.terminal_id.to_key_string();
+        let repaired = serde_json::to_string(&context).unwrap();
+        db.write(move |conn| {
+            let mut statement = Statement::prepare(conn,
+                "UPDATE sidebar_terminal_threads SET shpool_context = ?1 WHERE terminal_id = ?2")?;
+            let next = statement.bind(&repaired, 1)?;
+            statement.bind(&key, next)?;
+            statement.exec()
+        }).await.unwrap();
+        let loaded = db.list().unwrap();
+        assert_eq!(loaded.failed_rows, 0);
+        assert!(loaded.rows.contains(&valid));
+        assert!(loaded.rows.contains(&invalid));
+    }
+
+    #[test]
+    fn test_terminal_metadata_persistence_strips_ssh_password() {
+        let connection = RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+            host: "example.com".into(),
+            username: Some("alice".into()),
+            port: Some(2222),
+            password: Some("plaintext-secret".into()),
+            ..Default::default()
+        });
+
+        let persisted = remote_connection_for_persistence(Some(connection))
+            .expect("remote connection should be retained");
+        let RemoteConnectionOptions::Ssh(options) = persisted else {
+            panic!("SSH connection should remain SSH")
+        };
+        assert_eq!(options.host.to_string(), "example.com");
+        assert_eq!(options.username.as_deref(), Some("alice"));
+        assert_eq!(options.port, Some(2222));
+        assert_eq!(options.password, None);
+        assert!(
+            !serde_json::to_string(&options)
+                .expect("sanitized options should serialize")
+                .contains("plaintext-secret")
+        );
+    }
+
+    #[gpui::test]
+    async fn test_legacy_terminal_password_migration_scrubs_rows_and_loaded_values(
+        _cx: &mut TestAppContext,
+    ) {
+        let db = TerminalThreadMetadataDb(
+            db::open_test_db::<TerminalThreadMetadataDb>("TERMINAL_LEGACY_PASSWORD_MIGRATION").await,
+        );
+        let paths = PathList::new(&[PathBuf::from("/z-project"), PathBuf::from("/a-project")]);
+        let mut legacy = metadata("Legacy terminal", WorktreePaths::from_folder_paths(&paths));
+        legacy.custom_title = Some("Custom title".into());
+        legacy.working_directory = Some(PathBuf::from("/z-project/subdir"));
+        legacy.remote_connection = Some(RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+            host: "example.com".into(), username: Some("alice".into()), port: Some(2222),
+            password: Some("synthetic-legacy-secret".into()), ..Default::default()
+        }));
+        db.save(legacy.clone()).await.unwrap();
+        let mut raw = serde_json::to_value(legacy.remote_connection.as_ref().unwrap()).unwrap();
+        raw["Ssh"]["password"] = serde_json::Value::String("synthetic-legacy-secret".into());
+        let raw = serde_json::to_string(&raw).unwrap();
+        db.write(move |conn| {
+            let mut statement = Statement::prepare(conn, "UPDATE sidebar_terminal_threads SET remote_connection = ?1")?;
+            statement.bind(&raw, 1)?;
+            statement.exec()
+        }).await.unwrap();
+        let mut expected = legacy;
+        expected.remote_connection = remote_connection_for_persistence(expected.remote_connection);
+        // Loading must never expose the historical password, even before scrub.
+        let loaded = db.list().unwrap();
+        assert_eq!(loaded.failed_rows, 0);
+        assert_eq!(loaded.rows, vec![expected.clone()]);
+        let before = db.select::<String>("SELECT remote_connection FROM sidebar_terminal_threads").unwrap()().unwrap();
+        assert!(before[0].contains("synthetic-legacy-secret"));
+        for _ in 0..2 {
+            db.write(|conn| {
+                Statement::prepare(conn, <TerminalThreadMetadataDb as Domain>::MIGRATIONS[1])?.exec()
+            }).await.unwrap();
+        }
+        let after = db.select::<String>("SELECT remote_connection FROM sidebar_terminal_threads").unwrap()().unwrap();
+        assert!(!after[0].contains("synthetic-legacy-secret"));
+        let decoded: serde_json::Value = serde_json::from_str(&after[0]).unwrap();
+        assert!(decoded["Ssh"].get("password").is_none());
+        let loaded = db.list().unwrap();
+        assert_eq!(loaded.failed_rows, 0);
+        assert_eq!(loaded.rows, vec![expected]);
+        // Malformed legacy payloads and unrelated connection variants must not
+        // abort the scrub or silently become a local connection.
+        for raw in [Some("not-json".to_string()), Some(r#"{"Mock":{"id":7}}"#.to_string()), None] {
+            let value = raw.clone();
+            db.write(move |conn| {
+                let mut statement = Statement::prepare(conn, "UPDATE sidebar_terminal_threads SET remote_connection = ?1")?;
+                statement.bind(&value, 1)?;
+                statement.exec()
+            }).await.unwrap();
+            db.write(|conn| {
+                Statement::prepare(conn, <TerminalThreadMetadataDb as Domain>::MIGRATIONS[1])?.exec()
+            }).await.unwrap();
+            let values = db.select::<Option<String>>("SELECT remote_connection FROM sidebar_terminal_threads").unwrap()().unwrap();
+            assert_eq!(values, vec![raw]);
+        }
+    }
+
+    #[gpui::test]
+    async fn test_corrupt_terminal_metadata_rows_are_isolated_and_recoverable(cx: &mut TestAppContext) {
+        init_test(cx);
+        let store = cx.update(|cx| TerminalThreadMetadataStore::global(cx));
+        let db = store.read_with(cx, |store, _| store.db.clone());
+        let paths = PathList::new(&[Path::new("/saved-project")]);
+        let valid = metadata("Valid", WorktreePaths::from_folder_paths(&paths));
+        let malformed = metadata("Malformed remote", WorktreePaths::from_folder_paths(&paths));
+        let unknown = metadata("Unknown remote", WorktreePaths::from_folder_paths(&paths));
+        let bad_date = metadata("Invalid date", WorktreePaths::from_folder_paths(&paths));
+        let all = [valid.clone(), malformed.clone(), unknown.clone(), bad_date.clone()];
+        for row in &all {
+            db.save(row.clone()).await.unwrap();
+        }
+        for (id, raw) in [
+            (malformed.terminal_id, "not-json"),
+            (unknown.terminal_id, r#"{"UnknownFutureTransport":{"host":"example.com"}}"#),
+        ] {
+            let key = id.to_key_string();
+            let raw = raw.to_string();
+            db.write(move |conn| {
+                let mut statement = Statement::prepare(conn, "UPDATE sidebar_terminal_threads SET remote_connection = ?1 WHERE terminal_id = ?2")?;
+                let next = statement.bind(&raw, 1)?;
+                statement.bind(&key, next)?;
+                statement.exec()
+            }).await.unwrap();
+        }
+        let key = bad_date.terminal_id.to_key_string();
+        db.write(move |conn| {
+            let mut statement = Statement::prepare(conn, "UPDATE sidebar_terminal_threads SET created_at = 'invalid-date' WHERE terminal_id = ?1")?;
+            statement.bind(&key, 1)?;
+            statement.exec()
+        }).await.unwrap();
+        store.update(cx, |store, cx| store.reload(cx));
+        store.read_with(cx, |store, _| store.reload_task()).await;
+        store.read_with(cx, |store, _| {
+            assert_eq!(store.entry(valid.terminal_id), Some(&valid));
+            assert_eq!(store.entries().count(), 1);
+            assert!(store.entries_for_path(&paths, None).any(|row| row.terminal_id == valid.terminal_id));
+            for row in [&malformed, &unknown, &bad_date] {
+                assert!(store.entry(row.terminal_id).is_none(), "corrupt metadata must not become a local terminal");
+            }
+            assert!(store.load_error().unwrap().contains("(3)"));
+        });
+        // Loading is read-only: preserve the exact original payloads for recovery.
+        let raw = db.select::<String>("SELECT remote_connection FROM sidebar_terminal_threads WHERE remote_connection IS NOT NULL ORDER BY title").unwrap()().unwrap();
+        assert_eq!(raw, vec!["not-json", r#"{"UnknownFutureTransport":{"host":"example.com"}}"#]);
+        let date = db.select::<String>("SELECT created_at FROM sidebar_terminal_threads WHERE title = 'Invalid date'").unwrap()().unwrap();
+        assert_eq!(date, vec!["invalid-date"]);
+        // Once the stored values are repaired, reload restores every row and
+        // clears the visible error without restarting or deleting anything.
+        let restored_date = bad_date.created_at.to_rfc3339();
+        db.write(move |conn| {
+            Statement::prepare(conn, "UPDATE sidebar_terminal_threads SET remote_connection = NULL")?.exec()?;
+            let mut statement = Statement::prepare(conn, "UPDATE sidebar_terminal_threads SET created_at = ?1 WHERE title = 'Invalid date'")?;
+            statement.bind(&restored_date, 1)?;
+            statement.exec()
+        }).await.unwrap();
+        store.update(cx, |store, cx| store.reload(cx));
+        store.read_with(cx, |store, _| store.reload_task()).await;
+        store.read_with(cx, |store, _| {
+            assert!(store.load_error().is_none());
+            assert_eq!(store.entries().count(), all.len());
+            for row in &all {
+                assert_eq!(store.entry(row.terminal_id), Some(row));
+            }
+        });
+    }
+
+    #[gpui::test]
+    async fn test_invalid_terminal_worktree_pairs_do_not_adopt_other_project_context(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let store = cx.update(|cx| TerminalThreadMetadataStore::global(cx));
+        let db = store.read_with(cx, |store, _| store.db.clone());
+        let saved_paths = PathList::new(&[Path::new("/saved-project")]);
+        let multiple_paths = PathList::new(&[
+            Path::new("/saved-project"),
+            Path::new("/another-saved-project"),
+        ]);
+        let empty_paths = PathList::default();
+        let valid = metadata("Valid saved roots", WorktreePaths::from_folder_paths(&saved_paths));
+        let rootless = metadata("Valid rootless terminal", WorktreePaths::default());
+        let linked_main_paths = PathList::new(&[Path::new("/main-project"), Path::new("/main-project")]);
+        let linked_folder_paths = PathList::new(&[Path::new("/z-linked"), Path::new("/a-linked")]);
+        let linked = metadata("Valid linked roots",
+            WorktreePaths::from_path_lists(linked_main_paths, linked_folder_paths).unwrap());
+        let mut invalid = metadata("Invalid path pairs", WorktreePaths::from_folder_paths(&saved_paths));
+        invalid.working_directory = Some(PathBuf::from("/adopting-project/subdir"));
+        for row in [&valid, &rootless, &linked, &invalid] {
+            db.save(row.clone()).await.unwrap();
+        }
+        let terminal_key = invalid.terminal_id.to_key_string();
+        let adopting_paths = PathList::new(&[Path::new("/adopting-project")]);
+        let adopting_context = WorktreePaths::from_folder_paths(&adopting_paths);
+        for (main_paths, folder_paths) in [
+            (&multiple_paths, &saved_paths),
+            (&saved_paths, &multiple_paths),
+            (&empty_paths, &saved_paths),
+            (&saved_paths, &empty_paths),
+        ] {
+            let main = main_paths.serialize();
+            let folders = folder_paths.serialize();
+            let raw_paths = (main.paths, main.order, folders.paths, folders.order);
+            let update_paths = raw_paths.clone();
+            let update_key = terminal_key.clone();
+            db.write(move |connection| {
+                let mut statement = Statement::prepare(connection,
+                    "UPDATE sidebar_terminal_threads SET main_worktree_paths = ?1, main_worktree_paths_order = ?2, folder_paths = ?3, folder_paths_order = ?4 WHERE terminal_id = ?5")?;
+                let next = statement.bind(&update_paths, 1)?;
+                statement.bind(&update_key, next)?;
+                statement.exec()
+            }).await.unwrap();
+            store.update(cx, |store, cx| store.reload(cx));
+            store.read_with(cx, |store, _| store.reload_task()).await;
+            // A corrupted pair must not become a rootless cached terminal that
+            // can be adopted by this unrelated project's matching cwd.
+            store.update(cx, |store, cx| {
+                store.update_worktree_paths_for_project(
+                    &adopting_context,
+                    PathStyle::Unix,
+                    None,
+                    cx,
+                );
+            });
+            cx.run_until_parked();
+            let stored = db.select_bound::<String, (String, String, String, String)>(
+                "SELECT main_worktree_paths, main_worktree_paths_order, folder_paths, folder_paths_order FROM sidebar_terminal_threads WHERE terminal_id = ?1",
+            ).unwrap()(terminal_key.clone()).unwrap();
+            assert_eq!(stored, vec![raw_paths], "failed restoration must preserve every raw path field");
+            store.read_with(cx, |store, _| {
+                assert_eq!(store.entry(valid.terminal_id), Some(&valid));
+                assert_eq!(store.entry(rootless.terminal_id), Some(&rootless));
+                assert_eq!(store.entry(linked.terminal_id), Some(&linked));
+                assert!(store.entry(invalid.terminal_id).is_none());
+                assert_eq!(store.entries().count(), 3);
+                assert!(store.load_error().unwrap().contains("(1)"));
+            });
+        }
+        let main = saved_paths.serialize();
+        let folders = saved_paths.serialize();
+        let restored_paths = (main.paths, main.order, folders.paths, folders.order);
+        db.write(move |connection| {
+            let mut statement = Statement::prepare(connection,
+                "UPDATE sidebar_terminal_threads SET main_worktree_paths = ?1, main_worktree_paths_order = ?2, folder_paths = ?3, folder_paths_order = ?4 WHERE terminal_id = ?5")?;
+            let next = statement.bind(&restored_paths, 1)?;
+            statement.bind(&terminal_key, next)?;
+            statement.exec()
+        }).await.unwrap();
+        store.update(cx, |store, cx| store.reload(cx));
+        store.read_with(cx, |store, _| store.reload_task()).await;
+        store.read_with(cx, |store, _| {
+            assert!(store.load_error().is_none());
+            assert_eq!(store.entries().count(), 4);
+            for row in [&valid, &rootless, &linked, &invalid] {
+                assert_eq!(store.entry(row.terminal_id), Some(row));
+            }
+        });
     }
 
     #[test]
@@ -800,4 +1440,548 @@ mod tests {
             );
         });
     }
+
+    #[gpui::test]
+    async fn test_created_at_immutable_on_resave(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let initial_time = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut meta = metadata(
+            "Test",
+            WorktreePaths::from_folder_paths(&PathList::default()),
+        );
+        meta.created_at = initial_time;
+        let terminal_id = meta.terminal_id;
+
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(meta.clone(), cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let new_time = DateTime::parse_from_rfc3339("2026-02-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        meta.created_at = new_time;
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(meta, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let store = TerminalThreadMetadataStore::global(cx);
+            let entry = store.read(cx).entry(terminal_id).unwrap().clone();
+            assert_eq!(
+                entry.created_at, initial_time,
+                "in-memory created_at must be immutable"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_worktree_paths_not_overwritten_by_empty(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let paths = PathList::new(&[Path::new("/project")]);
+        let worktree_paths = WorktreePaths::from_folder_paths(&paths);
+        let mut meta = metadata("Test", worktree_paths.clone());
+        let terminal_id = meta.terminal_id;
+
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(meta.clone(), cx);
+            });
+        });
+        cx.run_until_parked();
+
+        meta.worktree_paths = WorktreePaths::default();
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(meta, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let store = TerminalThreadMetadataStore::global(cx);
+            let entry = store.read(cx).entry(terminal_id).unwrap().clone();
+            assert_eq!(
+                entry.worktree_paths, worktree_paths,
+                "worktree paths must not be overwritten by empty"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_reload_preserves_concurrent_writes_and_honors_deleted_tombstones(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let database = cx.update(|cx| {
+            let store = TerminalThreadMetadataStore::global(cx);
+            store.read(cx).db.clone()
+        });
+        let deleted_metadata = metadata("Deleted", WorktreePaths::default());
+        let old_folder_paths = PathList::new(&[Path::new("/project/old")]);
+        let old_worktree_paths = WorktreePaths::from_folder_paths(&old_folder_paths);
+        let old_metadata = metadata("Old value", old_worktree_paths.clone());
+        let deleted_terminal_id = deleted_metadata.terminal_id;
+        let replaced_terminal_id = old_metadata.terminal_id;
+        database
+            .save(deleted_metadata)
+            .await
+            .expect("deleted metadata should seed the database");
+        database
+            .save(old_metadata.clone())
+            .await
+            .expect("old metadata should seed the database");
+
+        let new_folder_paths = PathList::new(&[Path::new("/project/new")]);
+        let new_worktree_paths = WorktreePaths::from_folder_paths(&new_folder_paths);
+        let mut replacement_metadata = old_metadata;
+        replacement_metadata.title = "New value".into();
+        replacement_metadata.worktree_paths = new_worktree_paths.clone();
+        let added_metadata = metadata("Added during reload", new_worktree_paths.clone());
+        let added_terminal_id = added_metadata.terminal_id;
+
+        let (pending_terminal_ops_tx, pending_terminal_ops_rx) = async_channel::unbounded();
+        let store = cx.update(|cx| {
+            cx.new(|_| TerminalThreadMetadataStore {
+                db: database.clone(),
+                terminals: HashMap::default(),
+                terminals_by_paths: HashMap::default(),
+                terminals_by_main_paths: HashMap::default(),
+                reload_task: None,
+                load_error: None,
+                pending_terminal_ops_tx,
+                _db_operations_task: Task::ready(()),
+                deleted_terminal_ids: HashSet::default(),
+                closing_terminal_ids: HashSet::default(),
+                intentionally_closed_terminal_ids: HashSet::default(),
+            })
+        });
+        let _held_operations_receiver = pending_terminal_ops_rx;
+
+        store.update(cx, |store, cx| store.reload(cx));
+        let reload_task = store.read_with(cx, |store, _cx| store.reload_task());
+        store.update(cx, |store, cx| {
+            store.delete(deleted_terminal_id, cx);
+            store.save(replacement_metadata.clone(), cx);
+            store.save(added_metadata.clone(), cx);
+        });
+
+        reload_task.await;
+        cx.run_until_parked();
+
+        store.read_with(cx, |store, _cx| {
+            assert!(
+                store.entry(deleted_terminal_id).is_none(),
+                "deleted database row must not return during reload"
+            );
+            let replacement = store
+                .entry(replaced_terminal_id)
+                .expect("replacement metadata should remain in the store");
+            assert_eq!(replacement.title.as_ref(), "New value");
+            assert_eq!(
+                replacement.worktree_paths,
+                replacement_metadata.worktree_paths
+            );
+            assert!(store.entry(added_terminal_id).is_some());
+            assert!(
+                store
+                    .entries_for_path(&old_folder_paths, None)
+                    .next()
+                    .is_none(),
+                "replaced metadata must leave the old path index"
+            );
+            let new_path_terminal_ids = store
+                .entries_for_path(&new_folder_paths, None)
+                .map(|metadata| metadata.terminal_id)
+                .collect::<HashSet<_>>();
+            assert_eq!(
+                new_path_terminal_ids,
+                [replaced_terminal_id, added_terminal_id]
+                    .into_iter()
+                    .collect::<HashSet<_>>()
+            );
+            let new_main_path_terminal_ids = store
+                .entries_for_main_worktree_path(new_worktree_paths.main_worktree_path_list(), None)
+                .map(|metadata| metadata.terminal_id)
+                .collect::<HashSet<_>>();
+            assert_eq!(
+                new_main_path_terminal_ids,
+                [replaced_terminal_id, added_terminal_id]
+                    .into_iter()
+                    .collect::<HashSet<_>>()
+            );
+            assert!(
+                store.deleted_terminal_ids.is_empty(),
+                "reload completion should clear deleted tombstones"
+            );
+            assert!(
+                store.reload_task.is_none(),
+                "completed reload should clear the in-flight task"
+            );
+        });
+
+        store.update(cx, |store, cx| store.delete(added_terminal_id, cx));
+        store.read_with(cx, |store, _cx| {
+            assert!(
+                !store.deleted_terminal_ids.contains(&added_terminal_id),
+                "a delete after reload should not create a tombstone"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_update_worktree_paths_for_project_scopes_adoption_to_working_directory(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let remote_connection = RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+            host: "same-host".into(),
+            ..Default::default()
+        });
+        let other_remote_connection = RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+            host: "other-host".into(),
+            ..Default::default()
+        });
+        let project_folder_paths = PathList::new(&[Path::new("/repo")]);
+        let project_worktree_paths = WorktreePaths::from_folder_paths(&project_folder_paths);
+        let existing_folder_paths = PathList::new(&[Path::new("/existing")]);
+        let existing_worktree_paths = WorktreePaths::from_folder_paths(&existing_folder_paths);
+
+        let mut nested_metadata = metadata("Nested", WorktreePaths::default());
+        nested_metadata.working_directory = Some(PathBuf::from("/repo/nested"));
+        nested_metadata.remote_connection = Some(remote_connection.clone());
+        let nested_terminal_id = nested_metadata.terminal_id;
+
+        let mut root_metadata = metadata("Root", WorktreePaths::default());
+        root_metadata.working_directory = Some(PathBuf::from("/repo"));
+        root_metadata.remote_connection = Some(remote_connection.clone());
+        let root_terminal_id = root_metadata.terminal_id;
+
+        let mut sibling_metadata = metadata("Sibling prefix", WorktreePaths::default());
+        sibling_metadata.working_directory = Some(PathBuf::from("/repo-other/nested"));
+        sibling_metadata.remote_connection = Some(remote_connection.clone());
+        let sibling_terminal_id = sibling_metadata.terminal_id;
+
+        let mut other_host_metadata = metadata("Other host", WorktreePaths::default());
+        other_host_metadata.working_directory = Some(PathBuf::from("/repo/nested"));
+        other_host_metadata.remote_connection = Some(other_remote_connection);
+        let other_host_terminal_id = other_host_metadata.terminal_id;
+
+        let mut no_directory_metadata = metadata("No directory", WorktreePaths::default());
+        no_directory_metadata.remote_connection = Some(remote_connection.clone());
+        let no_directory_terminal_id = no_directory_metadata.terminal_id;
+
+        let mut existing_metadata = metadata("Existing paths", existing_worktree_paths.clone());
+        existing_metadata.working_directory = Some(PathBuf::from("/repo/nested"));
+        existing_metadata.remote_connection = Some(remote_connection.clone());
+        let existing_terminal_id = existing_metadata.terminal_id;
+
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(nested_metadata, cx);
+                store.save(root_metadata, cx);
+                store.save(sibling_metadata, cx);
+                store.save(other_host_metadata, cx);
+                store.save(no_directory_metadata, cx);
+                store.save(existing_metadata, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.update_worktree_paths_for_project(
+                    &project_worktree_paths,
+                    PathStyle::local(),
+                    Some(&remote_connection),
+                    cx,
+                );
+            });
+        });
+
+        cx.update(|cx| {
+            let store_entity = TerminalThreadMetadataStore::global(cx);
+            let store = store_entity.read(cx);
+            assert_eq!(
+                store
+                    .entry(nested_terminal_id)
+                    .expect("nested directory metadata should remain")
+                    .worktree_paths,
+                project_worktree_paths
+            );
+            assert_eq!(
+                store
+                    .entry(root_terminal_id)
+                    .expect("root directory metadata should remain")
+                    .worktree_paths,
+                project_worktree_paths
+            );
+            assert!(
+                store
+                    .entry(sibling_terminal_id)
+                    .expect("sibling metadata should remain")
+                    .worktree_paths
+                    .is_empty(),
+                "a sibling path with a shared string prefix must not be adopted"
+            );
+            assert!(
+                store
+                    .entry(other_host_terminal_id)
+                    .expect("other-host metadata should remain")
+                    .worktree_paths
+                    .is_empty(),
+                "paths from another remote identity must not be adopted"
+            );
+            assert!(
+                store
+                    .entry(no_directory_terminal_id)
+                    .expect("metadata without a working directory should remain")
+                    .worktree_paths
+                    .is_empty(),
+                "missing working directory is insufficient evidence for adoption"
+            );
+            assert_eq!(
+                store
+                    .entry(existing_terminal_id)
+                    .expect("metadata with existing paths should remain")
+                    .worktree_paths,
+                existing_worktree_paths
+            );
+            let indexed_terminal_ids = store
+                .entries_for_path(&project_folder_paths, Some(&remote_connection))
+                .map(|metadata| metadata.terminal_id)
+                .collect::<HashSet<_>>();
+            assert_eq!(
+                indexed_terminal_ids,
+                [nested_terminal_id, root_terminal_id]
+                    .into_iter()
+                    .collect::<HashSet<_>>()
+            );
+            let indexed_main_worktree_ids = store
+                .entries_for_main_worktree_path(
+                    project_worktree_paths.main_worktree_path_list(),
+                    Some(&remote_connection),
+                )
+                .map(|metadata| metadata.terminal_id)
+                .collect::<HashSet<_>>();
+            assert_eq!(
+                indexed_main_worktree_ids,
+                [nested_terminal_id, root_terminal_id]
+                    .into_iter()
+                    .collect::<HashSet<_>>()
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_remote_windows_working_directory_uses_project_path_style(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let remote_connection = RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+            host: "windows-host".into(),
+            ..Default::default()
+        });
+        let project_paths = PathList::new(&[Path::new(r"C:\repo")]);
+        let project_worktree_paths = WorktreePaths::from_folder_paths(&project_paths);
+
+        let mut nested = metadata("Windows nested", WorktreePaths::default());
+        nested.working_directory = Some(PathBuf::from(r"C:\repo\nested"));
+        nested.remote_connection = Some(remote_connection.clone());
+        let nested_id = nested.terminal_id;
+
+        let mut sibling = metadata("Windows sibling prefix", WorktreePaths::default());
+        sibling.working_directory = Some(PathBuf::from(r"C:\repo-other\nested"));
+        sibling.remote_connection = Some(remote_connection.clone());
+        let sibling_id = sibling.terminal_id;
+
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(nested, cx);
+                store.save(sibling, cx);
+                store.update_worktree_paths_for_project(
+                    &project_worktree_paths,
+                    PathStyle::Windows,
+                    Some(&remote_connection),
+                    cx,
+                );
+            });
+        });
+
+        cx.update(|cx| {
+            let store = TerminalThreadMetadataStore::global(cx);
+            let store = store.read(cx);
+            assert_eq!(
+                store.entry(nested_id).unwrap().worktree_paths,
+                project_worktree_paths,
+                "a Windows remote cwd must be compared with the remote project's path style"
+            );
+            assert!(
+                store.entry(sibling_id).unwrap().worktree_paths.is_empty(),
+                "a Windows sibling path with a shared string prefix must not be adopted"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_ssh_routing_arguments_scope_terminal_project_assignment(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let connection = |configuration: &str| {
+            RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+                host: "same-host".into(),
+                username: Some("developer".into()),
+                port: Some(22),
+                args: Some(vec!["-F".into(), configuration.into()]),
+                ..Default::default()
+            })
+        };
+        let project_connection = connection("work.conf");
+        let other_connection = connection("personal.conf");
+        let project_paths = PathList::new(&[Path::new("/repo")]);
+        let project_worktree_paths = WorktreePaths::from_folder_paths(&project_paths);
+
+        let mut matching = metadata("Matching", WorktreePaths::default());
+        matching.working_directory = Some(PathBuf::from("/repo"));
+        matching.remote_connection = Some(project_connection.clone());
+        let matching_id = matching.terminal_id;
+
+        let mut other_destination = metadata("Other destination", WorktreePaths::default());
+        other_destination.working_directory = Some(PathBuf::from("/repo"));
+        other_destination.remote_connection = Some(other_connection.clone());
+        let other_destination_id = other_destination.terminal_id;
+
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(matching, cx);
+                store.save(other_destination, cx);
+                store.update_worktree_paths_for_project(
+                    &project_worktree_paths,
+                    PathStyle::local(),
+                    Some(&project_connection),
+                    cx,
+                );
+            });
+        });
+
+        cx.update(|cx| {
+            let store = TerminalThreadMetadataStore::global(cx);
+            let store = store.read(cx);
+            assert_eq!(
+                store.entry(matching_id).unwrap().worktree_paths,
+                project_worktree_paths
+            );
+            assert!(
+                store
+                    .entry(other_destination_id)
+                    .unwrap()
+                    .worktree_paths
+                    .is_empty(),
+                "an SSH destination with different routing arguments must not be assigned to the project"
+            );
+            assert_eq!(
+                store
+                    .entries_for_path(&project_paths, Some(&project_connection))
+                    .map(|entry| entry.terminal_id)
+                    .collect::<Vec<_>>(),
+                vec![matching_id],
+                "grouping and activation lookups must exclude the other SSH destination"
+            );
+            assert!(
+                !store.path_is_referenced_by_terminal(
+                    None,
+                    Path::new("/repo"),
+                    Some(&other_connection),
+                ),
+                "archive cleanup must not treat another SSH destination as a path reference"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_terminal_id_lookup_requires_matching_ssh_routing_arguments(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let connection = |configuration: &str| {
+            RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+                host: "same-host".into(),
+                username: Some("developer".into()),
+                port: Some(22),
+                args: Some(vec!["-F".into(), configuration.into()]),
+                ..Default::default()
+            })
+        };
+        let saved_connection = connection("work.conf");
+        let current_connection = connection("personal.conf");
+        assert!(same_remote_connection_identity(
+            Some(&saved_connection),
+            Some(&current_connection),
+        ));
+
+        let mut saved = metadata("Saved remote terminal", WorktreePaths::default());
+        saved.remote_connection = Some(saved_connection.clone());
+        let saved_id = saved.terminal_id;
+        let local = metadata("Local terminal", WorktreePaths::default());
+        let local_id = local.terminal_id;
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(saved, cx);
+                store.save(local, cx);
+            });
+        });
+        cx.update(|cx| {
+            let store = TerminalThreadMetadataStore::global(cx);
+            let store = store.read(cx);
+            let original = store.entry(saved_id).cloned();
+            assert!(original.is_some());
+            assert_eq!(
+                store.entry_for_remote_connection(saved_id, Some(&saved_connection)),
+                original.as_ref(),
+            );
+            assert!(
+                store
+                    .entry_for_remote_connection(saved_id, Some(&current_connection))
+                    .is_none(),
+                "the same SSH alias with different -F arguments must not restore a saved terminal"
+            );
+            assert!(store.entry_for_remote_connection(saved_id, None).is_none());
+            assert!(store.entry_for_remote_connection(local_id, None).is_some());
+            assert!(
+                store
+                    .entry_for_remote_connection(local_id, Some(&saved_connection))
+                    .is_none()
+            );
+            assert_eq!(store.entry(saved_id), original.as_ref());
+        });
+    }
+
+    #[test]
+    fn test_terminal_remote_identity_normalizes_empty_arguments() {
+        let without = RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+            host: "example.com".into(), args: None, ..Default::default()
+        });
+        let mut empty = without.clone();
+        if let RemoteConnectionOptions::Ssh(options) = &mut empty { options.args = Some(Vec::new()); }
+        assert!(same_terminal_remote_connection(Some(&without), Some(&empty)));
+        if let RemoteConnectionOptions::Ssh(options) = &mut empty {
+            options.args = Some(vec!["-F".into(), "other.conf".into()]);
+        }
+        assert!(!same_terminal_remote_connection(Some(&without), Some(&empty)));
+    }
+
 }

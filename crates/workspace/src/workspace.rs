@@ -72,8 +72,8 @@ use gpui::{
 };
 pub use history_manager::*;
 pub use item::{
-    FollowableItem, FollowableItemHandle, Item, ItemHandle, ItemSettings, PreviewTabsSettings,
-    ProjectItem, SerializableItem, SerializableItemHandle, WeakItemHandle,
+    FollowableItem, FollowableItemHandle, Item, ItemCloseGuard, ItemHandle, ItemSettings,
+    PreviewTabsSettings, ProjectItem, SerializableItem, SerializableItemHandle, WeakItemHandle,
 };
 use itertools::Itertools;
 use language::{Buffer, LanguageRegistry, Rope, language_settings::all_language_settings};
@@ -3886,6 +3886,24 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<bool>> {
+        self.prepare_to_close_internal(close_intent, true, window, cx)
+    }
+
+    pub(crate) fn prepare_to_remove(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<bool>> {
+        self.prepare_to_close_internal(CloseIntent::ReplaceWindow, false, window, cx)
+    }
+
+    fn prepare_to_close_internal(
+        &mut self,
+        close_intent: CloseIntent,
+        remove_session: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<bool>> {
         let active_call = self.active_global_call();
 
         cx.spawn_in(window, async move |this, cx| {
@@ -4001,7 +4019,8 @@ impl Workspace {
 
             // If we're not quitting, but closing, we remove the workspace from
             // the current session.
-            if close_intent != CloseIntent::Quit
+            if remove_session
+                && close_intent != CloseIntent::Quit
                 && !save_last_workspace
                 && save_result.as_ref().is_ok_and(|&res| res)
             {

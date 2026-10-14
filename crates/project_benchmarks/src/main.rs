@@ -48,7 +48,7 @@ impl RemoteClientDelegate for BenchmarkRemoteClient {
     fn ask_password(
         &self,
         prompt: String,
-        tx: oneshot::Sender<EncryptedPassword>,
+        tx: oneshot::Sender<Result<EncryptedPassword, askpass::AskPassCancelReason>>,
         _cancellation: oneshot::Receiver<()>,
         _cx: &mut gpui::AsyncApp,
     ) {
@@ -56,7 +56,7 @@ impl RemoteClientDelegate for BenchmarkRemoteClient {
         match rpassword::prompt_password(&prompt) {
             Ok(password) => match EncryptedPassword::try_from(password.as_ref()) {
                 Ok(encrypted) => {
-                    if tx.send(encrypted).is_err() {
+                    if tx.send(Ok(encrypted)).is_err() {
                         eprintln!("Failed to send password");
                     }
                 }

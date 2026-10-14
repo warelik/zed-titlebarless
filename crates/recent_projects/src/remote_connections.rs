@@ -1014,6 +1014,59 @@ mod tests {
             .unwrap();
     }
 
+    #[gpui::test]
+    async fn test_project_observes_remote_client_notifications(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let app_state = init_test(cx);
+        cx.update(|cx| {
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+        });
+        server_cx.update(|cx| {
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+        });
+        let (options, server_session, connection_guard) = RemoteClient::fake_server(cx, server_cx);
+        let ping_handler = server_cx.new(|_| ());
+        server_session.add_request_handler::<proto::Ping, _, _, _>(
+            ping_handler.downgrade(),
+            |_, _, _| async { Ok(proto::Ack {}) },
+        );
+        drop(connection_guard);
+
+        let remote_client = RemoteClient::connect_mock(options, cx).await;
+        let project = cx.update(|cx| {
+            Project::remote(
+                remote_client.clone(),
+                app_state.client.clone(),
+                app_state.node_runtime.clone(),
+                app_state.user_store.clone(),
+                app_state.languages.clone(),
+                app_state.fs.clone(),
+                false,
+                cx,
+            )
+        });
+
+        cx.run_until_parked();
+        let notifications = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_notifications = notifications.clone();
+        cx.update(|cx| {
+            cx.observe(&project, move |_, _cx| {
+                observed_notifications.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .detach();
+        });
+
+        remote_client.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+
+        assert!(
+            notifications.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "project observers should be notified when the remote client changes"
+        );
+    }
+
     fn init_test(cx: &mut TestAppContext) -> Arc<AppState> {
         cx.update(|cx| {
             let state = AppState::test(cx);
