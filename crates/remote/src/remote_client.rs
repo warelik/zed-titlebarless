@@ -163,7 +163,11 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
 const INITIAL_CONNECTION_TIMEOUT: Duration =
     Duration::from_secs(if cfg!(debug_assertions) { 5 } else { 60 });
 
-pub const MAX_RECONNECT_ATTEMPTS: usize = 3;
+pub const MAX_RECONNECT_ATTEMPTS: usize = 10;
+/// Each retry waits twice as long as the one before: after a wake from sleep the
+/// network often comes up seconds later, and immediate retries would all fail.
+const RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
+const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(10);
 
 enum State {
     Connecting,
@@ -665,6 +669,12 @@ impl RemoteClient {
                         delegate: $delegate,
                     };
                 };
+            }
+
+            if attempts > 1 {
+                let raw_backoff = RECONNECT_BACKOFF * 2u32.pow((attempts - 2) as u32);
+                let backoff = raw_backoff.min(MAX_RECONNECT_BACKOFF);
+                cx.background_executor().timer(backoff).await;
             }
 
             if let Err(error) = remote_connection
@@ -1589,6 +1599,194 @@ mod tests {
         });
 
         assert_eq!(options.host(), "1.2.3.4");
+    }
+
+    struct TestDummyConnection(pub Option<RemoteConnectionOptions>);
+    #[async_trait::async_trait(?Send)]
+    impl RemoteConnection for TestDummyConnection {
+        async fn kill(&self) -> Result<()> {
+            Ok(())
+        }
+        fn has_been_killed(&self) -> bool {
+            false
+        }
+        fn build_command(
+            &self,
+            _program: Option<String>,
+            _args: &[String],
+            _env: &collections::HashMap<String, String>,
+            _working_dir: Option<String>,
+            _port_forward: Option<(u16, String, u16)>,
+            _interactive: Interactive,
+        ) -> Result<CommandTemplate> {
+            Ok(CommandTemplate {
+                program: "sh".into(),
+                args: vec![],
+                env: Default::default(),
+            })
+        }
+        fn build_forward_ports_command(
+            &self,
+            _forwards: Vec<(u16, String, u16)>,
+        ) -> Result<CommandTemplate> {
+            Ok(CommandTemplate {
+                program: "sh".into(),
+                args: vec![],
+                env: Default::default(),
+            })
+        }
+        fn upload_directory(
+            &self,
+            _src_path: PathBuf,
+            _dest_path: util::paths::RemotePathBuf,
+            _cx: &App,
+        ) -> Task<Result<()>> {
+            Task::ready(Ok(()))
+        }
+        fn start_proxy(
+            &self,
+            _unique_identifier: String,
+            _reconnect: bool,
+            _client_incoming_tx: mpsc::UnboundedSender<Envelope>,
+            _client_outgoing_rx: mpsc::UnboundedReceiver<Envelope>,
+            _connection_activity_tx: futures::channel::mpsc::Sender<()>,
+            _delegate: Arc<dyn RemoteClientDelegate>,
+            _cx: &mut AsyncApp,
+        ) -> Task<Result<i32>> {
+            Task::ready(Ok(0))
+        }
+        fn path_style(&self) -> util::paths::PathStyle {
+            util::paths::PathStyle::local()
+        }
+        fn remote_platform(&self) -> RemotePlatform {
+            RemotePlatform {
+                os: RemoteOs::Linux,
+                arch: RemoteArch::Aarch64,
+            }
+        }
+        fn remote_os_version(&self) -> Option<String> {
+            None
+        }
+        fn shell(&self) -> String {
+            "sh".to_string()
+        }
+        fn default_system_shell(&self) -> String {
+            "sh".to_string()
+        }
+        fn has_wsl_interop(&self) -> bool {
+            false
+        }
+        fn connection_options(&self) -> RemoteConnectionOptions {
+            self.0
+                .clone()
+                .unwrap_or_else(|| RemoteConnectionOptions::Ssh(SshConnectionOptions::default()))
+        }
+    }
+
+    #[gpui::test]
+    async fn test_reconnect_exhausted_clears_connection_and_enables_fresh_reconnect(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.default_global::<ConnectionPool>();
+        });
+        let (_incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
+        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded::<Envelope>();
+
+        let client =
+            cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test-client", false));
+
+        let _drain_outgoing = cx
+            .executor()
+            .spawn(async move { while outgoing_rx.next().await.is_some() {} });
+
+        let opts = RemoteConnectionOptions::Mock(crate::transport::mock::MockConnectionOptions {
+            id: 999_999,
+        });
+
+        let mock_conn: Arc<dyn RemoteConnection> =
+            Arc::new(TestDummyConnection(Some(opts.clone())));
+        let mock_delegate: Arc<dyn RemoteClientDelegate> =
+            Arc::new(crate::transport::mock::MockDelegate);
+
+        let remote_client = cx.new(|_| RemoteClient {
+            client,
+            unique_identifier: "test-unique-id".to_string(),
+            connection_options: opts,
+            path_style: util::paths::PathStyle::local(),
+            platform: RemotePlatform {
+                os: RemoteOs::Linux,
+                arch: RemoteArch::Aarch64,
+            },
+            os_version: None,
+            state: Some(State::Connected {
+                remote_connection: mock_conn.clone(),
+                delegate: mock_delegate.clone(),
+                multiplex_task: Task::ready(Ok(())),
+                heartbeat_task: Task::ready(Ok(())),
+            }),
+        });
+
+        assert!(remote_client.read_with(cx, |c, _| c.state.as_ref().unwrap().can_reconnect()));
+        assert!(remote_client.read_with(cx, |c, _| c.remote_connection().is_some()));
+
+        remote_client.update(cx, |client, cx| {
+            client.reconnect(cx).expect("reconnect should initiate");
+        });
+
+        // Advance clock by 30 seconds: under 10 attempts with exponential backoff (1+2+4+8+10=25s),
+        // reconnect is on attempt 6 and STILL ACTIVE.
+        cx.run_until_parked();
+        cx.background_executor
+            .advance_clock(Duration::from_secs(30));
+        cx.run_until_parked();
+
+        remote_client.read_with(cx, |client, _| {
+            let state = client
+                .state
+                .as_ref()
+                .expect("client state must be initialized");
+            assert!(
+                state.is_reconnecting(),
+                "state must still be reconnecting at 30s due to exponential backoff schedule, but got: {state}"
+            );
+            assert!(
+                !state.is_reconnect_exhausted(),
+                "must not be exhausted at 30s"
+            );
+        });
+
+        // Advance clock by another 40 seconds (total 70s > full 65s schedule): now exhausted.
+        cx.background_executor
+            .advance_clock(Duration::from_secs(40));
+        cx.run_until_parked();
+
+        remote_client.read_with(cx, |client, _| {
+            let state = client
+                .state
+                .as_ref()
+                .expect("client state must be initialized");
+            assert!(
+                state.is_reconnect_exhausted(),
+                "state must be ReconnectExhausted after reaching MAX_RECONNECT_ATTEMPTS, but got: {state}"
+            );
+            assert!(
+                !state.can_reconnect(),
+                "can_reconnect must be false when exhausted"
+            );
+            assert!(
+                client.remote_connection().is_none(),
+                "remote_connection() must return None so stock DisconnectedOverlay establishes fresh connection"
+            );
+            assert_eq!(
+                ConnectionState::from(state),
+                ConnectionState::Disconnected
+            );
+            assert_eq!(
+                format!("{state}"),
+                "reconnect exhausted"
+            );
+        });
     }
 }
 

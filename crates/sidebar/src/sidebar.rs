@@ -1086,10 +1086,10 @@ impl Sidebar {
         cx.subscribe_in(
             workspace,
             window,
-            move |this, workspace, event: &workspace::Event, window, cx| {
+            move |this, _workspace, event: &workspace::Event, window, cx| {
                 if let workspace::Event::PanelAdded(view) = event {
                     if let Ok(agent_panel) = view.clone().downcast::<AgentPanel>() {
-                        this.subscribe_to_agent_panel(workspace, &agent_panel, window, cx);
+                        this.subscribe_to_agent_panel(&agent_panel, window, cx);
                         this.schedule_update_entries(false, cx);
                     }
                 }
@@ -1100,7 +1100,7 @@ impl Sidebar {
         self.observe_docks(workspace, cx);
 
         if let Some(agent_panel) = workspace.read(cx).panel::<AgentPanel>(cx) {
-            self.subscribe_to_agent_panel(workspace, &agent_panel, window, cx);
+            self.subscribe_to_agent_panel(&agent_panel, window, cx);
             if Self::in_agent_panel(cx) {
                 self.sync_active_entry_from_panel(&agent_panel, cx);
             }
@@ -1171,27 +1171,19 @@ impl Sidebar {
 
     fn subscribe_to_agent_panel(
         &mut self,
-        workspace: &Entity<Workspace>,
         agent_panel: &Entity<AgentPanel>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let workspace = workspace.downgrade();
         cx.subscribe_in(
             agent_panel,
             window,
-            move |this, agent_panel, event: &AgentPanelEvent, window, cx| match event {
+            move |this, agent_panel, event: &AgentPanelEvent, _window, cx| match event {
                 AgentPanelEvent::ActiveViewChanged
                 | AgentPanelEvent::ActiveViewFocused
                 | AgentPanelEvent::EntryChanged => {
                     this.sync_active_entry_from_panel(agent_panel, cx);
                     this.schedule_update_entries(false, cx);
-                }
-                AgentPanelEvent::TerminalCloseRequested { metadata } => {
-                    if let Some(workspace) = workspace.upgrade() {
-                        let workspace = ThreadEntryWorkspace::Open(workspace);
-                        this.close_terminal(metadata, &workspace, window, cx);
-                    }
                 }
                 AgentPanelEvent::ThreadInteracted { thread_id } => {
                     this.record_thread_interacted(thread_id, cx);
@@ -1608,6 +1600,15 @@ impl Sidebar {
                             project_group_key: group_key.clone(),
                         },
                     );
+                }
+            }
+            for workspace in group_workspaces {
+                let Some(agent_panel) = workspace.read(cx).panel::<AgentPanel>(cx) else {
+                    continue;
+                };
+                let live_metadata = agent_panel.read(cx).live_terminal_metadata(cx);
+                for metadata in live_metadata {
+                    push_terminal_metadata(metadata, ThreadEntryWorkspace::Open(workspace.clone()));
                 }
             }
             current_terminal_ids.extend(
@@ -5266,6 +5267,25 @@ impl Sidebar {
         );
     }
 
+    fn find_project_for_remote_connection(
+        &self,
+        remote_connection: Option<&RemoteConnectionOptions>,
+        cx: &App,
+    ) -> Option<Entity<project::Project>> {
+        self.find_workspace_in_current_window(cx, |workspace, cx| {
+            same_remote_connection_identity(
+                workspace
+                    .read(cx)
+                    .project()
+                    .read(cx)
+                    .remote_connection_options(cx)
+                    .as_ref(),
+                remote_connection,
+            )
+        })
+        .map(|workspace| workspace.read(cx).project().clone())
+    }
+
     fn close_terminal_entry(
         &mut self,
         metadata: &TerminalThreadMetadata,
@@ -5280,11 +5300,11 @@ impl Sidebar {
         let terminal_id = metadata.terminal_id;
         let defer_draft_activation = activate_panel_draft && is_active && neighbor.is_some();
 
-        // Closing from the sidebar must not steal focus, since the row's
-        // workspace may not be the active workspace.
+        let mut closed_via_panel = false;
         if let ThreadEntryWorkspace::Open(workspace) = workspace {
             workspace.update(cx, |workspace, cx| {
                 if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                    closed_via_panel = true;
                     panel.update(cx, |panel, cx| {
                         if defer_draft_activation || !activate_panel_draft {
                             panel.close_terminal_without_activating_draft(terminal_id, window, cx);
@@ -5295,10 +5315,30 @@ impl Sidebar {
                 }
             });
         }
-        if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
-            store.update(cx, |store, cx| {
-                store.delete(terminal_id, cx);
-            });
+        if !closed_via_panel {
+            let session_name = terminal_id.session_name();
+            let project = match workspace {
+                ThreadEntryWorkspace::Open(workspace) => Some(workspace.read(cx).project().clone()),
+                ThreadEntryWorkspace::Closed { .. } => {
+                    self.find_project_for_remote_connection(metadata.remote_connection.as_ref(), cx)
+                }
+            };
+            if let Some(project) = project {
+                project
+                    .update(cx, |project, cx| {
+                        project.kill_persistent_terminal_session(session_name, cx)
+                    })
+                    .detach_and_log_err(cx);
+            } else {
+                log::warn!(
+                    "no open project available to kill persistent terminal session for terminal {terminal_id}"
+                );
+            }
+            if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+                store.update(cx, |store, cx| {
+                    store.delete(terminal_id, cx);
+                });
+            }
         }
 
         self.start_detached_archive_worktree_task(roots_to_archive, cx);

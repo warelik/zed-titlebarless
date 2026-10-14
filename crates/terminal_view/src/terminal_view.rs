@@ -1310,6 +1310,7 @@ fn subscribe_for_terminal_events(
                     ),
                 },
                 Event::BreadcrumbsChanged => cx.emit(ItemEvent::UpdateBreadcrumbs),
+                Event::ProcessExited => {}
                 Event::CloseTerminal => cx.emit(ItemEvent::CloseItem),
                 Event::SelectionsChanged => {
                     window.invalidate_character_coordinates();
