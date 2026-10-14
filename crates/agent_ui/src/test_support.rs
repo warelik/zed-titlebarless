@@ -200,6 +200,20 @@ impl WorkspaceSidebar for TestWorkspaceSidebar {
     fn is_threads_list_view_active(&self) -> bool {
         self.threads_list_active
     }
+
+    fn agent_panel_tab_rows(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<workspace::AgentPanelTabRows> {
+        if !workspace::threads_sidebar_in_agent_panel(cx) {
+            return None;
+        }
+        Some(workspace::AgentPanelTabRows {
+            projects: cx.new(|cx| Self::new(self.threads_list_active, cx)).into(),
+            threads: cx.new(|cx| Self::new(self.threads_list_active, cx)).into(),
+            add_project: cx.new(|cx| Self::new(self.threads_list_active, cx)).into(),
+        })
+    }
 }
 
 impl Render for TestWorkspaceSidebar {
