@@ -34,6 +34,8 @@ pub const COMPACTION_PROMPT: &str = include_str!("prompts/compaction_prompt.txt"
 /// Bounds on the width of the threads list. They constrain the configured
 /// default as well as the width the user drags to, so that no width the sidebar
 /// can hold is able to crowd out the editor or collapse the list.
+// The downstream 100px minimum is intentional even with compact/in-panel
+// layout disabled; it is separately documented under "Without any setting".
 pub const THREADS_LIST_MIN_WIDTH: Pixels = px(100.0);
 pub const THREADS_LIST_MAX_WIDTH: Pixels = px(800.0);
 
@@ -258,6 +260,7 @@ pub struct ThreadsSidebarSettings {
     pub position: SidebarDockPosition,
     pub default_width: Pixels,
     pub compact: bool,
+    pub in_agent_panel: bool,
 }
 
 impl AgentSettings {
@@ -787,6 +790,7 @@ impl Settings for AgentSettings {
                     .into_gpui()
                     .clamp(THREADS_LIST_MIN_WIDTH, THREADS_LIST_MAX_WIDTH),
                 compact: threads_sidebar.compact.unwrap_or(false),
+                in_agent_panel: threads_sidebar.in_agent_panel.unwrap_or(false),
             },
             default_width: agent.default_width.unwrap().into_gpui(),
             default_height: agent.default_height.unwrap().into_gpui(),
@@ -1119,6 +1123,23 @@ mod tests {
     }
 
     #[gpui::test]
+    fn test_threads_sidebar_minimum_is_independent_of_layout_opt_ins(cx: &mut gpui::App) {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        project::DisableAiSettings::register(cx);
+        AgentSettings::register(cx);
+        for (compact, in_agent_panel) in [(false, false), (false, true), (true, false), (true, true)] {
+            let content = serde_json::json!({"agent": {"threads_sidebar": {
+                "compact": compact, "in_agent_panel": in_agent_panel, "default_width": 5
+            }}}).to_string();
+            SettingsStore::update_global(cx, |store, cx| {
+                store.set_user_settings(&content, cx).expect("valid sidebar settings");
+            });
+            assert_eq!(AgentSettings::get_global(cx).threads_sidebar.default_width, px(100.0));
+        }
+    }
+
+    #[gpui::test]
     fn test_threads_sidebar_settings(cx: &mut gpui::App) {
         let store = SettingsStore::test(cx);
         cx.set_global(store);
@@ -1203,6 +1224,22 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[gpui::test]
+    fn test_threads_sidebar_in_agent_panel_defaults_to_false_when_none(cx: &mut gpui::App) {
+        let store = SettingsStore::test(cx);
+        let mut content = store.raw_default_settings().clone();
+        content
+            .agent
+            .as_mut()
+            .unwrap()
+            .threads_sidebar
+            .as_mut()
+            .unwrap()
+            .in_agent_panel = None;
+        let agent_settings = AgentSettings::from_settings(&content);
+        assert!(!agent_settings.threads_sidebar.in_agent_panel);
     }
 
     #[gpui::test]
