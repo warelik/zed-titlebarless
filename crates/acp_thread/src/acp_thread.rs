@@ -11911,6 +11911,7 @@ mod tests {
                     cx,
                     vec![],
                     PathStyle::local(),
+                    ::terminal::PtyStartup::default(),
                 )
             })
             .await
