@@ -27,8 +27,8 @@ const SIDEBAR_RESIZE_HANDLE_SIZE: Pixels = px(6.0);
 
 use crate::open_remote_project_with_existing_connection;
 use crate::{
-    CloseIntent, CloseWindow, DockPosition, Event as WorkspaceEvent, Item, ModalView, OpenMode,
-    Panel, Workspace, WorkspaceId, client_side_decorations,
+    CloseIntent, CloseWindow, DockPosition, Event as WorkspaceEvent, Item, ItemCloseGuard,
+    ModalView, OpenMode, Panel, Workspace, WorkspaceId, client_side_decorations,
     persistence::model::MultiWorkspaceState,
 };
 
@@ -1051,20 +1051,16 @@ impl MultiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<bool>> {
-        // The active workspace can remain unpinned while the sidebar is
-        // closed. Pin it first: this puts it in the removal set below, and
-        // stops `activate` from pinning it while switching to the
-        // replacement, which would recreate the project group row this
-        // function just deleted.
+        // Include the displayed workspace without changing retention before
+        // consent. A cancelled close must not turn a transient view persistent.
         let active_workspace = self.workspace().clone();
+        let mut workspaces = self.workspaces_for_project_group(group_key, cx);
         if active_workspace.read(cx).project_group_key(cx) == *group_key
-            && !self.is_workspace_retained(&active_workspace)
+            && !workspaces.contains(&active_workspace)
         {
-            let index = self.hold(active_workspace, window, cx);
-            self.pin(index, group_key.clone(), cx);
+            workspaces.push(active_workspace);
         }
 
-        let workspaces = self.workspaces_for_project_group(group_key, cx);
         if workspaces.is_empty() {
             let previous_group_count = self.project_groups.len();
             self.project_groups.retain(|group| group.key != *group_key);
@@ -1739,7 +1735,14 @@ impl MultiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<Workspace> {
-        let workspace = cx.new(|cx| Workspace::test_new(project, window, cx));
+        let app_state = self.workspace().read(cx).app_state().clone();
+        let workspace = if std::sync::Arc::ptr_eq(&project.read(cx).client(), &app_state.client) {
+            // One client owns one WorkspaceStore (and one Follow handler), as
+            // in production. Reusing that client must reuse its application state.
+            cx.new(|cx| Workspace::new(None, project, app_state, window, cx))
+        } else {
+            cx.new(|cx| Workspace::test_new(project, window, cx))
+        };
         self.activate(workspace.clone(), None, window, cx);
         workspace
     }
@@ -1880,6 +1883,17 @@ impl MultiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<bool>> {
+        self.remove_with_pre_remove(workspaces, intent, async |_, _| Ok(true), window, cx)
+    }
+
+    pub fn remove_with_pre_remove(
+        &mut self,
+        workspaces: impl IntoIterator<Item = Entity<Workspace>>,
+        intent: RemovalIntent,
+        before_remove: impl AsyncFnOnce(&mut gpui::AsyncWindowContext, Rc<dyn Fn(&App) -> bool>) -> Result<bool> + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<bool>> {
         let workspaces: Vec<_> = workspaces.into_iter().collect();
 
         if workspaces.is_empty() {
@@ -1889,9 +1903,8 @@ impl MultiWorkspace {
         let original_active = self.workspace().clone();
         let group_key = original_active.read(cx).project_group_key(cx);
 
-        // Record the neighborhood of the project as the user sees it now:
-        // callers like `remove_project_group` delete the project row itself
-        // before the removal task runs.
+        // Record the neighborhood as the user sees it before asynchronous
+        // consent; other project rows may change while a prompt is pending.
         let group_index = self
             .project_groups
             .iter()
@@ -1909,12 +1922,43 @@ impl MultiWorkspace {
         });
 
         cx.spawn_in(window, async move |this, cx| {
+            let item_ids = workspaces
+                .iter()
+                .map(|workspace| {
+                    workspace.read_with(cx, |workspace, cx| {
+                        workspace
+                            .panes()
+                            .iter()
+                            .flat_map(|pane| pane.read(cx).items().map(|item| item.item_id()))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect::<Vec<_>>();
+            let items = workspaces
+                .iter()
+                .flat_map(|workspace| {
+                    workspace.read_with(cx, |workspace, cx| {
+                        workspace
+                            .panes()
+                            .iter()
+                            .flat_map(|pane| {
+                                pane.read(cx)
+                                    .items()
+                                    .map(|item| item.boxed_clone())
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            let mut guard = cx.update(|window, cx| ItemCloseGuard::new(items, window, cx))?;
+
             // Consent phase: run the standard close lifecycle for every
             // workspace being removed. Prompts only; no state changes.
             for workspace in &workspaces {
                 let should_continue = workspace
                     .update_in(cx, |workspace, window, cx| {
-                        workspace.prepare_to_close(CloseIntent::ReplaceWindow, window, cx)
+                        workspace.prepare_to_remove(window, cx)
                     })?
                     .await?;
 
@@ -1923,21 +1967,56 @@ impl MultiWorkspace {
                 }
             }
 
+            if !gpui::AsyncApp::update(cx, |cx| {
+                let current_ids = workspaces.iter().map(|workspace| {
+                    workspace.read(cx).panes().iter().flat_map(|pane| {
+                        pane.read(cx).items().map(|item| item.item_id()).collect::<Vec<_>>()
+                    }).collect::<Vec<_>>()
+                }).collect::<Vec<_>>();
+                guard.accept_consent(cx) && current_ids == item_ids
+            }) {
+                return Ok(false);
+            }
+
+            let guarded_workspaces = workspaces.clone();
+            let expected_item_ids = item_ids.clone();
+            let workspaces_unchanged: Rc<dyn Fn(&App) -> bool> = Rc::new(move |cx| {
+                let current_item_ids = guarded_workspaces.iter().map(|workspace| {
+                    workspace.read(cx).panes().iter().flat_map(|pane| {
+                        pane.read(cx).items().map(|item| item.item_id()).collect::<Vec<_>>()
+                    }).collect::<Vec<_>>()
+                }).collect::<Vec<_>>();
+                !guard.changed(cx) && current_item_ids == expected_item_ids
+            });
+            if !before_remove(cx, workspaces_unchanged.clone()).await? {
+                return Ok(false);
+            }
+
             // Edit phase: one synchronous update. Delete the rows, then pick
             // the replacement from the rows that actually remain.
             let (removed_any, reopen_key) = this.update_in(cx, |this, window, cx| {
+                if !workspaces_unchanged(cx) {
+                    return (false, None);
+                }
                 let mut removed_any = false;
                 let displayed_workspace = this.workspace().clone();
 
                 // wait for should_continue to be true before removing project groups
                 if intent == RemovalIntent::CloseProject {
-                    let workspace_to_delete_keys = workspaces
+                    let workspace_to_delete_keys: collections::HashSet<_> = workspaces
                         .iter()
                         .map(|workspace| workspace.read(cx).project_group_key(cx))
-                        .collect::<Vec<_>>();
+                        .collect();
+                    let retained_group_keys: collections::HashSet<_> = this
+                        .workspaces()
+                        .filter(|workspace| !workspaces.contains(workspace))
+                        .map(|workspace| workspace.read(cx).project_group_key(cx))
+                        .collect();
 
-                    this.project_groups
-                        .retain(|group| !workspace_to_delete_keys.contains(&group.key));
+                    this.project_groups.retain(|group| {
+                        !workspace_to_delete_keys.contains(&group.key)
+                            || retained_group_keys.contains(&group.key)
+                    });
                     cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
                 }
 
