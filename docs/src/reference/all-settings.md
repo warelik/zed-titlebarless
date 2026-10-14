@@ -216,6 +216,29 @@ configured in JSON:
 }
 ```
 
+### Threads Sidebar in Agent Panel
+
+- Description: Whether projects, threads, and terminals appear as two rows of tabs at the top of the agent panel instead of in the Threads Sidebar.
+- Setting: `agent.threads_sidebar.in_agent_panel`
+- Default: `false`
+
+**Options**
+
+`boolean` values
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "agent": {
+    "threads_sidebar": {
+      "in_agent_panel": true
+    }
+  }
+}
+```
+
 ### Threads Sidebar Auto Open {#agent-threads-sidebar-auto-open}
 
 - Description: Whether opening a folder in an existing window automatically opens the [Threads Sidebar](../ai/parallel-agents.md#threads-sidebar).
@@ -2096,7 +2119,7 @@ configured in JSON:
 
 ### Maximum Tab Rows
 
-- Description: Maximum number of rows for unpinned editor and terminal tabs. Wrapping is active only when both `tabs.min_width` and `tabs.max_width` are set; tabs fill up to `max_tab_rows` rows at `min_width` before the last row scrolls horizontally. A separate pinned row does not count toward this limit. `0` behaves as `1`.
+- Description: Maximum number of rows for unpinned editor and terminal tabs (and the agent panel's threads and terminals row when `agent.threads_sidebar.in_agent_panel` is enabled). Wrapping is active only when both `tabs.min_width` and `tabs.max_width` are set; tabs fill up to `max_tab_rows` rows at `min_width` before the last row scrolls horizontally. A separate pinned row does not count toward this limit. `0` behaves as `1`.
 - Setting: `max_tab_rows`
 - Default: `1`
 
