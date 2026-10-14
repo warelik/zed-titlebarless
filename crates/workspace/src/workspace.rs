@@ -31,11 +31,12 @@ mod workspace_settings;
 
 pub use dock::Panel;
 pub use multi_workspace::{
-    CloseWorkspaceSidebar, DraggedSidebar, FocusWorkspaceSidebar, MoveProjectDown,
-    MoveProjectToNewWindow, MoveProjectUp, MultiWorkspace, MultiWorkspaceEvent, NewThread,
-    NextProject, NextThread, PreviousProject, PreviousThread, ProjectGroup, ProjectGroupKey,
-    RemovalIntent, SerializedProjectGroupState, Sidebar, SidebarEvent, SidebarHandle,
-    SidebarRenderState, SidebarSide, ToggleWorkspaceSidebar, sidebar_side_context_menu,
+    AgentPanelTabRows, CloseWorkspaceSidebar, DraggedSidebar, FocusWorkspaceSidebar,
+    MoveProjectDown, MoveProjectToNewWindow, MoveProjectUp, MultiWorkspace, MultiWorkspaceEvent,
+    NewThread, NextProject, NextThread, PreviousProject, PreviousThread, ProjectGroup,
+    ProjectGroupKey, RemovalIntent, SerializedProjectGroupState, Sidebar, SidebarEvent,
+    SidebarHandle, SidebarRenderState, SidebarSide, ToggleWorkspaceSidebar,
+    sidebar_side_context_menu, threads_sidebar_in_agent_panel,
 };
 pub use path_list::{PathList, SerializedPathList};
 pub use remote::{
@@ -346,15 +347,26 @@ pub fn panel_row_height(cx: &App) -> Option<Pixels> {
 /// then (and with the title bar in place) they keep the stock inset. The headers' reserved width
 /// (`TRAFFIC_LIGHT_PADDING`) assumes that stock inset, so the centred lights leave up to ~2.5px
 /// more room before the first tab (compact density): not worth reading the live size every frame.
+pub fn traffic_light_inset(_window: &Window, _cx: &App) -> Pixels {
+    #[cfg(target_os = "macos")]
+    {
+        match _window.traffic_light_size() {
+            Some(button) if title_bar_in_status_bar(_cx) => {
+                // A header shorter than the buttons (tiny UI font) would push them off the window.
+                ((ui::Tab::content_height(_cx) - button.height) / 2.).max(px(0.))
+            }
+            _ => TRAFFIC_LIGHT_INSET,
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        TRAFFIC_LIGHT_INSET
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn update_traffic_light_position(window: &Window, cx: &App) {
-    let inset = match window.traffic_light_size() {
-        Some(button) if title_bar_in_status_bar(cx) => {
-            // A header shorter than the buttons (tiny UI font) would push them off the window.
-            ((ui::Tab::content_height(cx) - button.height) / 2.).max(px(0.))
-        }
-        _ => TRAFFIC_LIGHT_INSET,
-    };
+    let inset = traffic_light_inset(window, cx);
     window.set_traffic_light_position(point(inset, inset));
 }
 
@@ -10196,7 +10208,15 @@ impl Render for Workspace {
                                         })
                                         .into_any_element(),
                                 };
-                                let traffic_lights = traffic_lights_overlay_workspace(window, cx);
+                                let traffic_lights = traffic_lights_overlay_workspace(window, cx)
+                                    && !self.zoomed_position.is_some_and(|position| {
+                                        self.dock_at_position(position)
+                                            .read(cx)
+                                            .active_panel()
+                                            .is_some_and(|panel| {
+                                                panel.holds_traffic_lights(window, cx)
+                                            })
+                                    });
                                 let zoomed_element =
                                     if traffic_lights && self.zoomed_position.is_some() {
                                         v_flex()

@@ -1209,6 +1209,9 @@
       "auto_open": true,
       // Show each thread on a single line at the height of the tab bar, with its details on hover.
       "compact": false,
+      // Show the projects, threads and terminals as two rows of tabs at the top of the agent panel
+      // instead of in the sidebar.
+      "in_agent_panel": false,
     },
     // Default fixed width when the agent panel is docked to the left or right and
     // `flexible` is false.

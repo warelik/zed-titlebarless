@@ -94,7 +94,7 @@ use text::OffsetRangeExt;
 use theme_settings::ThemeSettings;
 use ui::{
     ContextMenu, ContextMenuEntry, GradientFade, IconButton, KeyBinding, PopoverMenu,
-    PopoverMenuHandle, ProjectEmptyState, Tab, Tooltip, prelude::*, utils::WithRemSize,
+    PopoverMenuHandle, ProjectEmptyState, Tab, TabBar, Tooltip, prelude::*, utils::WithRemSize,
 };
 use util::ResultExt as _;
 use workspace::{
@@ -2891,7 +2891,9 @@ impl AgentPanel {
 
         if let Some(multi_workspace) = window.root::<MultiWorkspace>().flatten() {
             let multi_workspace = multi_workspace.read(cx);
-            if multi_workspace.sidebar_open() && multi_workspace.is_threads_list_view_active(cx) {
+            if multi_workspace.sidebar_render_state(cx).open
+                && multi_workspace.is_threads_list_view_active(cx)
+            {
                 return true;
             }
 
@@ -5144,6 +5146,10 @@ impl Panel for AgentPanel {
         true
     }
 
+    fn holds_traffic_lights(&self, window: &Window, cx: &App) -> bool {
+        Self::shows_sidebar_tab_rows(window, cx)
+    }
+
     fn hide_button_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
         Some(workspace::HideStatusItem::new(|settings| {
             settings.agent.get_or_insert_default().button = Some(false);
@@ -5686,6 +5692,7 @@ impl AgentPanel {
             .is_some();
 
         let workspace = self.workspace.clone();
+        let threads_in_panel = workspace::threads_sidebar_in_agent_panel(cx);
 
         PopoverMenu::new("agent-options-menu")
             .trigger_with_tooltip(
@@ -5829,10 +5836,22 @@ impl AgentPanel {
                                 .action("Profiles", Box::new(ManageProfiles::default()));
                         }
 
-                        menu = menu
-                            .action("Settings", Box::new(OpenSettings))
-                            .separator()
-                            .action("Toggle Threads Sidebar", Box::new(ToggleWorkspaceSidebar));
+                        menu = menu.action("Settings", Box::new(OpenSettings)).separator();
+                        menu = if threads_in_panel {
+                            menu.entry("Thread History", None, |window, cx| {
+                                if let Some(multi_workspace) =
+                                    window.root::<MultiWorkspace>().flatten()
+                                {
+                                    multi_workspace.update(cx, |multi_workspace, cx| {
+                                        if let Some(sidebar) = multi_workspace.sidebar() {
+                                            sidebar.toggle_thread_history(window, cx);
+                                        }
+                                    });
+                                }
+                            })
+                        } else {
+                            menu.action("Toggle Threads Sidebar", Box::new(ToggleWorkspaceSidebar))
+                        };
 
                         if has_auth_methods || supports_logout {
                             menu = menu.separator()
@@ -5879,8 +5898,39 @@ impl AgentPanel {
         })
     }
 
-    fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The sidebar's projects and threads rows, while `agent.threads_sidebar.in_agent_panel`
+    /// puts them here.
+    fn shows_sidebar_tab_rows(window: &Window, cx: &App) -> bool {
+        workspace::threads_sidebar_in_agent_panel(cx)
+            && window
+                .root::<MultiWorkspace>()
+                .flatten()
+                .is_some_and(|multi_workspace| multi_workspace.read(cx).sidebar().is_some())
+    }
+
+    fn sidebar_tab_rows(window: &Window, cx: &mut App) -> Option<workspace::AgentPanelTabRows> {
+        window
+            .root::<MultiWorkspace>()
+            .flatten()?
+            .update(cx, |multi_workspace, cx| {
+                multi_workspace
+                    .sidebar()
+                    .and_then(|sidebar| sidebar.agent_panel_tab_rows(cx))
+            })
+    }
+
+    fn sidebar_history(window: &Window, cx: &App) -> Option<gpui::AnyView> {
+        window
+            .root::<MultiWorkspace>()
+            .flatten()?
+            .read(cx)
+            .sidebar()?
+            .agent_panel_history(cx)
+    }
+
+    fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let agent_server_store = self.project.read(cx).agent_server_store().clone();
+        let sidebar_tab_rows = Self::sidebar_tab_rows(window, cx);
 
         let focus_handle = self.focus_handle(cx);
 
@@ -6213,6 +6263,49 @@ impl AgentPanel {
                     thread_view.update(cx, |thread_view, cx| thread_view.render_sandbox_status(cx))
                 });
 
+            // The rows replace the title: the active thread's tab carries it.
+            if let Some(rows) = sidebar_tab_rows {
+                // In the window's top-left corner the projects row holds the traffic lights the
+                // way the editor's tab bar does, and the threads row starts where they do.
+                let at_traffic_lights = workspace::traffic_lights_overlay_workspace(window, cx)
+                    && (self.position(window, cx) == DockPosition::Left || is_full_screen);
+                let threads_inset =
+                    workspace::traffic_light_inset(window, cx) - DynamicSpacing::Base02.px(cx);
+                return v_flex()
+                    .id("agent-panel-toolbar")
+                    .flex_none()
+                    .w_full()
+                    .child(
+                        TabBar::new("agent-panel-projects-tab-bar")
+                            .when(at_traffic_lights, |this| {
+                                this.start_child(
+                                    workspace::title_bar_area(
+                                        div().id("traffic-light-spacer"),
+                                        window,
+                                        cx,
+                                    )
+                                    .h_full()
+                                    .w(px(ui::utils::TRAFFIC_LIGHT_PADDING)),
+                                )
+                            })
+                            .child(rows.projects)
+                            .end_children(sandbox_status)
+                            .end_child(rows.add_project)
+                            .when(can_create_entries, |this| this.end_child(new_thread_menu))
+                            .end_child(full_screen_button)
+                            .end_child(self.render_panel_options_menu(window, cx)),
+                    )
+                    .child(
+                        TabBar::new("agent-panel-threads-tab-bar").child(
+                            div()
+                                .w_full()
+                                .when(at_traffic_lights, |this| this.pl(threads_inset))
+                                .child(rows.threads),
+                        ),
+                    )
+                    .into_any_element();
+            }
+
             base_container
                 .child(
                     h_flex()
@@ -6252,6 +6345,7 @@ impl AgentPanel {
             .border_b_1()
             .border_color(cx.theme().colors().border)
             .child(toolbar_content)
+            .into_any_element()
     }
 
     fn should_render_trial_end_upsell(&self, cx: &mut Context<Self>) -> bool {
@@ -6602,6 +6696,7 @@ impl AgentPanel {
 
 impl Render for AgentPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let sidebar_history = Self::sidebar_history(window, cx);
         // WARNING: Changes to this element hierarchy can have
         // non-obvious implications to the layout of children.
         //
@@ -6658,7 +6753,11 @@ impl Render for AgentPanel {
             }))
             .child(self.render_toolbar(window, cx))
             .children(self.render_new_user_onboarding(window, cx))
+            .when_some(sidebar_history.clone(), |parent, history| {
+                parent.child(div().flex_1().min_h_0().child(history))
+            })
             .map(|parent| match self.visible_surface() {
+                _ if sidebar_history.is_some() => parent,
                 VisibleSurface::Uninitialized if !self.has_open_project(cx) => {
                     parent.child(self.render_no_project_state(cx))
                 }

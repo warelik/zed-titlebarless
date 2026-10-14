@@ -258,6 +258,7 @@ pub struct ThreadsSidebarSettings {
     pub position: SidebarDockPosition,
     pub default_width: Pixels,
     pub compact: bool,
+    pub in_agent_panel: bool,
 }
 
 impl AgentSettings {
@@ -787,6 +788,7 @@ impl Settings for AgentSettings {
                     .into_gpui()
                     .clamp(THREADS_LIST_MIN_WIDTH, THREADS_LIST_MAX_WIDTH),
                 compact: threads_sidebar.compact.unwrap_or(false),
+                in_agent_panel: threads_sidebar.in_agent_panel.unwrap_or(false),
             },
             default_width: agent.default_width.unwrap().into_gpui(),
             default_height: agent.default_height.unwrap().into_gpui(),
@@ -1203,6 +1205,22 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[gpui::test]
+    fn test_threads_sidebar_in_agent_panel_defaults_to_false_when_none(cx: &mut gpui::App) {
+        let store = SettingsStore::test(cx);
+        let mut content = store.raw_default_settings().clone();
+        content
+            .agent
+            .as_mut()
+            .unwrap()
+            .threads_sidebar
+            .as_mut()
+            .unwrap()
+            .in_agent_panel = None;
+        let agent_settings = AgentSettings::from_settings(&content);
+        assert!(!agent_settings.threads_sidebar.in_agent_panel);
     }
 
     #[gpui::test]

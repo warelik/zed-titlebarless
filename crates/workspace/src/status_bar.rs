@@ -87,10 +87,10 @@ impl SidebarStatus {
                 let mw = mw.read(cx);
                 let enabled = mw.multi_workspace_enabled(cx);
                 Self {
-                    open: mw.sidebar_open() && enabled,
+                    open: mw.sidebar_render_state(cx).open,
                     side: mw.sidebar_side(cx),
                     has_notifications: mw.sidebar_has_notifications(cx),
-                    show_toggle: enabled,
+                    show_toggle: enabled && !crate::threads_sidebar_in_agent_panel(cx),
                 }
             })
             .unwrap_or_default()

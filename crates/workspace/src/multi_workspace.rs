@@ -157,6 +157,29 @@ pub trait Sidebar: Focusable + Render + EventEmitter<SidebarEvent> + Sized {
         _cx: &mut Context<Self>,
     ) {
     }
+
+    /// The views the agent panel shows in its header while `agent.threads_sidebar.in_agent_panel`
+    /// is on.
+    fn agent_panel_tab_rows(&mut self, _cx: &mut Context<Self>) -> Option<AgentPanelTabRows> {
+        None
+    }
+
+    /// The thread history, for the agent panel to show in place of the thread while it is open.
+    fn agent_panel_history(&self, _cx: &App) -> Option<AnyView> {
+        None
+    }
+
+    fn toggle_thread_history(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+}
+
+/// The sidebar's contents as the agent panel shows them in place of its title.
+pub struct AgentPanelTabRows {
+    /// The window's projects.
+    pub projects: AnyView,
+    /// The threads and terminals of the active project.
+    pub threads: AnyView,
+    /// The button that adds a project to the window.
+    pub add_project: AnyView,
 }
 
 pub trait SidebarHandle: 'static + Send + Sync {
@@ -177,6 +200,10 @@ pub trait SidebarHandle: 'static + Send + Sync {
     fn side(&self, cx: &App) -> SidebarSide;
     fn serialized_state(&self, cx: &App) -> Option<String>;
     fn restore_serialized_state(&self, state: &str, window: &mut Window, cx: &mut App);
+
+    fn agent_panel_tab_rows(&self, cx: &mut App) -> Option<AgentPanelTabRows>;
+    fn agent_panel_history(&self, cx: &App) -> Option<AnyView>;
+    fn toggle_thread_history(&self, window: &mut Window, cx: &mut App);
 }
 
 #[derive(Clone)]
@@ -266,6 +293,28 @@ impl<T: Sidebar> SidebarHandle for Entity<T> {
             this.restore_serialized_state(state, window, cx)
         })
     }
+
+    fn agent_panel_tab_rows(&self, cx: &mut App) -> Option<AgentPanelTabRows> {
+        self.update(cx, |this, cx| this.agent_panel_tab_rows(cx))
+    }
+
+    fn agent_panel_history(&self, cx: &App) -> Option<AnyView> {
+        self.read(cx).agent_panel_history(cx)
+    }
+
+    fn toggle_thread_history(&self, window: &mut Window, cx: &mut App) {
+        let entity = self.clone();
+        window.defer(cx, move |window, cx| {
+            entity.update(cx, |this, cx| {
+                this.toggle_thread_history(window, cx);
+            });
+        });
+    }
+}
+
+/// Whether the threads sidebar's contents live in the agent panel rather than in the sidebar.
+pub fn threads_sidebar_in_agent_panel(cx: &App) -> bool {
+    AgentSettings::get_global(cx).threads_sidebar.in_agent_panel
 }
 
 #[derive(Clone)]
@@ -333,7 +382,9 @@ impl MultiWorkspace {
 
     pub fn sidebar_render_state(&self, cx: &App) -> SidebarRenderState {
         SidebarRenderState {
-            open: self.sidebar_open() && self.multi_workspace_enabled(cx),
+            open: self.sidebar_open()
+                && self.multi_workspace_enabled(cx)
+                && !threads_sidebar_in_agent_panel(cx),
             side: self.sidebar_side(cx),
         }
     }
@@ -351,12 +402,32 @@ impl MultiWorkspace {
             let mut previous_multi_workspace_enabled = !DisableAiSettings::get_global(cx)
                 .disable_ai
                 && AgentSettings::get_global(cx).enabled;
+            let mut previous_in_agent_panel = threads_sidebar_in_agent_panel(cx);
             move |this, window, cx| {
                 let multi_workspace_enabled = this.multi_workspace_enabled(cx);
                 if previous_multi_workspace_enabled && !multi_workspace_enabled {
                     this.collapse_to_single_workspace(window, cx);
                 }
                 previous_multi_workspace_enabled = multi_workspace_enabled;
+
+                let in_agent_panel = threads_sidebar_in_agent_panel(cx);
+                if in_agent_panel != previous_in_agent_panel && multi_workspace_enabled {
+                    if in_agent_panel {
+                        this.retain_active_workspace(cx);
+                    }
+                    let sidebar_focus_handle = this
+                        .sidebar
+                        .as_ref()
+                        .filter(|_| !in_agent_panel && this.sidebar_open)
+                        .map(|sidebar| sidebar.focus_handle(cx));
+                    for workspace in this.workspaces().cloned().collect::<Vec<_>>() {
+                        workspace.update(cx, |workspace, _cx| {
+                            workspace.set_sidebar_focus_handle(sidebar_focus_handle.clone());
+                        });
+                    }
+                    cx.notify();
+                }
+                previous_in_agent_panel = in_agent_panel;
             }
         });
         Self::subscribe_to_workspace(&workspace, window, cx);
@@ -431,6 +502,10 @@ impl MultiWorkspace {
         if !self.multi_workspace_enabled(cx) {
             return;
         }
+        if threads_sidebar_in_agent_panel(cx) {
+            window.dispatch_action(Box::new(zed_actions::assistant::ToggleFocus), cx);
+            return;
+        }
 
         if self.sidebar_open() {
             self.close_sidebar(window, cx);
@@ -445,7 +520,7 @@ impl MultiWorkspace {
     }
 
     pub fn close_sidebar_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.multi_workspace_enabled(cx) {
+        if !self.multi_workspace_enabled(cx) || threads_sidebar_in_agent_panel(cx) {
             return;
         }
 
@@ -456,6 +531,10 @@ impl MultiWorkspace {
 
     pub fn focus_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.multi_workspace_enabled(cx) {
+            return;
+        }
+        if threads_sidebar_in_agent_panel(cx) {
+            window.dispatch_action(Box::new(zed_actions::assistant::ToggleFocus), cx);
             return;
         }
 
@@ -502,7 +581,12 @@ impl MultiWorkspace {
     fn apply_open_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_open = true;
         self.retain_active_workspace(cx);
-        let sidebar_focus_handle = self.sidebar.as_ref().map(|s| s.focus_handle(cx));
+        // The list lives in the agent panel then; the unrendered sidebar must not take focus.
+        let sidebar_focus_handle = self
+            .sidebar
+            .as_ref()
+            .filter(|_| !threads_sidebar_in_agent_panel(cx))
+            .map(|sidebar| sidebar.focus_handle(cx));
         for workspace in self.workspaces().cloned().collect::<Vec<_>>() {
             workspace.update(cx, |workspace, _cx| {
                 workspace.set_sidebar_focus_handle(sidebar_focus_handle.clone());
@@ -1429,7 +1513,7 @@ impl MultiWorkspace {
     }
 
     fn sync_sidebar_to_workspace(&self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
-        if self.sidebar_open() {
+        if self.sidebar_render_state(cx).open {
             let sidebar_focus_handle = self.sidebar.as_ref().map(|s| s.focus_handle(cx));
             workspace.update(cx, |workspace, _| {
                 workspace.set_sidebar_focus_handle(sidebar_focus_handle);
@@ -2008,7 +2092,10 @@ impl Render for MultiWorkspace {
         let sidebar_side = self.sidebar_side(cx);
         let sidebar_on_right = sidebar_side == SidebarSide::Right;
 
-        let sidebar: Option<AnyElement> = if multi_workspace_enabled && self.sidebar_open() {
+        let sidebar: Option<AnyElement> = if multi_workspace_enabled
+            && self.sidebar_open()
+            && !threads_sidebar_in_agent_panel(cx)
+        {
             self.sidebar.as_ref().map(|sidebar_handle| {
                 let weak = cx.weak_entity();
 

@@ -16027,3 +16027,275 @@ fn sidebar_painted_background_at(position: Point<Pixels>, cx: &mut VisualTestCon
         u32::from(Rgba::from(color))
     })
 }
+
+fn set_threads_sidebar_in_agent_panel(in_agent_panel: bool, cx: &mut VisualTestContext) {
+    cx.update(|_window, cx| {
+        SettingsStore::update_global(cx, |store, cx| {
+            store
+                .set_user_settings(
+                    &format!(r#"{{"agent": {{"threads_sidebar": {{"in_agent_panel": {in_agent_panel}}}}}}}"#),
+                    cx,
+                )
+                .unwrap();
+        });
+    });
+}
+
+#[gpui::test]
+async fn test_m2_in_agent_panel_does_not_clobber_sidebar_open_state(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
+
+    assert!(!multi_workspace.read_with(cx, |mw, _| mw.sidebar_open()));
+
+    set_threads_sidebar_in_agent_panel(true, cx);
+
+    sidebar.update(cx, |s, cx| s.update_entries(cx));
+    cx.run_until_parked();
+
+    assert!(
+        !multi_workspace.read_with(cx, |mw, _| mw.sidebar_open()),
+        "sidebar_open must not be forced to true when in_agent_panel is true"
+    );
+}
+
+#[gpui::test]
+async fn test_m2_in_agent_panel_tab_order_stable_across_thread_updates(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    let paths = PathList::new(&[PathBuf::from("/my-project")]);
+
+    let t0 = chrono::DateTime::parse_from_rfc3339("2024-01-01T10:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let t1 = chrono::DateTime::parse_from_rfc3339("2024-01-01T10:00:10Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let t2 = chrono::DateTime::parse_from_rfc3339("2024-01-01T10:00:20Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
+    // Thread 1: legacy thread without created_at, initially updated_at = t0
+    let metadata1 = ThreadMetadata {
+        thread_id: ThreadId::new(),
+        session_id: Some(acp::SessionId::new("t0".to_string())),
+        agent_id: agent::ZED_AGENT_ID.clone(),
+        title: Some(SharedString::from("Thread 1")),
+        title_override: None,
+        updated_at: t0,
+        created_at: None,
+        interacted_at: None,
+        worktree_paths: WorktreePaths::from_path_lists(paths.clone(), paths.clone()).unwrap(),
+        archived: false,
+        remote_connection: None,
+    };
+    // Thread 2: created_at = t1, updated_at = t1
+    let metadata2 = ThreadMetadata {
+        thread_id: ThreadId::new(),
+        session_id: Some(acp::SessionId::new("t1".to_string())),
+        agent_id: agent::ZED_AGENT_ID.clone(),
+        title: Some(SharedString::from("Thread 2")),
+        title_override: None,
+        updated_at: t1,
+        created_at: Some(t1),
+        interacted_at: None,
+        worktree_paths: WorktreePaths::from_path_lists(paths.clone(), paths).unwrap(),
+        archived: false,
+        remote_connection: None,
+    };
+    cx.update(|cx| {
+        let store = ThreadMetadataStore::global(cx);
+        store.update(cx, |store, cx| {
+            store.save(metadata1, cx);
+            store.save(metadata2, cx);
+        });
+    });
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
+
+    multi_workspace.update(cx, |mw, cx| {
+        mw.retain_active_workspace(cx);
+    });
+
+    set_threads_sidebar_in_agent_panel(true, cx);
+
+    sidebar.update(cx, |s, cx| s.update_entries(cx));
+    cx.run_until_parked();
+
+    let initial_tabs = sidebar.read_with(cx, |s, _cx| {
+        s.ordered_thread_tab_entries()
+            .into_iter()
+            .filter_map(|(_, entry)| match entry {
+                ListEntry::Thread(t) => t.metadata.title.as_ref().map(|title| title.to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(initial_tabs, vec!["Thread 1", "Thread 2"]);
+
+    // Update Thread 1's updated_at to t2 (which is AFTER Thread 2's created_at)
+    cx.update(|_window, cx| {
+        let store = ThreadMetadataStore::global(cx);
+        let mut m = store
+            .read(cx)
+            .entries()
+            .find(|e| e.title.as_deref() == Some("Thread 1"))
+            .cloned()
+            .unwrap();
+        m.updated_at = t2;
+        store.update(cx, |store, cx| store.save(m, cx));
+    });
+
+    sidebar.update(cx, |s, cx| s.update_entries(cx));
+    cx.run_until_parked();
+
+    let after_tabs = sidebar.read_with(cx, |s, _cx| {
+        s.ordered_thread_tab_entries()
+            .into_iter()
+            .filter_map(|(_, entry)| match entry {
+                ListEntry::Thread(t) => t.metadata.title.as_ref().map(|title| title.to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        after_tabs,
+        vec!["Thread 1", "Thread 2"],
+        "Tab order must remain stable when thread is updated"
+    );
+}
+
+#[gpui::test]
+async fn test_m2_empty_draft_not_dropped_during_pending_activation(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    let paths = PathList::new(&[PathBuf::from("/my-project")]);
+    let draft_thread_id =
+        save_draft_metadata_with_main_paths(None, paths.clone(), paths, Utc::now(), cx);
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
+
+    set_threads_sidebar_in_agent_panel(true, cx);
+
+    // Set pending activation to this draft
+    sidebar.update(cx, |s, cx| {
+        s.pending_thread_activation = Some(draft_thread_id);
+        s.update_entries(cx);
+    });
+    cx.run_until_parked();
+
+    let has_draft = sidebar.read_with(cx, |s, _| {
+        s.contents.entries.iter().any(|e| match e {
+            ListEntry::Thread(t) => t.metadata.thread_id == draft_thread_id,
+            _ => false,
+        })
+    });
+    assert!(
+        has_draft,
+        "Empty draft should not be dropped while it is the pending activation target"
+    );
+}
+
+#[gpui::test]
+async fn test_stock_empty_draft_dropped_during_pending_activation_when_not_in_agent_panel(
+    cx: &mut TestAppContext,
+) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    let paths = PathList::new(&[PathBuf::from("/my-project")]);
+    let draft_thread_id =
+        save_draft_metadata_with_main_paths(None, paths.clone(), paths, Utc::now(), cx);
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    set_threads_sidebar_in_agent_panel(false, cx);
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+
+    sidebar.update(cx, |s, cx| {
+        s.pending_thread_activation = Some(draft_thread_id);
+        s.update_entries(cx);
+    });
+    cx.run_until_parked();
+
+    let has_draft = sidebar.read_with(cx, |s, _| {
+        s.contents
+            .entries
+            .iter()
+            .any(|e| matches!(e, ListEntry::Thread(t) if t.metadata.thread_id == draft_thread_id))
+    });
+    assert!(
+        !has_draft,
+        "Stock behavior requires empty draft to be dropped during pending activation"
+    );
+}
+
+#[gpui::test]
+async fn test_m2_active_entry_synced_from_agent_panel_on_startup(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    let panel = add_agent_panel(&workspace, cx);
+
+    let terminal_id = panel
+        .update_in(cx, |panel, window, cx| {
+            panel.insert_test_terminal("Dev Terminal", true, window, cx)
+        })
+        .expect("test terminal should be inserted");
+    cx.run_until_parked();
+
+    set_threads_sidebar_in_agent_panel(true, cx);
+
+    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
+    sidebar.update(cx, |s, cx| s.update_entries(cx));
+    cx.run_until_parked();
+
+    let active_terminal = sidebar.read_with(cx, |s, _| match &s.active_entry {
+        Some(ActiveEntry::Terminal {
+            terminal_id: tid, ..
+        }) => Some(*tid),
+        _ => None,
+    });
+    assert_eq!(
+        active_terminal,
+        Some(terminal_id),
+        "Sidebar active_entry should be synchronized from AgentPanel on startup"
+    );
+}
+
+#[gpui::test]
+async fn test_stock_active_entry_not_synced_from_agent_panel_when_not_in_agent_panel(
+    cx: &mut TestAppContext,
+) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    let panel = add_agent_panel(&workspace, cx);
+
+    let _terminal_id = panel
+        .update_in(cx, |panel, window, cx| {
+            panel.insert_test_terminal("Dev Terminal", true, window, cx)
+        })
+        .expect("test terminal should be inserted");
+    cx.run_until_parked();
+
+    set_threads_sidebar_in_agent_panel(false, cx);
+
+    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
+    sidebar.update(cx, |s, cx| s.update_entries(cx));
+    cx.run_until_parked();
+
+    let active_terminal = sidebar.read_with(cx, |s, _| match &s.active_entry {
+        Some(ActiveEntry::Terminal {
+            terminal_id: tid, ..
+        }) => Some(*tid),
+        _ => None,
+    });
+    assert_eq!(
+        active_terminal, None,
+        "Sidebar active_entry should remain None on startup when in_agent_panel is false"
+    );
+}
