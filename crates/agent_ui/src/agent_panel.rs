@@ -75,19 +75,21 @@ use fs::Fs;
 use futures::FutureExt as _;
 use gpui::{
     Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, ClipboardItem,
-    Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyContext, Pixels,
+    Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyContext, KeyDownEvent, Pixels,
     PlatformDisplay, Subscription, Task, TaskExt, WeakEntity, WindowHandle, prelude::*,
     pulsating_between,
 };
 use language::LanguageRegistry;
 use language_model::LanguageModelRegistry;
 use notifications::status_toast::StatusToast;
+use project::terminals::{PersistentSession, PersistentTerminal};
 use project::{Project, ProjectPath, Worktree};
+use remote::RemoteClientEvent;
 use settings::{NotifyWhenAgentWaiting, Settings, SettingsStore, update_settings_file};
 
 use search::{BufferSearchBar, buffer_search::Deploy as DeployBufferSearch};
 use terminal::Event as TerminalEvent;
-#[cfg(any(test, feature = "test-support"))]
+use terminal::TerminalBounds;
 use terminal::terminal_settings::TerminalSettings;
 use terminal_view::TerminalView;
 use text::OffsetRangeExt;
@@ -110,6 +112,7 @@ const LAST_USED_AGENT_KEY: &str = "agent_panel__last_used_external_agent";
 const LAST_CREATED_ENTRY_KIND_KEY: &str = "agent_panel__last_created_entry_kind";
 const TERMINAL_AGENT_TELEMETRY_ID: &str = "terminal";
 const TERMINAL_INIT_COMMAND_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+struct NoRemoteConnectionToast;
 const KNOWN_TERMINAL_AGENT_COMMANDS: &[&str] = &[
     "agent", // Unfortunately, both Cursor cli + grok
     "agy",
@@ -129,6 +132,20 @@ const KNOWN_TERMINAL_AGENT_COMMANDS: &[&str] = &[
     "pi",
     "qwen",
 ];
+
+fn is_remote_connection_disconnected(project: &Project, cx: &App) -> bool {
+    project
+        .remote_client()
+        .is_some_and(|remote_client| remote_client.read(cx).is_disconnected())
+}
+
+fn reconnect_if_remote_disconnected(project: Entity<Project>, cx: &mut App) {
+    if is_remote_connection_disconnected(project.read(cx), cx) {
+        project.update(cx, |project, cx| {
+            project.disconnected_from_remote(false, cx);
+        });
+    }
+}
 
 fn is_known_terminal_agent_command(command: &str) -> bool {
     KNOWN_TERMINAL_AGENT_COMMANDS.contains(&command)
@@ -154,16 +171,21 @@ fn terminal_program_to_report(
 pub struct TerminalId(uuid::Uuid);
 
 impl TerminalId {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self(uuid::Uuid::new_v4())
     }
 
-    pub(crate) fn to_key_string(self) -> String {
+    pub fn to_key_string(self) -> String {
         self.0.hyphenated().to_string()
     }
 
     pub(crate) fn from_key_string(key: &str) -> anyhow::Result<Self> {
         Ok(Self(uuid::Uuid::parse_str(key)?))
+    }
+
+    /// The shpool session that keeps this terminal thread's shell alive.
+    pub fn session_name(self) -> String {
+        format!("zed-{}", self.to_key_string())
     }
 }
 
@@ -334,7 +356,7 @@ enum AgentPanelEntryKind {
     Terminal,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Default, Serialize, Deserialize, Debug)]
 struct SerializedAgentPanel {
     selected_agent: Option<Agent>,
     #[serde(default)]
@@ -345,9 +367,11 @@ struct SerializedAgentPanel {
     last_active_terminal_id: Option<String>,
     #[serde(default)]
     new_draft_thread_id: Option<ThreadId>,
+    #[serde(default)]
+    terminal_bounds: Option<TerminalBounds>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 struct SerializedActiveThread {
     /// For drafts this is `None`; use `thread_id` to address them instead.
     session_id: Option<String>,
@@ -961,8 +985,10 @@ struct AgentTerminal {
     last_known_terminal_title: String,
     last_observed_program: Option<String>,
     working_directory: Option<PathBuf>,
+    persistent: bool,
     created_at: DateTime<Utc>,
     has_notification: bool,
+    exited: bool,
     search_bar: Option<Entity<BufferSearchBar>>,
     notification_windows: Vec<WindowHandle<AgentNotification>>,
     notification_subscriptions: Vec<Subscription>,
@@ -1130,13 +1156,23 @@ pub struct AgentPanel {
     draft_thread: Option<Entity<ConversationView>>,
     retained_threads: HashMap<ThreadId, Entity<ConversationView>>,
     terminals: HashMap<TerminalId, AgentTerminal>,
-    pending_terminal_spawn: Option<TerminalId>,
+    pending_terminal_spawns: HashSet<TerminalId>,
+    closed_terminal_spawns: HashSet<TerminalId>,
     #[cfg(test)]
     test_terminal_spawn_gate: Option<futures::channel::oneshot::Receiver<()>>,
     new_thread_menu_handle: PopoverMenuHandle<ContextMenu>,
     agent_panel_menu_handle: PopoverMenuHandle<ContextMenu>,
     _extension_subscription: Option<Subscription>,
     _project_subscription: Subscription,
+    _observe_project: Option<Subscription>,
+    _remote_client_subscription: Option<Subscription>,
+    subscribed_remote_client_id: Option<gpui::EntityId>,
+    pending_reconnect_restart: HashSet<TerminalId>,
+    _reconnect_restart_clear_task: Option<Task<()>>,
+    restored_active_terminal_id: Option<TerminalId>,
+    restored_active_thread: Option<SerializedActiveThread>,
+    /// The terminal size saved by the previous run, until a terminal is laid out.
+    restored_terminal_bounds: Option<TerminalBounds>,
     zoomed: bool,
     pending_serialization: Option<Task<Result<()>>>,
     persist_selected_agent_task: Task<()>,
@@ -1156,6 +1192,13 @@ pub struct AgentPanel {
     is_active: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalSelectMode {
+    Always,
+    Never,
+    IfUninitialized,
+}
+
 impl AgentPanel {
     fn serialize(&mut self, cx: &mut App) {
         let Some(workspace_id) = self.workspace_id else {
@@ -1166,7 +1209,15 @@ impl AgentPanel {
         let last_created_entry_kind = self.last_created_entry_kind;
         let last_active_terminal_id = self
             .active_terminal_id()
-            .map(|terminal_id| terminal_id.to_key_string());
+            .map(|terminal_id| terminal_id.to_key_string())
+            .or_else(|| {
+                if matches!(self.base_view, BaseView::Uninitialized) {
+                    self.restored_active_terminal_id
+                        .map(|id| id.to_key_string())
+                } else {
+                    None
+                }
+            });
 
         let last_active_thread = if last_active_terminal_id.is_some() {
             None
@@ -1200,20 +1251,26 @@ impl AgentPanel {
                     if is_draft_active {
                         return None;
                     }
-                    let conversation_view = self.active_conversation_view()?;
-                    let session_id = conversation_view.read(cx).root_session_id.clone()?;
-                    let metadata = ThreadMetadataStore::try_global(cx)
-                        .and_then(|store| store.read(cx).entry_by_session(&session_id).cloned());
-                    Some(SerializedActiveThread {
-                        session_id: Some(session_id.0.to_string()),
-                        thread_id: active_thread_id,
-                        agent_type: active_thread_agent.clone(),
-                        title: metadata
-                            .as_ref()
-                            .and_then(|m| m.title.as_ref())
-                            .map(|t| t.to_string()),
-                        work_dirs: metadata.map(|m| m.folder_paths().serialize()),
-                    })
+                    if let Some(conversation_view) = self.active_conversation_view() {
+                        let session_id = conversation_view.read(cx).root_session_id.clone()?;
+                        let metadata = ThreadMetadataStore::try_global(cx).and_then(|store| {
+                            store.read(cx).entry_by_session(&session_id).cloned()
+                        });
+                        Some(SerializedActiveThread {
+                            session_id: Some(session_id.0.to_string()),
+                            thread_id: active_thread_id,
+                            agent_type: active_thread_agent.clone(),
+                            title: metadata
+                                .as_ref()
+                                .and_then(|m| m.title.as_ref())
+                                .map(|t| t.to_string()),
+                            work_dirs: metadata.map(|m| m.folder_paths().serialize()),
+                        })
+                    } else if matches!(self.base_view, BaseView::Uninitialized) {
+                        self.restored_active_thread.clone()
+                    } else {
+                        None
+                    }
                 })
         };
 
@@ -1221,6 +1278,8 @@ impl AgentPanel {
             .draft_thread
             .as_ref()
             .map(|draft| draft.read(cx).thread_id);
+
+        let terminal_bounds = self.laid_out_terminal_bounds(None, cx);
 
         let kvp = KeyValueStore::global(cx);
         self.pending_serialization = Some(cx.background_spawn(async move {
@@ -1232,6 +1291,7 @@ impl AgentPanel {
                     last_active_thread,
                     last_active_terminal_id,
                     new_draft_thread_id,
+                    terminal_bounds,
                 },
                 kvp,
             )
@@ -1268,7 +1328,10 @@ impl AgentPanel {
                 .await;
 
             let has_open_project = workspace
-                .read_with(cx, |workspace, cx| !workspace.root_paths(cx).is_empty())
+                .read_with(cx, |workspace, cx| {
+                    !workspace.root_paths(cx).is_empty()
+                        || workspace.project().read(cx).is_remote()
+                })
                 .unwrap_or(false);
             let terminal_id_to_restore = if has_open_project {
                 serialized_panel
@@ -1286,36 +1349,27 @@ impl AgentPanel {
             } else {
                 None
             };
-            let terminal_to_restore = if let Some(terminal_id) = terminal_id_to_restore {
-                match cx.update(|_window, cx| {
+
+            let terminal_store_reload = cx
+                .update(|_window, cx| {
                     TerminalThreadMetadataStore::try_global(cx).map(|store| {
                         let reload_task = store.read(cx).reload_task();
                         (store, reload_task)
                     })
-                }) {
-                    Ok(Some((store, reload_task))) => {
-                        reload_task.await;
-                        match store
-                            .read_with(cx, |store, _cx| store.entry(terminal_id).cloned())
-                        {
-                            Some(metadata) => Some(metadata),
-                            None => {
-                                log::info!(
-                                    "last active terminal is missing, skipping restoration"
-                                );
-                                None
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        log::warn!("failed to restore active terminal: metadata store missing");
-                        None
-                    }
-                    Err(err) => {
-                        log::warn!("failed to access terminal metadata store: {err}");
-                        None
-                    }
-                }
+                })
+                .ok()
+                .flatten();
+            if let Some((_, reload_task)) = terminal_store_reload {
+                reload_task.await;
+            }
+
+            let terminal_to_restore = if let Some(terminal_id) = terminal_id_to_restore {
+                cx.update(|_window, cx| {
+                    TerminalThreadMetadataStore::try_global(cx)
+                        .and_then(|store| store.read(cx).entry(terminal_id).cloned())
+                })
+                .ok()
+                .flatten()
             } else {
                 None
             };
@@ -1389,6 +1443,7 @@ impl AgentPanel {
 
                     if let Some(serialized_panel) = &serialized_panel {
                         panel.last_created_entry_kind = serialized_panel.last_created_entry_kind;
+                        panel.restored_terminal_bounds = serialized_panel.terminal_bounds;
                     } else if let Some(entry_kind) = global_last_created_entry_kind {
                         panel.last_created_entry_kind = entry_kind;
                     }
@@ -1420,6 +1475,16 @@ impl AgentPanel {
                     if let Some(agent) = initial_agent {
                         panel.selected_agent = agent;
                     }
+
+                    panel.restored_active_terminal_id =
+                        terminal_to_restore
+                            .as_ref()
+                            .map(|metadata| metadata.terminal_id);
+                    panel.restored_active_thread = thread_to_restore.as_ref().and_then(|_| {
+                        serialized_panel
+                            .as_ref()
+                            .and_then(|panel| panel.last_active_thread.clone())
+                    });
 
                     if let Some(metadata) = terminal_to_restore {
                         panel.restore_terminal_for_panel_load(
@@ -1459,7 +1524,7 @@ impl AgentPanel {
         })
     }
 
-    pub(crate) fn new(workspace: &Workspace, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let fs = workspace.app_state().fs.clone();
         let user_store = workspace.app_state().user_store.clone();
         let project = workspace.project();
@@ -1510,6 +1575,7 @@ impl AgentPanel {
                 | project::Event::WorktreePathsChanged { .. } => {
                     this.ensure_native_agent_connection(cx);
                     this.update_thread_work_dirs(cx);
+                    this.update_terminal_worktree_paths(cx);
                     this.persist_all_terminal_metadata(cx);
                     cx.notify();
                 }
@@ -1526,6 +1592,8 @@ impl AgentPanel {
             },
         );
 
+        let _observe_project = None;
+
         let _settings_subscription = cx.observe_global::<SettingsStore>(|this, cx| {
             this.cleanup_retained_threads(cx);
         });
@@ -1535,7 +1603,7 @@ impl AgentPanel {
         })
         .detach();
 
-        let panel = Self {
+        let mut panel = Self {
             workspace_id,
             base_view,
             last_created_entry_kind: AgentPanelEntryKind::Thread,
@@ -1551,7 +1619,8 @@ impl AgentPanel {
             persist_selected_agent_task: Task::ready(()),
             retained_threads: HashMap::default(),
             terminals: HashMap::default(),
-            pending_terminal_spawn: None,
+            pending_terminal_spawns: HashSet::default(),
+            closed_terminal_spawns: HashSet::default(),
             #[cfg(test)]
             test_terminal_spawn_gate: None,
             new_thread_menu_handle: PopoverMenuHandle::default(),
@@ -1559,6 +1628,14 @@ impl AgentPanel {
 
             _extension_subscription: extension_subscription,
             _project_subscription,
+            _observe_project,
+            _remote_client_subscription: None,
+            subscribed_remote_client_id: None,
+            pending_reconnect_restart: HashSet::default(),
+            _reconnect_restart_clear_task: None,
+            restored_active_terminal_id: None,
+            restored_active_thread: None,
+            restored_terminal_bounds: None,
             zoomed: false,
             pending_serialization: None,
             new_user_onboarding: onboarding,
@@ -1577,6 +1654,15 @@ impl AgentPanel {
             is_active: false,
         };
 
+        panel.update_remote_client_subscription(window, cx);
+        if panel.subscribed_remote_client_id.is_none() {
+            panel._observe_project =
+                Some(
+                    cx.observe_in(&project, window, |this, _project, window, cx| {
+                        this.update_remote_client_subscription(window, cx);
+                    }),
+                );
+        }
         panel.ensure_native_agent_connection(cx);
         panel
     }
@@ -1989,13 +2075,21 @@ impl AgentPanel {
             None,
             None,
             None,
-            true,
+            TerminalSelectMode::Always,
             true,
             true,
             source,
             window,
             cx,
         );
+    }
+
+    fn is_terminal_spawn_pending(&self, terminal_id: TerminalId) -> bool {
+        self.pending_terminal_spawns.contains(&terminal_id)
+    }
+
+    fn has_pending_terminal_spawns(&self) -> bool {
+        !self.pending_terminal_spawns.is_empty()
     }
 
     fn terminal_working_directory(
@@ -2009,7 +2103,8 @@ impl AgentPanel {
     }
 
     pub fn supports_terminal(&self, cx: &App) -> bool {
-        self.has_open_project(cx) && self.project.read(cx).supports_terminal(cx)
+        (self.has_open_project(cx) || self.project.read(cx).is_via_remote_server())
+            && self.project.read(cx).supports_terminal(cx)
     }
 
     pub fn should_create_terminal_for_new_entry(&self, cx: &App) -> bool {
@@ -2036,6 +2131,20 @@ impl AgentPanel {
         .detach();
     }
 
+    fn build_display_only_terminal(&self, cx: &mut Context<Self>) -> Entity<terminal::Terminal> {
+        let settings = TerminalSettings::get_global(cx).clone();
+        let path_style = self.project.read(cx).path_style(cx);
+        let builder = terminal::TerminalBuilder::new_display_only(
+            settings.cursor_shape,
+            settings.alternate_scroll,
+            settings.max_scroll_history_lines,
+            cx.entity_id().as_u64(),
+            cx.background_executor(),
+            path_style,
+        );
+        cx.new(|cx| builder.subscribe(cx))
+    }
+
     fn spawn_terminal(
         &mut self,
         terminal_id: TerminalId,
@@ -2043,7 +2152,7 @@ impl AgentPanel {
         custom_title: Option<SharedString>,
         initial_title: Option<SharedString>,
         created_at: Option<DateTime<Utc>>,
-        select: bool,
+        select_mode: TerminalSelectMode,
         focus: bool,
         run_init_command: bool,
         source: AgentThreadSource,
@@ -2054,33 +2163,132 @@ impl AgentPanel {
         // the terminal lands. Marking the spawn as pending stops
         // `ensure_thread_initialized` from treating a still-uninitialized panel
         // as empty and spawning a second, "initial" terminal on activation.
-        self.pending_terminal_spawn = Some(terminal_id);
+        self.pending_terminal_spawns.insert(terminal_id);
+        self.closed_terminal_spawns.remove(&terminal_id);
         let terminal_working_directory = working_directory.clone();
         let init_command = Self::terminal_init_command(run_init_command, cx);
-        let terminal_task = self.create_terminal_shell(working_directory, cx);
+        let terminal_task = self.create_terminal_shell(terminal_id, working_directory, cx);
         let workspace = self.workspace.clone();
         let workspace_id = self.workspace_id;
         let project = self.project.downgrade();
 
         cx.spawn_in(window, async move |this, cx| {
-            let terminal = match terminal_task.await {
+            let PersistentTerminal { terminal, session } = match terminal_task.await {
                 Ok(terminal) => terminal,
                 Err(error) => {
-                    log::error!("failed to spawn agent panel terminal: {error:#}");
-                    workspace
-                        .update(cx, |workspace, cx| workspace.show_error(error, cx))
-                        .log_err();
-                    this.update(cx, |this, cx| {
-                        if this.pending_terminal_spawn == Some(terminal_id) {
-                            this.pending_terminal_spawn = None;
-                            cx.notify();
+                    this.update_in(cx, |this, window, cx| {
+                        this.pending_terminal_spawns.remove(&terminal_id);
+                        if this.closed_terminal_spawns.remove(&terminal_id) {
+                            if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+                                store.update(cx, |store, cx| {
+                                    store.delete(terminal_id, cx);
+                                });
+                            }
+                            return;
                         }
+                        log::error!("failed to spawn agent panel terminal: {error:#}");
+                        let is_remote_disconnected = project.upgrade().is_some_and(|project| {
+                            is_remote_connection_disconnected(project.read(cx), cx)
+                        });
+                        if is_remote_disconnected {
+                            let project = project.clone();
+                            workspace
+                                .update(cx, |workspace, cx| {
+                                    workspace.show_toast(
+                                        workspace::Toast::new(
+                                            workspace::notifications::NotificationId::unique::<
+                                                NoRemoteConnectionToast,
+                                            >(),
+                                            "No remote connection",
+                                        )
+                                        .on_click(
+                                            "Reconnect",
+                                            move |_window, cx| {
+                                                if let Some(project) = project.upgrade() {
+                                                    reconnect_if_remote_disconnected(project, cx);
+                                                }
+                                            },
+                                        ),
+                                        cx,
+                                    );
+                                })
+                                .log_err();
+                        } else {
+                            workspace
+                                .update(cx, |workspace, cx| workspace.show_error(error, cx))
+                                .log_err();
+                        }
+
+                        let is_restore = created_at.is_some()
+                            || TerminalThreadMetadataStore::try_global(cx)
+                                .map_or(false, |store| store.read(cx).entry(terminal_id).is_some());
+
+                        if !this.terminals.contains_key(&terminal_id) {
+                            if is_restore {
+                                let terminal = this.build_display_only_terminal(cx);
+                                let terminal_view = cx.new(|cx| {
+                                    let mut view = TerminalView::new(
+                                        terminal,
+                                        workspace.clone(),
+                                        workspace_id,
+                                        project.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                    view.set_show_workspace_actions(false, cx);
+                                    view
+                                });
+                                this.insert_terminal(
+                                    terminal_id,
+                                    terminal_view,
+                                    terminal_working_directory,
+                                    custom_title,
+                                    initial_title,
+                                    created_at,
+                                    true,
+                                    select_mode,
+                                    false,
+                                    source,
+                                    window,
+                                    cx,
+                                );
+                            } else {
+                                if this.restored_active_terminal_id == Some(terminal_id) {
+                                    this.restored_active_terminal_id = None;
+                                }
+                                cx.notify();
+                                return;
+                            }
+                        }
+                        if let Some(terminal) = this.terminals.get_mut(&terminal_id) {
+                            terminal.exited = true;
+                        }
+                        cx.emit(AgentPanelEvent::EntryChanged);
+                        cx.notify();
                     })
                     .log_err();
                     return anyhow::Ok(());
                 }
             };
+            // A reattached session already ran the init command when it started,
+            // and its program would receive the command as input.
+            let init_command = init_command.filter(|_| session != PersistentSession::Reattached);
             this.update_in(cx, |this, window, cx| {
+                this.pending_terminal_spawns.remove(&terminal_id);
+                if this.closed_terminal_spawns.remove(&terminal_id) {
+                    this.project
+                        .update(cx, |project, cx| {
+                            project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
+                        })
+                        .detach_and_log_err(cx);
+                    if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+                        store.update(cx, |store, cx| {
+                            store.delete(terminal_id, cx);
+                        });
+                    }
+                    return;
+                }
+
                 let terminal_for_init_command = terminal.clone();
                 let terminal_view = cx.new(|cx| {
                     let mut view =
@@ -2095,7 +2303,8 @@ impl AgentPanel {
                     custom_title,
                     initial_title,
                     created_at,
-                    select,
+                    true,
+                    select_mode,
                     focus,
                     source,
                     window,
@@ -2110,23 +2319,66 @@ impl AgentPanel {
 
     fn create_terminal_shell(
         &mut self,
+        terminal_id: TerminalId,
         working_directory: Option<PathBuf>,
         cx: &mut Context<Self>,
-    ) -> Task<Result<Entity<terminal::Terminal>>> {
+    ) -> Task<Result<PersistentTerminal>> {
         // A real shell ties the spawn's timing to the host, so a test that needs
-        // to observe the panel mid-spawn installs a gate and gets a display-only
-        // terminal when it releases it.
+        // to observe the panel mid-spawn installs a gate to pause before calling
+        // project.create_persistent_terminal_shell.
         #[cfg(test)]
         if let Some(gate) = self.test_terminal_spawn_gate.take() {
-            return cx.spawn(async move |this, cx| {
+            let session_name = terminal_id.session_name();
+            let bounds = self.laid_out_terminal_bounds(Some(terminal_id), cx);
+            let project = self.project.clone();
+            return cx.spawn(async move |_this, cx| {
                 gate.await.ok();
-                this.update(cx, |this, cx| this.build_display_only_terminal(cx))
+                let shell_task = cx.update(|cx| {
+                    project.update(cx, |project, cx| {
+                        project.create_persistent_terminal_shell(
+                            working_directory,
+                            session_name,
+                            bounds,
+                            cx,
+                        )
+                    })
+                });
+                shell_task.await
             });
         }
 
+        let session_name = terminal_id.session_name();
+        let bounds = self.laid_out_terminal_bounds(Some(terminal_id), cx);
         self.project.update(cx, |project, cx| {
-            project.create_terminal_shell(working_directory, cx)
+            project.create_persistent_terminal_shell(working_directory, session_name, bounds, cx)
         })
+    }
+
+    /// The size of a terminal in this panel that has been laid out, or else the
+    /// size saved by the previous run. Terminals share the panel's area, and the
+    /// active one has the current size.
+    fn laid_out_terminal_bounds(
+        &self,
+        terminal_id: Option<TerminalId>,
+        cx: &App,
+    ) -> Option<TerminalBounds> {
+        let placeholder = TerminalBounds::default();
+        self.active_terminal_id()
+            .into_iter()
+            .chain(terminal_id)
+            .filter_map(|terminal_id| self.terminals.get(&terminal_id))
+            .chain(self.terminals.values())
+            .map(|terminal| {
+                terminal
+                    .view
+                    .read(cx)
+                    .terminal()
+                    .read(cx)
+                    .last_content
+                    .terminal_bounds
+            })
+            .find(|bounds| *bounds != placeholder)
+            .or(self.restored_terminal_bounds)
     }
 
     fn terminal_init_command(run_init_command: bool, cx: &App) -> Option<String> {
@@ -2200,7 +2452,8 @@ impl AgentPanel {
         custom_title: Option<SharedString>,
         initial_title: Option<SharedString>,
         created_at: Option<DateTime<Utc>>,
-        select: bool,
+        persistent: bool,
+        select_mode: TerminalSelectMode,
         focus: bool,
         source: AgentThreadSource,
         window: &mut Window,
@@ -2234,10 +2487,29 @@ impl AgentPanel {
                     this.report_terminal_program(terminal_id, source, cx);
                 }
                 TerminalEvent::Bell => this.mark_terminal_notification(terminal_id, window, cx),
-                TerminalEvent::CloseTerminal => {
-                    this.request_close_terminal_from_terminal_event(terminal_id, cx);
+                // The thread outlives its process: an SSH drop, sleep or `exit`
+                // leaves it to be restarted, and only closing it removes it.
+                TerminalEvent::ProcessExited => {
+                    let is_persistent = this
+                        .terminals
+                        .get(&terminal_id)
+                        .is_some_and(|terminal| terminal.persistent);
+                    if is_persistent {
+                        if let Some(terminal) = this.terminals.get_mut(&terminal_id) {
+                            terminal.exited = true;
+                        }
+                        if this.pending_reconnect_restart.remove(&terminal_id) {
+                            let is_active = this.active_terminal_id() == Some(terminal_id);
+                            this.restart_terminal(terminal_id, is_active, false, window, cx);
+                        }
+                        cx.emit(AgentPanelEvent::EntryChanged);
+                        cx.notify();
+                    } else {
+                        this.close_terminal_internal(terminal_id, false, window, cx);
+                    }
                 }
-                TerminalEvent::BlinkChanged(_)
+                TerminalEvent::CloseTerminal
+                | TerminalEvent::BlinkChanged(_)
                 | TerminalEvent::OutputReplaced
                 | TerminalEvent::SelectionsChanged
                 | TerminalEvent::NewNavigationTarget(_)
@@ -2257,22 +2529,32 @@ impl AgentPanel {
             last_known_terminal_title,
             last_observed_program: None,
             working_directory,
+            persistent,
             created_at: created_at.unwrap_or_else(Utc::now),
             has_notification: false,
+            exited: false,
             search_bar: None,
             notification_windows: Vec::new(),
             notification_subscriptions: Vec::new(),
             _subscriptions: vec![view_subscription, terminal_subscription],
         };
-        if self.pending_terminal_spawn == Some(terminal_id) {
-            self.pending_terminal_spawn = None;
+        self.pending_terminal_spawns.remove(&terminal_id);
+        if self.restored_active_terminal_id == Some(terminal_id) {
+            self.restored_active_terminal_id = None;
         }
         terminal.refresh_metadata(cx);
         terminal.report_started_terminal_program(terminal_id, source, cx);
         self.terminals.insert(terminal_id, terminal);
         self.persist_terminal_metadata(terminal_id, cx);
         self.emit_terminal_thread_started(terminal_id, source, cx);
-        if select {
+        let should_select = match select_mode {
+            TerminalSelectMode::Always => true,
+            TerminalSelectMode::Never => false,
+            TerminalSelectMode::IfUninitialized => {
+                matches!(self.base_view, BaseView::Uninitialized)
+            }
+        };
+        if should_select {
             self.set_base_view(BaseView::Terminal { terminal_id }, focus, window, cx);
         }
         cx.emit(AgentPanelEvent::EntryChanged);
@@ -2327,14 +2609,26 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         let was_active = self.active_terminal_id() == Some(terminal_id);
+        let should_kill_persistent_session = self
+            .terminals
+            .get(&terminal_id)
+            .map_or(true, |terminal| terminal.persistent);
 
-        if self.pending_terminal_spawn == Some(terminal_id) {
-            self.pending_terminal_spawn = None;
+        if self.pending_terminal_spawns.remove(&terminal_id) {
+            self.closed_terminal_spawns.insert(terminal_id);
         }
+        self.pending_reconnect_restart.remove(&terminal_id);
         self.dismiss_terminal_notifications(terminal_id, cx);
-        if self.terminals.remove(&terminal_id).is_none() {
-            return;
+        // Closing is the only way a terminal thread goes away, so its session
+        // goes with it, also when the thread was not spawned in this run.
+        if should_kill_persistent_session {
+            self.project
+                .update(cx, |project, cx| {
+                    project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
+                })
+                .detach_and_log_err(cx);
         }
+        self.terminals.remove(&terminal_id);
         if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
             store.update(cx, |store, cx| {
                 store.delete(terminal_id, cx);
@@ -2352,14 +2646,62 @@ impl AgentPanel {
         cx.notify();
     }
 
-    fn request_close_terminal_from_terminal_event(
+    fn terminal_has_exited(&self, terminal_id: TerminalId, cx: &App) -> bool {
+        self.terminals.get(&terminal_id).is_some_and(|terminal| {
+            terminal.exited || terminal.view.read(cx).terminal().read(cx).has_exited()
+        })
+    }
+
+    /// Starts a finished terminal thread again under the same id: it reattaches
+    /// to its shpool session, or starts a new shell in its last directory.
+    fn restart_terminal(
         &mut self,
         terminal_id: TerminalId,
+        select: bool,
+        focus: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(metadata) = self.terminal_metadata(terminal_id, cx) {
-            cx.emit(AgentPanelEvent::TerminalCloseRequested { metadata });
-        }
+        let Some(metadata) = self.terminal_metadata(terminal_id, cx) else {
+            return;
+        };
+        self.restore_terminal_with_select(
+            metadata,
+            select,
+            focus,
+            AgentThreadSource::AgentPanel,
+            None,
+            window,
+            cx,
+        );
+    }
+
+    fn render_exited_terminal_bar(
+        &self,
+        terminal_id: TerminalId,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .w_full()
+            .px(DynamicSpacing::Base08.rems(cx))
+            .py(DynamicSpacing::Base04.rems(cx))
+            .gap_2()
+            .justify_between()
+            .border_t_1()
+            .border_color(cx.theme().colors().border_variant)
+            .bg(cx.theme().colors().toolbar_background)
+            .child(
+                Label::new("Process exited. Press Enter to restart.")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                Button::new("restart-terminal", "Restart")
+                    .label_size(LabelSize::Small)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.restart_terminal(terminal_id, true, true, window, cx);
+                    })),
+            )
     }
 
     fn emit_terminal_thread_started(
@@ -2399,6 +2741,79 @@ impl AgentPanel {
         }
     }
 
+    fn update_terminal_worktree_paths(&self, cx: &mut Context<Self>) {
+        let worktree_paths = self.project.read(cx).worktree_paths(cx);
+        if !worktree_paths.is_empty() {
+            if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+                store.update(cx, |store, cx| {
+                    store.update_worktree_paths_for_project(
+                        &worktree_paths,
+                        self.project.read(cx).remote_connection_options(cx).as_ref(),
+                        cx,
+                    );
+                });
+            }
+        }
+    }
+
+    fn update_remote_client_subscription(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let remote_client = self.project.read(cx).remote_client();
+        let current_id = remote_client.as_ref().map(|client| client.entity_id());
+        if current_id == self.subscribed_remote_client_id {
+            return;
+        }
+        self.subscribed_remote_client_id = current_id;
+        if let Some(remote_client) = remote_client {
+            self._observe_project = None;
+            self._remote_client_subscription = Some(cx.subscribe_in(
+                &remote_client,
+                window,
+                |this, _remote_client, event, window, cx| match event {
+                    RemoteClientEvent::Reconnected => {
+                        this.handle_remote_reconnected(window, cx);
+                    }
+                    RemoteClientEvent::Disconnected { .. } => {
+                        this.handle_remote_disconnected(cx);
+                    }
+                },
+            ));
+        } else {
+            self._remote_client_subscription = None;
+        }
+    }
+
+    fn handle_remote_disconnected(&mut self, _cx: &mut Context<Self>) {
+        self._reconnect_restart_clear_task = None;
+        self.pending_reconnect_restart.clear();
+    }
+
+    fn handle_remote_reconnected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let active_terminal = self.active_terminal_id();
+        let terminal_ids: Vec<TerminalId> = self
+            .terminals
+            .iter()
+            .filter_map(|(terminal_id, terminal)| terminal.persistent.then_some(*terminal_id))
+            .collect();
+        for terminal_id in terminal_ids {
+            let is_active = active_terminal == Some(terminal_id);
+            if self.terminal_has_exited(terminal_id, cx) {
+                self.pending_reconnect_restart.remove(&terminal_id);
+                self.restart_terminal(terminal_id, is_active, false, window, cx);
+            } else {
+                self.pending_reconnect_restart.insert(terminal_id);
+            }
+        }
+        self._reconnect_restart_clear_task = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_secs(10))
+                .await;
+            this.update(cx, |this, _cx| {
+                this.pending_reconnect_restart.clear();
+            })
+            .ok();
+        }));
+    }
+
     fn persist_all_terminal_metadata(&self, cx: &mut Context<Self>) {
         let terminal_ids = self.terminals.keys().copied().collect::<Vec<_>>();
         for terminal_id in terminal_ids {
@@ -2424,16 +2839,49 @@ impl AgentPanel {
         cx: &App,
     ) -> Option<TerminalThreadMetadata> {
         let terminal = self.terminals.get(&terminal_id)?;
+        if !terminal.persistent {
+            return None;
+        }
+        self.terminal_metadata_for_display(terminal_id, cx)
+    }
+
+    fn terminal_metadata_for_display(
+        &self,
+        terminal_id: TerminalId,
+        cx: &App,
+    ) -> Option<TerminalThreadMetadata> {
+        let terminal = self.terminals.get(&terminal_id)?;
         let project = self.project.read(cx);
+        let mut worktree_paths = project.worktree_paths(cx);
+        let mut remote_connection = project.remote_connection_options(cx);
+        if worktree_paths.is_empty() {
+            if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+                if let Some(existing) = store.read(cx).entry(terminal_id) {
+                    if !existing.worktree_paths.is_empty() {
+                        worktree_paths = existing.worktree_paths.clone();
+                    }
+                    if remote_connection.is_none() && existing.remote_connection.is_some() {
+                        remote_connection = existing.remote_connection.clone();
+                    }
+                }
+            }
+        }
         Some(TerminalThreadMetadata {
             terminal_id,
             title: terminal.terminal_title(cx),
             custom_title: terminal.custom_title(cx),
             created_at: terminal.created_at,
-            worktree_paths: project.worktree_paths(cx),
-            remote_connection: project.remote_connection_options(cx),
+            worktree_paths,
+            remote_connection,
             working_directory: terminal.working_directory.clone(),
         })
+    }
+
+    pub fn live_terminal_metadata(&self, cx: &App) -> Vec<TerminalThreadMetadata> {
+        self.terminals
+            .keys()
+            .filter_map(|terminal_id| self.terminal_metadata_for_display(*terminal_id, cx))
+            .collect()
     }
 
     pub fn restore_terminal(
@@ -2445,12 +2893,68 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.has_terminal(metadata.terminal_id) {
-            self.activate_terminal(metadata.terminal_id, focus, window, cx);
+        self.restore_terminal_with_select(metadata, true, focus, source, workspace, window, cx);
+    }
+
+    pub fn restore_terminal_with_select(
+        &mut self,
+        metadata: TerminalThreadMetadata,
+        select: bool,
+        focus: bool,
+        source: AgentThreadSource,
+        workspace: Option<&Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let select_mode = if select {
+            TerminalSelectMode::Always
+        } else {
+            TerminalSelectMode::Never
+        };
+        self.restore_terminal_with_select_mode(
+            metadata,
+            select_mode,
+            focus,
+            source,
+            workspace,
+            window,
+            cx,
+        );
+    }
+
+    fn restore_terminal_with_select_mode(
+        &mut self,
+        metadata: TerminalThreadMetadata,
+        select_mode: TerminalSelectMode,
+        focus: bool,
+        source: AgentThreadSource,
+        workspace: Option<&Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_terminal_spawn_pending(metadata.terminal_id) {
+            return;
+        }
+        if self.has_terminal(metadata.terminal_id)
+            && !self.terminal_has_exited(metadata.terminal_id, cx)
+        {
+            let should_select = match select_mode {
+                TerminalSelectMode::Always => true,
+                TerminalSelectMode::Never => false,
+                TerminalSelectMode::IfUninitialized => {
+                    matches!(self.base_view, BaseView::Uninitialized)
+                }
+            };
+            if should_select {
+                self.activate_terminal(metadata.terminal_id, focus, window, cx);
+            }
             return;
         }
 
         if !self.supports_terminal(cx) {
+            if self.restored_active_terminal_id == Some(metadata.terminal_id) {
+                self.restored_active_terminal_id = None;
+            }
             return;
         }
 
@@ -2462,7 +2966,7 @@ impl AgentPanel {
             metadata.custom_title.clone(),
             initial_title,
             Some(metadata.created_at),
-            true,
+            select_mode,
             focus,
             true,
             source,
@@ -2480,12 +2984,15 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        #[cfg(test)]
-        self.restore_test_terminal(metadata, focus, source, workspace, window, cx)
-            .log_err();
-
-        #[cfg(not(test))]
-        self.restore_terminal(metadata, focus, source, workspace, window, cx);
+        self.restore_terminal_with_select_mode(
+            metadata,
+            TerminalSelectMode::IfUninitialized,
+            focus,
+            source,
+            workspace,
+            window,
+            cx,
+        );
     }
 
     fn terminal_restore_working_directory(
@@ -2797,9 +3304,7 @@ impl AgentPanel {
                 AgentPanelEvent::ActiveViewChanged | AgentPanelEvent::ActiveViewFocused => {
                     this.dismiss_terminal_pop_up_if_visible(terminal_id, &pop_up_weak, window, cx);
                 }
-                AgentPanelEvent::EntryChanged
-                | AgentPanelEvent::TerminalCloseRequested { .. }
-                | AgentPanelEvent::ThreadInteracted { .. } => {}
+                AgentPanelEvent::EntryChanged | AgentPanelEvent::ThreadInteracted { .. } => {}
             }
         });
 
@@ -4347,6 +4852,10 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         let old_view = std::mem::replace(&mut self.base_view, new_view);
+        if !matches!(self.base_view, BaseView::Uninitialized) {
+            self.restored_active_terminal_id = None;
+            self.restored_active_thread = None;
+        }
         self.retain_running_thread(old_view, cx);
 
         if let BaseView::AgentThread { conversation_view } = &self.base_view {
@@ -5031,7 +5540,6 @@ pub enum AgentPanelEvent {
     ActiveViewChanged,
     ActiveViewFocused,
     EntryChanged,
-    TerminalCloseRequested { metadata: TerminalThreadMetadata },
     ThreadInteracted { thread_id: ThreadId },
 }
 
@@ -5169,15 +5677,25 @@ impl Panel for AgentPanel {
 impl AgentPanel {
     fn ensure_thread_initialized(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.base_view, BaseView::Uninitialized) {
-            if self.pending_terminal_spawn.is_some() {
+            if self.has_pending_terminal_spawns() {
+                return;
+            }
+            if let Some(terminal_id) = self.restored_active_terminal_id {
+                if !self.has_terminal(terminal_id) {
+                    self.restored_active_terminal_id = None;
+                } else {
+                    return;
+                }
+            }
+            if self.restored_active_thread.is_some() {
                 return;
             }
             if self.should_create_terminal_for_new_entry(cx) {
                 let terminal_id = TerminalId::new();
-                self.pending_terminal_spawn = Some(terminal_id);
+                self.pending_terminal_spawns.insert(terminal_id);
                 cx.defer_in(window, move |this, window, cx| {
                     if matches!(this.base_view, BaseView::Uninitialized)
-                        && this.pending_terminal_spawn == Some(terminal_id)
+                        && this.pending_terminal_spawns.contains(&terminal_id)
                         && this.should_create_terminal_for_new_entry(cx)
                     {
                         this.create_initial_terminal(
@@ -5186,8 +5704,8 @@ impl AgentPanel {
                             window,
                             cx,
                         );
-                    } else if this.pending_terminal_spawn == Some(terminal_id) {
-                        this.pending_terminal_spawn = None;
+                    } else {
+                        this.pending_terminal_spawns.remove(&terminal_id);
                     }
                 });
             } else {
@@ -5204,9 +5722,7 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         if !self.supports_terminal(cx) {
-            if self.pending_terminal_spawn == Some(terminal_id) {
-                self.pending_terminal_spawn = None;
-            }
+            self.pending_terminal_spawns.remove(&terminal_id);
             return;
         }
         let working_directory = self.terminal_working_directory(None, cx);
@@ -5228,7 +5744,7 @@ impl AgentPanel {
             None,
             None,
             None,
-            true,
+            TerminalSelectMode::Always,
             false,
             true,
             source,
@@ -5260,10 +5776,8 @@ impl AgentPanel {
             cx,
         ) {
             log::error!("failed to spawn test agent panel terminal: {error:#}");
-            if self.pending_terminal_spawn == Some(terminal_id) {
-                self.pending_terminal_spawn = None;
-                cx.notify();
-            }
+            self.pending_terminal_spawns.remove(&terminal_id);
+            cx.notify();
         }
     }
 
@@ -6582,6 +7096,16 @@ impl AgentPanel {
         });
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn handle_test_dragged_terminal_tab(
+        &mut self,
+        tab: &DraggedTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.handle_dragged_terminal_tab(tab, window, cx)
+    }
+
     fn handle_dragged_terminal_tab(
         &mut self,
         tab: &DraggedTab,
@@ -6608,6 +7132,11 @@ impl AgentPanel {
         {
             self.activate_terminal(terminal_id, true, window, cx);
             return true;
+        }
+
+        let terminal_has_exited = terminal_view.read(cx).terminal().read(cx).has_exited();
+        if terminal_has_exited {
+            return false;
         }
 
         let (working_directory, custom_title, initial_title) = {
@@ -6638,7 +7167,8 @@ impl AgentPanel {
             custom_title,
             initial_title,
             None,
-            true,
+            false,
+            TerminalSelectMode::Always,
             true,
             AgentThreadSource::AgentPanel,
             window,
@@ -6770,6 +7300,9 @@ impl Render for AgentPanel {
                         .active_terminal_id()
                         .and_then(|terminal_id| self.terminals.get(&terminal_id))
                         .and_then(|terminal| terminal.search_bar.clone());
+                    let exited_terminal_id = self
+                        .active_terminal_id()
+                        .filter(|terminal_id| self.terminal_has_exited(*terminal_id, cx));
                     let terminal_content = v_flex()
                         .size_full()
                         .when_some(search_bar, |this, search_bar| {
@@ -6789,7 +7322,20 @@ impl Render for AgentPanel {
                                 )
                             })
                         })
-                        .child(terminal_view.clone());
+                        .child(terminal_view.clone())
+                        .when_some(exited_terminal_id, |this, terminal_id| {
+                            this.capture_key_down(cx.listener(
+                                move |this, event: &KeyDownEvent, window, cx| {
+                                    if event.keystroke.key == "enter"
+                                        && !event.keystroke.modifiers.modified()
+                                    {
+                                        cx.stop_propagation();
+                                        this.restart_terminal(terminal_id, true, true, window, cx);
+                                    }
+                                },
+                            ))
+                            .child(self.render_exited_terminal_bar(terminal_id, cx))
+                        });
 
                     parent
                         .child(terminal_content)
@@ -7005,21 +7551,6 @@ impl AgentPanel {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    fn build_display_only_terminal(&self, cx: &mut Context<Self>) -> Entity<terminal::Terminal> {
-        let settings = TerminalSettings::get_global(cx).clone();
-        let path_style = self.project.read(cx).path_style(cx);
-        let builder = terminal::TerminalBuilder::new_display_only(
-            settings.cursor_shape,
-            settings.alternate_scroll,
-            settings.max_scroll_history_lines,
-            cx.entity_id().as_u64(),
-            cx.background_executor(),
-            path_style,
-        );
-        cx.new(|cx| builder.subscribe(cx))
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
     fn insert_display_only_terminal(
         &mut self,
         terminal_id: TerminalId,
@@ -7056,7 +7587,12 @@ impl AgentPanel {
             custom_title,
             initial_title,
             created_at,
-            select,
+            true,
+            if select {
+                TerminalSelectMode::Always
+            } else {
+                TerminalSelectMode::Never
+            },
             focus,
             source,
             window,
@@ -7081,7 +7617,7 @@ impl AgentPanel {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn emit_test_terminal_close(&mut self, terminal_id: TerminalId, cx: &mut Context<Self>) {
+    pub fn emit_test_terminal_exit(&mut self, terminal_id: TerminalId, cx: &mut Context<Self>) {
         let Some(terminal_entity) = self
             .terminals
             .get(&terminal_id)
@@ -7090,6 +7626,7 @@ impl AgentPanel {
             return;
         };
         terminal_entity.update(cx, |_terminal, cx| {
+            cx.emit(TerminalEvent::ProcessExited);
             cx.emit(TerminalEvent::CloseTerminal);
         });
     }
@@ -7110,9 +7647,12 @@ mod tests {
     use anyhow::{Result, anyhow};
     use feature_flags::FeatureFlagAppExt;
     use fs::FakeFs;
-    use gpui::{App, Modifiers, TestAppContext, UpdateGlobal, VisualTestContext, px, size};
+    use gpui::{
+        App, Keystroke, Modifiers, TestAppContext, UpdateGlobal, VisualTestContext, px, size,
+    };
     use parking_lot::Mutex;
     use project::{Project, WorktreePaths};
+    use remote::{ConnectionState, RemoteClient};
     use settings::{SettingsStore, WorkingDirectory};
     use std::any::Any;
 
@@ -7701,6 +8241,7 @@ mod tests {
         fs.insert_tree("/project", json!({ "file.txt": "" })).await;
         cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
         let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        project.update(cx, |p, _| p.enable_fake_shpool(&[]));
 
         let multi_workspace =
             cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
@@ -7849,7 +8390,7 @@ mod tests {
 
         panel.update_in(&mut cx, |panel, window, cx| {
             panel.last_created_entry_kind = AgentPanelEntryKind::Terminal;
-            panel.pending_terminal_spawn = Some(TerminalId::new());
+            panel.pending_terminal_spawns.insert(TerminalId::new());
             panel.set_active(true, window, cx);
         });
         for _ in 0..4 {
@@ -7897,6 +8438,8 @@ mod tests {
     #[gpui::test]
     async fn test_new_terminal_prevents_initial_terminal_creation(cx: &mut TestAppContext) {
         let (panel, mut cx) = setup_panel(cx).await;
+        let project = panel.read_with(&cx, |panel, _| panel.project.clone());
+        project.update(&mut cx, |p, _| p.enable_fake_shpool(&[]));
 
         let (terminal_landed, spawn_gate) = futures::channel::oneshot::channel::<()>();
 
@@ -7908,7 +8451,7 @@ mod tests {
             panel.test_terminal_spawn_gate = Some(spawn_gate);
             panel.new_terminal(None, AgentThreadSource::AgentPanel, window, cx);
             assert!(
-                panel.pending_terminal_spawn.is_some(),
+                panel.has_pending_terminal_spawns(),
                 "a new terminal spawn should be marked pending until it lands"
             );
             panel.set_active(true, window, cx);
@@ -7921,7 +8464,7 @@ mod tests {
                 "no terminal should land while the spawn is held"
             );
             assert!(
-                panel.pending_terminal_spawn.is_some(),
+                panel.has_pending_terminal_spawns(),
                 "the in-flight spawn should still be pending after activation"
             );
         });
@@ -7944,7 +8487,7 @@ mod tests {
                 "the terminal that was spawned should be the active one"
             );
             assert!(
-                panel.pending_terminal_spawn.is_none(),
+                !panel.has_pending_terminal_spawns(),
                 "the pending marker should be cleared once the terminal lands"
             );
         });
@@ -8056,7 +8599,7 @@ mod tests {
                 None,
                 None,
                 None,
-                true,
+                TerminalSelectMode::Always,
                 true,
                 true,
                 AgentThreadSource::AgentPanel,
@@ -8183,7 +8726,9 @@ mod tests {
         cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
 
         let project_a = Project::test(fs.clone(), [Path::new("/project-a")], cx).await;
+        project_a.update(cx, |p, _| p.enable_fake_shpool(&[]));
         let project_b = Project::test(fs.clone(), [Path::new("/project-b")], cx).await;
+        project_b.update(cx, |p, _| p.enable_fake_shpool(&[]));
         let multi_workspace =
             cx.add_window(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
         let multi_workspace_entity = multi_workspace.root(cx).unwrap();
@@ -10168,6 +10713,262 @@ mod tests {
                 "custom title should be preserved"
             );
         });
+    }
+
+    #[gpui::test]
+    async fn test_dragged_terminal_tab_is_non_persistent_and_closes_on_process_exit(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut visual_context) = setup_panel(cx).await;
+        visual_context.update(|_window, cx| {
+            cx.update_flags(true, vec!["agent-panel-terminal".to_string()]);
+            TerminalThreadMetadataStore::init_global(cx);
+        });
+        visual_context.run_until_parked();
+
+        let project = panel.read_with(&visual_context, |panel, _cx| panel.project.clone());
+        let fake_shpool = project.update(&mut visual_context, |project, _cx| {
+            project.enable_fake_shpool(&[])
+        });
+        let workspace = panel
+            .read_with(&visual_context, |panel, _cx| panel.workspace.upgrade())
+            .expect("workspace should still be open");
+        let (source_pane, terminal_view, dragged_tab) =
+            workspace.update_in(&mut visual_context, |workspace, window, cx| {
+                let source_pane = workspace.active_pane().clone();
+                let project = workspace.project().clone();
+                let settings = TerminalSettings::get_global(cx).clone();
+                let path_style = project.read(cx).path_style(cx);
+                let terminal = cx.new(|cx| {
+                    terminal::TerminalBuilder::new_display_only(
+                        settings.cursor_shape,
+                        settings.alternate_scroll,
+                        settings.max_scroll_history_lines,
+                        0,
+                        cx.background_executor(),
+                        path_style,
+                    )
+                    .subscribe(cx)
+                });
+                let terminal_view = cx.new(|cx| {
+                    let mut view = TerminalView::new(
+                        terminal,
+                        workspace.weak_handle(),
+                        workspace.database_id(),
+                        project.downgrade(),
+                        window,
+                        cx,
+                    );
+                    view.set_custom_title(Some("Moved Terminal".to_string()), cx);
+                    view
+                });
+                source_pane.update(cx, |pane, cx| {
+                    pane.add_item(
+                        Box::new(terminal_view.clone()),
+                        true,
+                        false,
+                        None,
+                        window,
+                        cx,
+                    );
+                });
+                let dragged_tab = DraggedTab {
+                    pane: source_pane.clone(),
+                    item: Box::new(terminal_view.clone()),
+                    ix: 0,
+                    detail: 0,
+                    is_active: true,
+                };
+                (source_pane, terminal_view, dragged_tab)
+            });
+        let terminal = terminal_view.read_with(&visual_context, |terminal_view, _cx| {
+            terminal_view.terminal().clone()
+        });
+
+        let handled = panel.update_in(&mut visual_context, |panel, window, cx| {
+            panel.handle_dragged_terminal_tab(&dragged_tab, window, cx)
+        });
+        assert!(
+            handled,
+            "terminal tab drop should be handled by the agent panel"
+        );
+        visual_context.run_until_parked();
+        source_pane.read_with(&visual_context, |pane, _cx| {
+            assert_eq!(pane.items_len(), 0);
+        });
+
+        let terminal_id = panel
+            .read_with(&visual_context, |panel, _cx| panel.active_terminal_id())
+            .expect("moved terminal should become active");
+        let metadata_store =
+            visual_context.update(|_window, cx| TerminalThreadMetadataStore::global(cx));
+        assert!(
+            metadata_store.read_with(&visual_context, |store, _cx| store
+                .entry(terminal_id)
+                .is_none()),
+            "dragged terminal metadata should not be persisted on drop"
+        );
+        assert!(fake_shpool.attach_history().is_empty());
+        assert!(fake_shpool.kill_history().is_empty());
+
+        terminal_view.update(&mut visual_context, |terminal_view, cx| {
+            terminal_view.set_custom_title(Some("Refreshed Terminal".to_string()), cx);
+        });
+        panel.update(&mut visual_context, |panel, cx| {
+            panel.refresh_terminal_metadata(terminal_id, cx);
+        });
+        assert!(
+            metadata_store.read_with(&visual_context, |store, _cx| store
+                .entry(terminal_id)
+                .is_none()),
+            "metadata refresh should not persist a dragged terminal"
+        );
+
+        panel.update(&mut visual_context, |panel, cx| {
+            panel.persist_all_terminal_metadata(cx);
+        });
+        visual_context.run_until_parked();
+        assert!(
+            metadata_store.read_with(&visual_context, |store, _cx| store
+                .entry(terminal_id)
+                .is_none()),
+            "persist-all should not persist a dragged terminal"
+        );
+        assert!(fake_shpool.attach_history().is_empty());
+
+        panel.update_in(&mut visual_context, |panel, window, cx| {
+            panel.handle_remote_reconnected(window, cx);
+        });
+        assert!(
+            panel.read_with(&visual_context, |panel, _cx| {
+                !panel.pending_reconnect_restart.contains(&terminal_id)
+            }),
+            "reconnect should not schedule a dragged terminal for restart"
+        );
+
+        terminal.update(&mut visual_context, |_terminal, cx| {
+            cx.emit(TerminalEvent::ProcessExited);
+        });
+        visual_context.run_until_parked();
+        assert!(
+            panel.read_with(&visual_context, |panel, _cx| !panel
+                .terminals
+                .contains_key(&terminal_id)),
+            "process exit should close a dragged terminal"
+        );
+
+        panel.update_in(&mut visual_context, |panel, window, cx| {
+            panel.handle_remote_reconnected(window, cx);
+        });
+        visual_context.run_until_parked();
+        assert!(
+            !panel.read_with(&visual_context, |panel, _cx| panel
+                .has_terminal(terminal_id)),
+            "reconnect should not resurrect a dragged terminal"
+        );
+        assert!(fake_shpool.attach_history().is_empty());
+        assert!(fake_shpool.kill_history().is_empty());
+    }
+
+    #[gpui::test]
+    async fn test_dragging_already_exited_terminal_tab_is_rejected(cx: &mut TestAppContext) {
+        let (panel, mut visual_context) = setup_panel(cx).await;
+        visual_context.update(|_window, cx| {
+            cx.update_flags(true, vec!["agent-panel-terminal".to_string()]);
+            TerminalThreadMetadataStore::init_global(cx);
+        });
+        visual_context.run_until_parked();
+
+        let project = panel.read_with(&visual_context, |panel, _cx| panel.project.clone());
+        let fake_shpool = project.update(&mut visual_context, |project, _cx| {
+            project.enable_fake_shpool(&[])
+        });
+        let terminal = visual_context.update(|_window, cx| {
+            let terminal_settings = TerminalSettings::get_global(cx).clone();
+            let path_style = project.read(cx).path_style(cx);
+            cx.new(|cx| {
+                terminal::TerminalBuilder::new_display_only(
+                    terminal_settings.cursor_shape,
+                    terminal_settings.alternate_scroll,
+                    terminal_settings.max_scroll_history_lines,
+                    0,
+                    cx.background_executor(),
+                    path_style,
+                )
+                .subscribe(cx)
+            })
+        });
+        terminal.update(&mut visual_context, |terminal, cx| {
+            terminal.simulate_process_exit(cx);
+        });
+        visual_context.run_until_parked();
+        assert!(terminal.read_with(&visual_context, |terminal, _cx| terminal.has_exited()));
+
+        let workspace = panel
+            .read_with(&visual_context, |panel, _cx| panel.workspace.upgrade())
+            .expect("workspace should remain open");
+        let (source_pane, terminal_view, dragged_tab) =
+            workspace.update_in(&mut visual_context, |workspace, window, cx| {
+                let source_pane = workspace.active_pane().clone();
+                let terminal_view = cx.new(|cx| {
+                    terminal_view::TerminalView::new(
+                        terminal.clone(),
+                        workspace.weak_handle(),
+                        workspace.database_id(),
+                        project.downgrade(),
+                        window,
+                        cx,
+                    )
+                });
+                source_pane.update(cx, |pane, cx| {
+                    pane.add_item(
+                        Box::new(terminal_view.clone()),
+                        true,
+                        false,
+                        None,
+                        window,
+                        cx,
+                    );
+                });
+                let dragged_tab = DraggedTab {
+                    pane: source_pane.clone(),
+                    item: Box::new(terminal_view.clone()),
+                    ix: 0,
+                    detail: 0,
+                    is_active: true,
+                };
+                (source_pane, terminal_view, dragged_tab)
+            });
+
+        let handled = panel.update_in(&mut visual_context, |panel, window, cx| {
+            panel.handle_test_dragged_terminal_tab(&dragged_tab, window, cx)
+        });
+        assert!(!handled, "a finished terminal tab must not be moved");
+        source_pane.read_with(&visual_context, |pane, _cx| {
+            assert_eq!(pane.items_len(), 1);
+            let source_terminal_view = pane
+                .item_for_index(0)
+                .and_then(|item| item.downcast::<TerminalView>());
+            assert_eq!(
+                source_terminal_view.map(|view| view.entity_id()),
+                Some(terminal_view.entity_id())
+            );
+        });
+        panel.read_with(&visual_context, |panel, _cx| {
+            assert!(
+                panel
+                    .terminals
+                    .values()
+                    .all(|agent_terminal| agent_terminal.view.entity_id()
+                        != terminal_view.entity_id())
+            );
+        });
+        visual_context.update(|_window, cx| {
+            let store = TerminalThreadMetadataStore::global(cx);
+            assert!(store.read(cx).entries().next().is_none());
+        });
+        assert!(fake_shpool.attach_history().is_empty());
+        assert!(fake_shpool.kill_history().is_empty());
     }
 
     #[gpui::test]
@@ -14909,6 +15710,2317 @@ mod tests {
                 panel.selected_agent,
                 Agent::Stub,
                 "selected_agent should be restored to the original after an agent override"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_terminal_binds_to_same_shpool_session_after_panel_reload(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            TerminalThreadMetadataStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/project", json!({ "file.txt": "" })).await;
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        let fake = project.update(cx, |p, _| p.enable_fake_shpool(&[]));
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        workspace.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+        });
+
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            cx.new(|cx| AgentPanel::new(workspace, window, cx))
+        });
+
+        let terminal_id = TerminalId::new();
+        let metadata = TerminalThreadMetadata {
+            terminal_id,
+            title: "Dev Terminal".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from(
+                "/project",
+            )])),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(metadata.clone(), cx);
+            });
+        });
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.restore_terminal(
+                metadata,
+                true,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let expected_session = terminal_id.session_name();
+        assert_eq!(
+            fake.attach_history(),
+            vec![expected_session.clone()],
+            "first spawn must attach to zed-<terminal_id>"
+        );
+        assert!(fake.has_session(&expected_session));
+
+        // Serialize panel state
+        panel.update(cx, |panel, cx| panel.serialize(cx));
+        cx.run_until_parked();
+
+        // Reload panel into a new panel instance using AgentPanel::load
+        let async_cx = cx.update(|window, cx| window.to_async(cx));
+        let loaded = AgentPanel::load(workspace.downgrade(), async_cx)
+            .await
+            .expect("panel reload should succeed");
+        for _ in 0..8 {
+            cx.run_until_parked();
+        }
+
+        assert_eq!(
+            fake.attach_history(),
+            vec![expected_session.clone(), expected_session.clone()],
+            "reload must reattach to the exact same shpool session name"
+        );
+        loaded.read_with(cx, |panel, _cx| {
+            assert_eq!(panel.active_terminal_id(), Some(terminal_id));
+        });
+
+        // Close terminal: should kill persistent session and remove from store
+        loaded.update_in(cx, |panel, window, cx| {
+            panel.close_terminal(terminal_id, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            fake.kill_history(),
+            vec![expected_session.clone()],
+            "closing terminal must kill the shpool session"
+        );
+        assert!(!fake.has_session(&expected_session));
+        cx.update(|_, cx| {
+            assert!(
+                TerminalThreadMetadataStore::global(cx)
+                    .read(cx)
+                    .entry(terminal_id)
+                    .is_none(),
+                "metadata must be deleted after terminal close"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_remote_workspace_restores_active_terminal_with_empty_root_paths(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            TerminalThreadMetadataStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let params = cx.update(workspace::AppState::test);
+
+        let (opts, server_client, connect_guard) = RemoteClient::fake_server(cx, server_cx);
+        let ping_handler = server_cx.new(|_| ());
+        server_client.add_request_handler::<client::proto::Ping, _, _, _>(
+            ping_handler.downgrade(),
+            |_entity, _envelope, _cx| async { Ok(client::proto::Ack {}) },
+        );
+        drop(connect_guard);
+        let remote_client = RemoteClient::connect_mock(opts, cx).await;
+
+        let project = cx.update(|cx| {
+            Project::remote(
+                remote_client,
+                params.client.clone(),
+                params.node_runtime.clone(),
+                params.user_store.clone(),
+                params.languages.clone(),
+                params.fs.clone(),
+                false,
+                cx,
+            )
+        });
+        let fake = project.update(cx, |p, _| p.enable_fake_shpool(&[]));
+        assert!(project.read_with(cx, |p, _| p.is_via_remote_server()));
+        assert!(project.read_with(cx, |p, _| p.is_remote()));
+        assert!(project.read_with(cx, |p, cx| p.supports_terminal(cx)));
+
+        let remote_multi_workspace = cx.add_window({
+            let params = params.clone();
+            let project = project.clone();
+            move |window, cx| {
+                let workspace =
+                    cx.new(|cx| Workspace::new(None, project.clone(), params.clone(), window, cx));
+                MultiWorkspace::new(workspace, window, cx)
+            }
+        });
+        let workspace = remote_multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        workspace.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+        });
+
+        let terminal_id = TerminalId::new();
+        let metadata = TerminalThreadMetadata {
+            terminal_id,
+            title: "Remote Terminal".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::default(),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(metadata, cx);
+            });
+        });
+
+        let workspace_id = workspace.read_with(cx, |w, _| w.database_id()).unwrap();
+        let kvp = cx.update(|cx| KeyValueStore::global(cx));
+        let serialized = SerializedAgentPanel {
+            last_active_terminal_id: Some(terminal_id.to_key_string()),
+            ..SerializedAgentPanel::default()
+        };
+        cx.background_spawn(async move {
+            save_serialized_panel(workspace_id, serialized, kvp)
+                .await
+                .unwrap();
+        })
+        .await;
+
+        let cx = &mut VisualTestContext::from_window(remote_multi_workspace.into(), cx);
+        let async_cx = cx.update(|window, cx| window.to_async(cx));
+        let loaded = AgentPanel::load(workspace.downgrade(), async_cx)
+            .await
+            .expect("panel reload should succeed on remote project with empty root paths");
+        for _ in 0..8 {
+            cx.run_until_parked();
+        }
+
+        loaded.read_with(cx, |panel, _cx| {
+            assert!(
+                panel.has_terminal(terminal_id),
+                "terminal must be restored and present in panel on remote workspace"
+            );
+            assert_eq!(
+                panel.active_terminal_id(),
+                Some(terminal_id),
+                "restored active terminal must be active even if remote workspace root_paths is empty"
+            );
+        });
+        assert_eq!(
+            fake.attach_history().len(),
+            1,
+            "restoring terminal on remote workspace must attach to fake shpool session"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_replaced_remote_workspace_reloads_active_thread_to_existing_shpool_session(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            TerminalThreadMetadataStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let params = cx.update(workspace::AppState::test);
+        let (old_options, old_server_session, old_connection_guard) =
+            RemoteClient::fake_server(cx, server_cx);
+        let old_ping_handler = server_cx.new(|_| ());
+        old_server_session.add_request_handler::<client::proto::Ping, _, _, _>(
+            old_ping_handler.downgrade(),
+            |_, _, _| async { Ok(client::proto::Ack {}) },
+        );
+        drop(old_connection_guard);
+        let old_remote_client = RemoteClient::connect_mock(old_options, cx).await;
+        let old_project = cx.update(|cx| {
+            Project::remote(
+                old_remote_client.clone(),
+                params.client.clone(),
+                params.node_runtime.clone(),
+                params.user_store.clone(),
+                params.languages.clone(),
+                params.fs.clone(),
+                false,
+                cx,
+            )
+        });
+
+        let (new_options, new_server_session, new_connection_guard) =
+            RemoteClient::fake_server(cx, server_cx);
+        let new_ping_handler = server_cx.new(|_| ());
+        new_server_session.add_request_handler::<client::proto::Ping, _, _, _>(
+            new_ping_handler.downgrade(),
+            |_, _, _| async { Ok(client::proto::Ack {}) },
+        );
+        drop(new_connection_guard);
+        let new_remote_client = RemoteClient::connect_mock(new_options, cx).await;
+        let new_project = cx.update(|cx| {
+            Project::remote(
+                new_remote_client,
+                params.client.clone(),
+                params.node_runtime.clone(),
+                params.user_store.clone(),
+                params.languages.clone(),
+                params.fs.clone(),
+                false,
+                cx,
+            )
+        });
+
+        let terminal_id = TerminalId::new();
+        let session_name = terminal_id.session_name();
+        let fake = old_project.update(cx, |project, _| project.enable_fake_shpool(&[]));
+        fake.add_session(session_name.clone());
+        new_project.update(cx, |project, _| project.set_fake_shpool(fake.clone()));
+        let multi_workspace = cx.add_window({
+            let params = params.clone();
+            let project = old_project.clone();
+            move |window, cx| {
+                let workspace =
+                    cx.new(|cx| Workspace::new(None, project.clone(), params.clone(), window, cx));
+                MultiWorkspace::new(workspace, window, cx)
+            }
+        });
+        let old_workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .expect("old workspace should be present");
+        old_workspace.update(cx, |workspace, _| {
+            workspace.set_random_database_id();
+        });
+        let workspace_id = old_workspace
+            .read_with(cx, |workspace, _| workspace.database_id())
+            .expect("old workspace database id should be set");
+        cx.update(|cx| {
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.terminal_init_command = Some("printf 'terminal init\\n'".to_string());
+            AgentSettings::override_global(settings, cx);
+        });
+
+        let metadata = TerminalThreadMetadata {
+            terminal_id,
+            title: "Remote agent thread".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::default(),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx)
+                .update(cx, |store, cx| store.save(metadata.clone(), cx));
+        });
+
+        let visual_cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let old_panel = old_workspace.update_in(visual_cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+        old_panel.update_in(visual_cx, |panel, window, cx| {
+            panel.restore_terminal(
+                metadata.clone(),
+                true,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        visual_cx.run_until_parked();
+        old_panel.read_with(visual_cx, |panel, _| {
+            assert!(panel.has_terminal(terminal_id));
+            assert_eq!(panel.active_terminal_id(), Some(terminal_id));
+        });
+        assert_eq!(fake.attach_history(), vec![session_name.clone()]);
+        old_panel.update(visual_cx, |panel, cx| panel.serialize(cx));
+        visual_cx.run_until_parked();
+        old_remote_client.update(visual_cx, |remote_client, cx| {
+            remote_client.force_server_not_running(cx);
+        });
+        visual_cx.run_until_parked();
+
+        let replacement_workspace = multi_workspace
+            .update(visual_cx, |multi_workspace, window, cx| {
+                let workspace = cx.new(|cx| {
+                    Workspace::new(
+                        Some(workspace_id),
+                        new_project.clone(),
+                        params.clone(),
+                        window,
+                        cx,
+                    )
+                });
+                multi_workspace.activate(workspace.clone(), None, window, cx);
+                workspace
+            })
+            .expect("replacement remote workspace should activate");
+        assert_eq!(
+            replacement_workspace.read_with(visual_cx, |workspace, _| workspace.database_id()),
+            Some(workspace_id)
+        );
+
+        let async_cx = visual_cx.update(|window, cx| window.to_async(cx));
+        let new_panel = AgentPanel::load(replacement_workspace.downgrade(), async_cx)
+            .await
+            .expect("new agent panel should load saved terminal metadata");
+        for _ in 0..8 {
+            visual_cx.run_until_parked();
+        }
+
+        new_panel.read_with(visual_cx, |panel, _| {
+            assert!(panel.has_terminal(terminal_id));
+            assert_eq!(panel.active_terminal_id(), Some(terminal_id));
+        });
+        assert_eq!(
+            fake.attach_history(),
+            vec![session_name.clone(), session_name.clone()],
+            "replacement panel should reattach to the existing zed-<id> session"
+        );
+        assert_eq!(fake.sessions().len(), 1);
+        assert!(fake.has_session(&terminal_id.session_name()));
+        let terminal = new_panel.read_with(visual_cx, |panel, cx| {
+            panel
+                .terminals
+                .get(&terminal_id)
+                .expect("restored terminal should be present")
+                .view
+                .read(cx)
+                .terminal()
+                .clone()
+        });
+        let init_command_input =
+            terminal.update(visual_cx, |terminal, _| terminal.take_input_log());
+        assert!(
+            init_command_input.is_empty(),
+            "reattaching the restored session must not run its terminal init command again"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_early_serialize_does_not_wipe_restore_target(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            TerminalThreadMetadataStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs.clone(), [], cx).await;
+        project.update(cx, |p, _| p.mark_as_collab_for_testing());
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        workspace.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+        });
+
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            cx.new(|cx| AgentPanel::new(workspace, window, cx))
+        });
+
+        let terminal_id = TerminalId::new();
+        panel.update(cx, |panel, _cx| {
+            panel.restored_active_terminal_id = Some(terminal_id);
+            assert!(matches!(panel.base_view, BaseView::Uninitialized));
+        });
+
+        panel.update(cx, |panel, cx| panel.serialize(cx));
+        cx.run_until_parked();
+
+        let workspace_id = workspace.read_with(cx, |w, _| w.database_id()).unwrap();
+        let kvp = cx.update(|_window, cx| KeyValueStore::global(cx));
+        let serialized: SerializedAgentPanel = cx
+            .background_spawn(async move { read_serialized_panel(workspace_id, &kvp) })
+            .await
+            .expect("should read serialized panel");
+        assert_eq!(
+            serialized.last_active_terminal_id,
+            Some(terminal_id.to_key_string()),
+            "early serialize must preserve restored_active_terminal_id while base_view is Uninitialized"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_ensure_thread_initialized_does_not_replace_restorable_terminal(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            TerminalThreadMetadataStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs.clone(), [], cx).await;
+        project.update(cx, |p, _| p.mark_as_collab_for_testing());
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        workspace.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+        });
+
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            cx.new(|cx| AgentPanel::new(workspace, window, cx))
+        });
+
+        let terminal_id = TerminalId::new();
+        panel.update(cx, |panel, _cx| {
+            panel.restored_active_terminal_id = Some(terminal_id);
+            assert!(matches!(panel.base_view, BaseView::Uninitialized));
+        });
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.ensure_thread_initialized(window, cx);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _cx| {
+            assert!(
+                !panel.has_pending_terminal_spawns(),
+                "ensure_thread_initialized must not spawn a new terminal when restored_active_terminal_id is present"
+            );
+            assert!(
+                matches!(panel.base_view, BaseView::Uninitialized),
+                "base_view must remain Uninitialized awaiting the restore target"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_close_unloaded_terminal_deletes_metadata_and_kills_session(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            TerminalThreadMetadataStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        let fake = project.update(cx, |p, _| p.enable_fake_shpool(&[]));
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            cx.new(|cx| AgentPanel::new(workspace, window, cx))
+        });
+
+        let terminal_id = TerminalId::new();
+        let metadata = TerminalThreadMetadata {
+            terminal_id,
+            title: "Unloaded".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from(
+                "/project",
+            )])),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(metadata, cx);
+            });
+        });
+        fake.add_session(&terminal_id.session_name());
+
+        // Close terminal when it is NOT loaded in panel.terminals
+        panel.update_in(cx, |panel, window, cx| {
+            assert!(!panel.has_terminal(terminal_id));
+            panel.close_terminal(terminal_id, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            fake.kill_history(),
+            vec![terminal_id.session_name()],
+            "closing unloaded terminal must kill session"
+        );
+        cx.update(|_, cx| {
+            assert!(
+                TerminalThreadMetadataStore::global(cx)
+                    .read(cx)
+                    .entry(terminal_id)
+                    .is_none(),
+                "closing unloaded terminal must delete from metadata store"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_process_exited_keeps_thread_and_enter_restart(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            TerminalThreadMetadataStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        let fake = project.update(cx, |p, _| p.enable_fake_shpool(&[]));
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.focus_panel::<AgentPanel>(window, cx);
+            panel
+        });
+
+        let terminal_id = TerminalId::new();
+        let metadata = TerminalThreadMetadata {
+            terminal_id,
+            title: "Process Test".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from(
+                "/project",
+            )])),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(metadata.clone(), cx);
+            });
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            panel.restore_terminal(
+                metadata,
+                true,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        assert_eq!(fake.attach_history().len(), 1);
+
+        // Emit ProcessExited: terminal thread must NOT be deleted
+        panel.update(cx, |panel, cx| {
+            panel.emit_test_terminal_exit(terminal_id, cx);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _cx| {
+            assert!(
+                panel.has_terminal(terminal_id),
+                "terminal thread must be kept alive in panel when process exits"
+            );
+        });
+        cx.update(|_, cx| {
+            assert!(
+                TerminalThreadMetadataStore::global(cx)
+                    .read(cx)
+                    .entry(terminal_id)
+                    .is_some(),
+                "terminal thread must remain in store when process exits"
+            );
+        });
+
+        // Keystroke with modifier (Shift+Enter) must be ignored:
+        let window_handle = cx.window_handle();
+        cx.dispatch_keystroke(window_handle, Keystroke::parse("shift-enter").unwrap());
+        cx.run_until_parked();
+        assert_eq!(
+            fake.attach_history().len(),
+            1,
+            "Shift+Enter must not restart exited terminal"
+        );
+
+        // Bare Enter restarts terminal via production KeyDown handler
+        cx.dispatch_keystroke(window_handle, Keystroke::parse("enter").unwrap());
+        cx.run_until_parked();
+
+        assert_eq!(
+            fake.attach_history().len(),
+            2,
+            "bare Enter key down must restart terminal and reattach to shpool session"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_remote_reconnect_restarts_all_exited_terminals(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            TerminalThreadMetadataStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let params = cx.update(workspace::AppState::test);
+        let (opts, server_client, connect_guard) = RemoteClient::fake_server(cx, server_cx);
+        let ping_handler = server_cx.new(|_| ());
+        server_client.add_request_handler::<client::proto::Ping, _, _, _>(
+            ping_handler.downgrade(),
+            |_entity, _envelope, _cx| async { Ok(client::proto::Ack {}) },
+        );
+        drop(connect_guard);
+        let remote_client = RemoteClient::connect_mock(opts, cx).await;
+
+        let project = cx.update(|cx| {
+            Project::remote(
+                remote_client.clone(),
+                params.client.clone(),
+                params.node_runtime.clone(),
+                params.user_store.clone(),
+                params.languages.clone(),
+                params.fs.clone(),
+                false,
+                cx,
+            )
+        });
+        let fake = project.update(cx, |p, _| p.enable_fake_shpool(&[]));
+
+        let remote_multi_workspace = cx.add_window({
+            let params = params.clone();
+            let project = project.clone();
+            move |window, cx| {
+                let workspace =
+                    cx.new(|cx| Workspace::new(None, project.clone(), params.clone(), window, cx));
+                MultiWorkspace::new(workspace, window, cx)
+            }
+        });
+        let workspace = remote_multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(remote_multi_workspace.into(), cx);
+
+        // AgentPanel::new runs the production update_remote_client_subscription!
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.focus_panel::<AgentPanel>(window, cx);
+            panel
+        });
+
+        let t1 = TerminalId::new();
+        let t2 = TerminalId::new();
+        for &id in &[t1, t2] {
+            let metadata = TerminalThreadMetadata {
+                terminal_id: id,
+                title: "Remote Terminal".into(),
+                custom_title: None,
+                created_at: Utc::now(),
+                worktree_paths: WorktreePaths::default(),
+                remote_connection: None,
+                working_directory: None,
+            };
+            cx.update(|_, cx| {
+                TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                    store.save(metadata.clone(), cx);
+                });
+            });
+            panel.update_in(cx, |panel, window, cx| {
+                panel.restore_terminal(
+                    metadata,
+                    true,
+                    AgentThreadSource::AgentPanel,
+                    None,
+                    window,
+                    cx,
+                );
+            });
+        }
+        cx.run_until_parked();
+
+        assert_eq!(fake.attach_history().len(), 2);
+
+        // Ordering 1: ProcessExited on t1 occurs BEFORE Reconnected event arrives
+        panel.update(cx, |panel, cx| {
+            panel.emit_test_terminal_exit(t1, cx);
+        });
+        cx.run_until_parked();
+        assert!(panel.read_with(cx, |p, cx| p.terminal_has_exited(t1, cx)));
+
+        // Fire Reconnected event on project's remote client (triggers production update_remote_client_subscription!)
+        let project_remote_client = project.read_with(cx, |p, _| p.remote_client().unwrap());
+        project_remote_client.update(cx, |_client, cx| {
+            cx.emit(RemoteClientEvent::Reconnected);
+        });
+        cx.run_until_parked();
+
+        // t1 (exited before Reconnected) is restarted immediately:
+        assert_eq!(
+            fake.attach_history().len(),
+            3,
+            "reconnect must restart terminal that exited before Reconnected event"
+        );
+
+        // Ordering 2: Reconnected event was received while t2 was still alive (t2 added to pending_reconnect_restart).
+        // Now t2 exits afterwards:
+        panel.update(cx, |panel, cx| {
+            panel.emit_test_terminal_exit(t2, cx);
+        });
+        cx.run_until_parked();
+
+        // t2 restarts upon exit because it had a pending restart:
+        assert_eq!(
+            fake.attach_history().len(),
+            4,
+            "reconnect must restart terminal that exits after Reconnected event"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_restore_multiple_terminal_threads_after_panel_reload(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            TerminalThreadMetadataStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        let fake = project.update(cx, |p, _| p.enable_fake_shpool(&[]));
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        workspace.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+        });
+
+        let t1 = TerminalId::new();
+        let t2 = TerminalId::new();
+        let m1 = TerminalThreadMetadata {
+            terminal_id: t1,
+            title: "Terminal 1".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from(
+                "/project",
+            )])),
+            remote_connection: None,
+            working_directory: None,
+        };
+        let m2 = TerminalThreadMetadata {
+            terminal_id: t2,
+            title: "Terminal 2".into(),
+            custom_title: None,
+            created_at: Utc::now() + chrono::Duration::seconds(1),
+            worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from(
+                "/project",
+            )])),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(m1.clone(), cx);
+                store.save(m2.clone(), cx);
+            });
+        });
+
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.restore_terminal(
+                m1.clone(),
+                true,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+            panel.restore_terminal_with_select(
+                m2.clone(),
+                false,
+                false,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        assert_eq!(fake.attach_history().len(), 2);
+        assert_eq!(fake.attach_history()[0], t1.session_name());
+        assert_eq!(fake.attach_history()[1], t2.session_name());
+
+        panel.read_with(cx, |panel, _cx| {
+            assert_eq!(panel.active_terminal_id(), Some(t1));
+        });
+
+        panel.update(cx, |panel, cx| panel.serialize(cx));
+        cx.run_until_parked();
+
+        let async_cx = cx.update(|window, cx| window.to_async(cx));
+        let loaded_panel = AgentPanel::load(workspace.downgrade(), async_cx)
+            .await
+            .expect("panel reload should succeed");
+        for _ in 0..8 {
+            cx.run_until_parked();
+        }
+
+        loaded_panel.read_with(cx, |panel, _cx| {
+            assert!(
+                panel.has_terminal(t1),
+                "active terminal t1 must be restored on panel load"
+            );
+            assert_eq!(
+                panel.active_terminal_id(),
+                Some(t1),
+                "t1 must remain active after reload"
+            );
+        });
+
+        cx.update(|_, cx| {
+            assert!(
+                TerminalThreadMetadataStore::global(cx)
+                    .read(cx)
+                    .entry(t2)
+                    .is_some(),
+                "inactive terminal t2 must be retained in metadata store"
+            );
+        });
+
+        loaded_panel.update_in(cx, |panel, window, cx| {
+            panel.restore_terminal(
+                m2.clone(),
+                true,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        loaded_panel.read_with(cx, |panel, _cx| {
+            assert!(panel.has_terminal(t2), "t2 must be spawned upon activation");
+            assert_eq!(
+                panel.active_terminal_id(),
+                Some(t2),
+                "t2 must become active upon activation"
+            );
+        });
+
+        assert_eq!(
+            fake.attach_history(),
+            vec![
+                t1.session_name(),
+                t2.session_name(),
+                t1.session_name(),
+                t2.session_name(),
+            ],
+            "both terminals must rebind to their own existing shpool sessions after panel reload"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_panel_load_missing_metadata_does_not_get_stuck_uninitialized(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            TerminalThreadMetadataStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        project.update(cx, |p, _| p.enable_fake_shpool(&[]));
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        workspace.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+        });
+
+        let workspace_id = workspace.read_with(cx, |w, _| w.database_id()).unwrap();
+        let kvp = cx.update(|cx| KeyValueStore::global(cx));
+        let missing_terminal_id = TerminalId::new();
+        let serialized = SerializedAgentPanel {
+            last_active_terminal_id: Some(missing_terminal_id.to_key_string()),
+            ..SerializedAgentPanel::default()
+        };
+        cx.background_spawn(async move {
+            save_serialized_panel(workspace_id, serialized, kvp)
+                .await
+                .unwrap();
+        })
+        .await;
+
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let async_cx = cx.update(|window, cx| window.to_async(cx));
+        let loaded = AgentPanel::load(workspace.downgrade(), async_cx)
+            .await
+            .expect("panel reload should succeed even with missing metadata");
+        for _ in 0..8 {
+            cx.run_until_parked();
+        }
+
+        loaded.update_in(cx, |panel, window, cx| {
+            panel.ensure_thread_initialized(window, cx);
+        });
+        cx.run_until_parked();
+
+        loaded.read_with(cx, |panel, _cx| {
+            assert!(
+                !matches!(panel.base_view, BaseView::Uninitialized),
+                "panel must not remain stuck Uninitialized when restored metadata is missing"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_remote_reconnect_does_not_steal_active_thread_or_clobber_serialize(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            TerminalThreadMetadataStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        let _fake = project.update(cx, |p, _| p.enable_fake_shpool(&[]));
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        workspace.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+        });
+
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+
+        let t1 = TerminalId::new();
+        let t2 = TerminalId::new();
+        let m1 = TerminalThreadMetadata {
+            terminal_id: t1,
+            title: "Terminal 1".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from(
+                "/project",
+            )])),
+            remote_connection: None,
+            working_directory: None,
+        };
+        let m2 = TerminalThreadMetadata {
+            terminal_id: t2,
+            title: "Terminal 2".into(),
+            custom_title: None,
+            created_at: Utc::now() + chrono::Duration::seconds(1),
+            worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from(
+                "/project",
+            )])),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|_window, cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(m1.clone(), cx);
+                store.save(m2.clone(), cx);
+            });
+        });
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.restore_terminal_with_select(
+                m1,
+                false,
+                false,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+            panel.restore_terminal_with_select(
+                m2,
+                false,
+                false,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        // Enforce 100% determinism independent of HashMap iteration order:
+        // Query the key iteration order that handle_remote_reconnected will follow.
+        // We set active_id to order[0] and background_id to order[1].
+        // In handle_remote_reconnected, active_id is processed first and background_id second.
+        // If the regression occurs where background terminals pass select=true (Mutation MC),
+        // background_id will overwrite active_id, causing the assertion to FAIL 100% of the time!
+        let order: Vec<TerminalId> =
+            panel.read_with(cx, |panel, _| panel.terminals.keys().copied().collect());
+        let active_id = order[0];
+        let background_id = order[1];
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.activate_terminal(active_id, false, window, cx);
+        });
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.active_terminal_id()),
+            Some(active_id)
+        );
+
+        // Both terminals exit
+        panel.update(cx, |panel, cx| {
+            panel.emit_test_terminal_exit(active_id, cx);
+            panel.emit_test_terminal_exit(background_id, cx);
+        });
+        cx.run_until_parked();
+
+        // Reconnect restarts both terminals:
+        // active_id was active -> stays active. background_id was inactive -> must not steal active view!
+        panel.update_in(cx, |panel, window, cx| {
+            panel.handle_remote_reconnected(window, cx);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _cx| {
+            assert_eq!(
+                panel.active_terminal_id(),
+                Some(active_id),
+                "reconnect must not allow background terminal to steal the active view"
+            );
+        });
+
+        // Serialization must record active_id as active terminal, not background_id
+        panel.update(cx, |panel, cx| panel.serialize(cx));
+        cx.run_until_parked();
+
+        let workspace_id = workspace.read_with(cx, |w, _| w.database_id()).unwrap();
+        let kvp = cx.update(|_window, cx| KeyValueStore::global(cx));
+        let loaded = read_serialized_panel(workspace_id, &kvp).unwrap();
+        assert_eq!(
+            loaded.last_active_terminal_id,
+            Some(active_id.to_key_string()),
+            "serialize must persist active terminal, not background terminal"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_remote_reconnect_does_not_steal_focus_from_editor(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::init_global(cx);
+        });
+        let workspace = panel.read_with(&cx, |p, _| {
+            p.workspace.upgrade().expect("workspace should be present")
+        });
+        let project = panel.read_with(&cx, |p, _| p.project.clone());
+        let _fake = project.update(&mut cx, |p, _| p.enable_fake_shpool(&[]));
+
+        // Add panel to workspace dock properly
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+        });
+
+        // Open an editor in the center pane and focus it
+        workspace
+            .update_in(&mut cx, |workspace, window, cx| {
+                workspace.open_paths(
+                    vec![PathBuf::from("/project/file.txt")],
+                    workspace::OpenOptions::default(),
+                    None,
+                    window,
+                    cx,
+                )
+            })
+            .await;
+        cx.run_until_parked();
+
+        let editor = workspace.update(&mut cx, |workspace, cx| {
+            workspace
+                .active_item(cx)
+                .and_then(|item| item.act_as::<editor::Editor>(cx))
+                .expect("opened file should be an editor")
+        });
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.focus_handle(cx).focus(window, cx);
+        });
+        cx.run_until_parked();
+
+        // Positive assert: editor is focused
+        cx.update(|window, cx| {
+            assert!(
+                editor.read(cx).focus_handle(cx).is_focused(window),
+                "editor must be focused initially"
+            );
+        });
+
+        // Create active terminal t1
+        let t1 = TerminalId::new();
+        let metadata = TerminalThreadMetadata {
+            terminal_id: t1,
+            title: "T1".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::default(),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx)
+                .update(cx, |s, cx| s.save(metadata.clone(), cx));
+        });
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.restore_terminal_with_select(
+                metadata,
+                true,
+                false,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        // Re-focus editor
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.focus_handle(cx).focus(window, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(
+                editor.read(cx).focus_handle(cx).is_focused(window),
+                "editor must remain focused after restoring background terminal"
+            );
+        });
+
+        // t1 exits
+        panel.update(&mut cx, |p, cx| p.emit_test_terminal_exit(t1, cx));
+        cx.run_until_parked();
+
+        // Automatic reconnect restart
+        panel.update_in(&mut cx, |p, window, cx| {
+            p.handle_remote_reconnected(window, cx);
+        });
+        cx.run_until_parked();
+
+        // Editor must NOT lose focus to the panel / restarted terminal!
+        cx.update(|window, cx| {
+            assert!(
+                editor.read(cx).focus_handle(cx).is_focused(window),
+                "automatic reconnect restart must not steal focus from editor"
+            );
+            let terminal_focused = panel.read_with(cx, |p, _| {
+                p.terminals
+                    .get(&t1)
+                    .expect("terminal t1 should exist")
+                    .view
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            });
+            assert!(!terminal_focused, "restarted terminal must not have focus");
+        });
+    }
+
+    #[gpui::test]
+    async fn test_close_during_pending_spawn_cancels_and_kills_session(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::init_global(cx);
+        });
+        let project = panel.read_with(&cx, |p, _| p.project.clone());
+        let fake = project.update(&mut cx, |p, _| p.enable_fake_shpool(&[]));
+
+        let (release_tx, spawn_gate) = futures::channel::oneshot::channel::<()>();
+        let terminal_id = TerminalId::new();
+        let metadata = TerminalThreadMetadata {
+            terminal_id,
+            title: "Terminal".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::default(),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx)
+                .update(cx, |s, cx| s.save(metadata.clone(), cx));
+        });
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.test_terminal_spawn_gate = Some(spawn_gate);
+            panel.restore_terminal(
+                metadata.clone(),
+                true,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        assert!(panel.read_with(&cx, |p, _| p.is_terminal_spawn_pending(terminal_id)));
+
+        // User clicks × while spawn is in flight:
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.close_terminal(terminal_id, window, cx);
+        });
+
+        // Close-time kill occurred
+        assert_eq!(
+            fake.kill_history().len(),
+            1,
+            "close_terminal must kill session at close time"
+        );
+
+        // Re-seed metadata in store to verify tombstone gate-path deletion
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx)
+                .update(cx, |s, cx| s.save(metadata.clone(), cx));
+        });
+
+        // Release the gate so spawn_terminal finishes and lands on tombstone
+        release_tx
+            .send(())
+            .expect("releasing spawn gate should succeed");
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, cx| {
+            assert!(
+                !panel.has_terminal(terminal_id),
+                "terminal closed during spawn must not land in panel"
+            );
+            assert!(
+                TerminalThreadMetadataStore::global(cx)
+                    .read(cx)
+                    .entry(terminal_id)
+                    .is_none(),
+                "tombstone must delete metadata"
+            );
+        });
+
+        // Gate-path kill must have destroyed the session created by create_persistent_terminal_shell
+        assert!(
+            !fake.has_session(&terminal_id.session_name()),
+            "session created by in-flight attach must be killed on tombstone landing"
+        );
+        assert_eq!(
+            fake.kill_history().len(),
+            2,
+            "kill must be invoked twice: at close and when in-flight spawn lands"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_close_during_pending_spawn_error_branch_cleans_state_and_preserves_open_errors(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        cx.update(|_, cx| TerminalThreadMetadataStore::init_global(cx));
+        cx.run_until_parked();
+
+        let project = panel.read_with(&cx, |panel, _cx| panel.project.clone());
+        let fake_shpool = project.update(&mut cx, |project, _cx| project.enable_fake_shpool(&[]));
+        fake_shpool.state.lock().probe_error = Some("injected shpool probe failure".to_string());
+        let workspace = panel
+            .read_with(&cx, |panel, _cx| panel.workspace.upgrade())
+            .expect("workspace should remain open");
+        let original_notification_ids =
+            workspace.read_with(&cx, |workspace, _cx| workspace.notification_ids());
+
+        let terminal_id = TerminalId::new();
+        let metadata = TerminalThreadMetadata {
+            terminal_id,
+            title: "Pending terminal".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::default(),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx)
+                .update(cx, |store, cx| store.save(metadata.clone(), cx));
+        });
+        cx.run_until_parked();
+
+        let (release_spawn, spawn_gate) = futures::channel::oneshot::channel::<()>();
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.test_terminal_spawn_gate = Some(spawn_gate);
+            panel.restore_terminal(
+                metadata.clone(),
+                true,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(panel.read_with(&cx, |panel, _cx| panel.has_pending_terminal_spawns()));
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.close_terminal(terminal_id, window, cx);
+        });
+        assert!(!panel.read_with(&cx, |panel, _cx| panel.has_pending_terminal_spawns()));
+        assert!(panel.read_with(&cx, |panel, _cx| {
+            panel.closed_terminal_spawns.contains(&terminal_id)
+        }));
+        assert_eq!(fake_shpool.kill_history(), vec![terminal_id.session_name()]);
+
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx)
+                .update(cx, |store, cx| store.save(metadata.clone(), cx));
+        });
+        cx.run_until_parked();
+        release_spawn
+            .send(())
+            .expect("releasing the gated spawn should succeed");
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, cx| {
+            assert!(!panel.has_terminal(terminal_id));
+            assert!(!panel.has_pending_terminal_spawns());
+            assert!(!panel.closed_terminal_spawns.contains(&terminal_id));
+            let store = TerminalThreadMetadataStore::global(cx);
+            let store = store.read(cx);
+            assert!(store.entry(terminal_id).is_none());
+            assert!(!store.has_deleted_terminal_id(terminal_id));
+        });
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, _cx| workspace.notification_ids()),
+            original_notification_ids,
+            "a closed spawn error should not add an error notification"
+        );
+        assert!(fake_shpool.attach_history().is_empty());
+        assert!(fake_shpool.sessions().is_empty());
+        assert_eq!(fake_shpool.kill_history(), vec![terminal_id.session_name()]);
+
+        let open_terminal_id = TerminalId::new();
+        let open_terminal_metadata = TerminalThreadMetadata {
+            terminal_id: open_terminal_id,
+            title: "Open terminal".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::default(),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(open_terminal_metadata.clone(), cx);
+            });
+        });
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.restore_terminal(
+                open_terminal_metadata,
+                true,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(
+            workspace.read_with(&cx, |workspace, _cx| workspace.notification_ids().len())
+                > original_notification_ids.len(),
+            "a non-closed spawn error should remain visible"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_late_restore_does_not_override_user_selection(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::init_global(cx);
+        });
+        let project = panel.read_with(&cx, |p, _| p.project.clone());
+        let _fake = project.update(&mut cx, |p, _| p.enable_fake_shpool(&[]));
+
+        let (release_tx, spawn_gate) = futures::channel::oneshot::channel::<()>();
+
+        let t1 = TerminalId::new();
+        let m1 = TerminalThreadMetadata {
+            terminal_id: t1,
+            title: "T1".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::default(),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |s, cx| s.save(m1.clone(), cx));
+        });
+
+        // Startup restore begins for T1 (held by gate)
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.test_terminal_spawn_gate = Some(spawn_gate);
+            panel.restore_terminal_for_panel_load(
+                m1,
+                false,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        assert!(panel.read_with(&cx, |p, _| p.is_terminal_spawn_pending(t1)));
+
+        // User navigates to a new terminal T2 while T1 is in flight
+        let t2 = TerminalId::new();
+        let m2 = TerminalThreadMetadata {
+            terminal_id: t2,
+            title: "T2".into(),
+            custom_title: None,
+            created_at: Utc::now() + chrono::Duration::seconds(1),
+            worktree_paths: WorktreePaths::default(),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |s, cx| s.save(m2.clone(), cx));
+        });
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.restore_terminal_with_select(
+                m2,
+                true,
+                false,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            panel.read_with(&cx, |p, _| p.active_terminal_id()),
+            Some(t2)
+        );
+
+        // Release T1's startup restore
+        release_tx.send(()).unwrap();
+        cx.run_until_parked();
+
+        // T1 has landed, but active terminal MUST STILL be T2!
+        assert!(panel.read_with(&cx, |p, _| p.has_terminal(t1)));
+        assert_eq!(
+            panel.read_with(&cx, |p, _| p.active_terminal_id()),
+            Some(t2),
+            "late startup restore landing must not override user's active choice"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_concurrent_terminal_spawns_do_not_race_ensure_thread_initialized(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::init_global(cx);
+        });
+        let project = panel.read_with(&cx, |p, _| p.project.clone());
+        let _fake = project.update(&mut cx, |p, _| p.enable_fake_shpool(&[]));
+
+        let (release_tx, spawn_gate) = futures::channel::oneshot::channel::<()>();
+
+        let t1 = TerminalId::new();
+        let m1 = TerminalThreadMetadata {
+            terminal_id: t1,
+            title: "T1".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::default(),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |s, cx| s.save(m1.clone(), cx));
+        });
+
+        // Start restore of T1, held by gate
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.restored_active_terminal_id = Some(t1);
+            panel.test_terminal_spawn_gate = Some(spawn_gate);
+            panel.restore_terminal_for_panel_load(
+                m1,
+                false,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        assert!(panel.read_with(&cx, |p, _| p.is_terminal_spawn_pending(t1)));
+
+        // Start background spawn of T2 (takes no gate, completes immediately)
+        let t2 = TerminalId::new();
+        let m2 = TerminalThreadMetadata {
+            terminal_id: t2,
+            title: "T2".into(),
+            custom_title: None,
+            created_at: Utc::now() + chrono::Duration::seconds(1),
+            worktree_paths: WorktreePaths::default(),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |s, cx| s.save(m2.clone(), cx));
+        });
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.restore_terminal_with_select(
+                m2,
+                false,
+                false,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        // T2 completed, but T1 is still in flight.
+        // Call ensure_thread_initialized:
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.ensure_thread_initialized(window, cx);
+        });
+        cx.run_until_parked();
+
+        // Verify restored_active_terminal_id was NOT prematurely cleared
+        assert_eq!(
+            panel.read_with(&cx, |p, _| p.restored_active_terminal_id),
+            Some(t1),
+            "ensure_thread_initialized must not clear in-flight restored terminal"
+        );
+
+        // Release T1
+        release_tx.send(()).unwrap();
+        cx.run_until_parked();
+
+        // Exactly 2 terminals exist; T1 became active
+        assert_eq!(panel.read_with(&cx, |p, cx| p.terminals(cx).len()), 2);
+        assert_eq!(
+            panel.read_with(&cx, |p, _| p.active_terminal_id()),
+            Some(t1)
+        );
+    }
+
+    #[gpui::test]
+    async fn test_deliberate_exit_after_reconnect_expires_does_not_respawn(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            TerminalThreadMetadataStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        let fake = project.update(cx, |p, _| p.enable_fake_shpool(&[]));
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+
+        let t1 = TerminalId::new();
+        let metadata = TerminalThreadMetadata {
+            terminal_id: t1,
+            title: "Terminal 1".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from(
+                "/project",
+            )])),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|_window, cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(metadata.clone(), cx);
+            });
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            panel.restore_terminal(
+                metadata,
+                true,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(fake.attach_history().len(), 1);
+
+        // Terminal is alive during reconnected event
+        panel.update_in(cx, |panel, window, cx| {
+            panel.handle_remote_reconnected(window, cx);
+        });
+        cx.run_until_parked();
+
+        // Advance executor time past the 10-second pending_reconnect_restart expiration
+        cx.background_executor
+            .advance_clock(Duration::from_secs(12));
+        cx.run_until_parked();
+
+        // User now deliberately types `exit`
+        panel.update(cx, |panel, cx| {
+            panel.emit_test_terminal_exit(t1, cx);
+        });
+        cx.run_until_parked();
+
+        // Terminal must stay exited, NOT respawn!
+        assert_eq!(
+            fake.attach_history().len(),
+            1,
+            "deliberate exit after reconnect expiration must not automatically respawn"
+        );
+        panel.read_with(cx, |panel, cx| {
+            assert!(
+                panel.terminal_has_exited(t1, cx),
+                "terminal must remain in exited state with restart bar"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_remote_reconnect_probe_error_surfaces_error_and_keeps_exited_thread(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            TerminalThreadMetadataStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let params = cx.update(workspace::AppState::test);
+        let (opts, server_client, connect_guard) = RemoteClient::fake_server(cx, server_cx);
+        let ping_handler = server_cx.new(|_| ());
+        server_client.add_request_handler::<client::proto::Ping, _, _, _>(
+            ping_handler.downgrade(),
+            |_entity, _envelope, _cx| async { Ok(client::proto::Ack {}) },
+        );
+        drop(connect_guard);
+        let remote_client = RemoteClient::connect_mock(opts, cx).await;
+
+        let project = cx.update(|cx| {
+            Project::remote(
+                remote_client.clone(),
+                params.client.clone(),
+                params.node_runtime.clone(),
+                params.user_store.clone(),
+                params.languages.clone(),
+                params.fs.clone(),
+                false,
+                cx,
+            )
+        });
+        let fake = project.update(cx, |p, _| p.enable_fake_shpool(&[]));
+
+        let remote_multi_workspace = cx.add_window({
+            let params = params.clone();
+            let project = project.clone();
+            move |window, cx| {
+                let workspace =
+                    cx.new(|cx| Workspace::new(None, project.clone(), params.clone(), window, cx));
+                MultiWorkspace::new(workspace, window, cx)
+            }
+        });
+        let workspace = remote_multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .expect("workspace should be present");
+        let cx = &mut VisualTestContext::from_window(remote_multi_workspace.into(), cx);
+
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.focus_panel::<AgentPanel>(window, cx);
+            panel
+        });
+
+        let terminal_id = TerminalId::new();
+        let metadata = TerminalThreadMetadata {
+            terminal_id,
+            title: "Remote Shpool Thread".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::default(),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(metadata.clone(), cx);
+            });
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            panel.restore_terminal(
+                metadata,
+                true,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        assert_eq!(fake.attach_history().len(), 1);
+        assert!(panel.read_with(cx, |p, _| p.has_terminal(terminal_id)));
+
+        // Terminal exits
+        panel.update(cx, |panel, cx| {
+            panel.emit_test_terminal_exit(terminal_id, cx);
+        });
+        cx.run_until_parked();
+        assert!(panel.read_with(cx, |p, cx| p.terminal_has_exited(terminal_id, cx)));
+
+        // Set probe error in fake shpool
+        fake.state.lock().probe_error = Some("shpool daemon socket connection refused".to_string());
+
+        // Emit Reconnected on remote client
+        let project_remote_client = project.read_with(cx, |p, _| {
+            p.remote_client()
+                .expect("project should have remote client")
+        });
+        project_remote_client.update(cx, |_client, cx| {
+            cx.emit(RemoteClientEvent::Reconnected);
+        });
+        cx.run_until_parked();
+
+        // 1. Thread still exists in panel
+        assert!(
+            panel.read_with(cx, |p, _| p.has_terminal(terminal_id)),
+            "thread must remain present in panel"
+        );
+
+        // 2. Thread stays exited so Restart bar is displayed
+        assert!(
+            panel.read_with(cx, |p, cx| p.terminal_has_exited(terminal_id, cx)),
+            "thread must stay marked exited so Restart bar is rendered"
+        );
+
+        // 3. Thread remains the active terminal
+        assert_eq!(
+            panel.read_with(cx, |p, _| p.active_terminal_id()),
+            Some(terminal_id),
+            "thread must remain active terminal"
+        );
+
+        // 4. Attach history length did not increase
+        assert_eq!(
+            fake.attach_history().len(),
+            1,
+            "failed probe must not perform new attach"
+        );
+
+        // 5. Workspace surfaced the error notification
+        assert!(
+            workspace.read_with(cx, |w, _| w.has_notification(
+                &workspace::notifications::NotificationId::unique::<anyhow::Error>()
+            )),
+            "probe error must be surfaced via workspace error notification"
+        );
+        assert!(
+            !workspace.read_with(cx, |workspace, _| workspace.has_notification(
+                &workspace::notifications::NotificationId::unique::<NoRemoteConnectionToast>()
+            )),
+            "a connected client must keep the real probe error instead of showing Reconnect"
+        );
+
+        remote_client.update(cx, |remote_client, cx| {
+            remote_client.force_server_not_running(cx);
+        });
+        let disconnected_terminal_id = TerminalId::new();
+        let disconnected_metadata = TerminalThreadMetadata {
+            terminal_id: disconnected_terminal_id,
+            title: "Disconnected remote thread".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::default(),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(disconnected_metadata.clone(), cx)
+            });
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            panel.restore_terminal(
+                disconnected_metadata,
+                true,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(
+            workspace.read_with(cx, |workspace, _| workspace.has_notification(
+                &workspace::notifications::NotificationId::unique::<NoRemoteConnectionToast>()
+            )),
+            "a disconnected client should offer the existing Reconnect action"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_terminal_reconnect_toast_requires_disconnected_remote_client(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let params = cx.update(workspace::AppState::test);
+        let (options, server_session, connection_guard) = RemoteClient::fake_server(cx, server_cx);
+        let ping_handler = server_cx.new(|_| ());
+        server_session.add_request_handler::<client::proto::Ping, _, _, _>(
+            ping_handler.downgrade(),
+            |_, _, _| async { Ok(client::proto::Ack {}) },
+        );
+        drop(connection_guard);
+        let remote_client = RemoteClient::connect_mock(options, cx).await;
+        let project = cx.update(|cx| {
+            Project::remote(
+                remote_client.clone(),
+                params.client.clone(),
+                params.node_runtime.clone(),
+                params.user_store.clone(),
+                params.languages.clone(),
+                params.fs.clone(),
+                false,
+                cx,
+            )
+        });
+        let disconnect_events = Arc::new(Mutex::new(Vec::new()));
+        let recorded_disconnect_events = disconnect_events.clone();
+        let subscription = cx.update(|cx| {
+            cx.subscribe(&project, move |_, event: &project::Event, _| {
+                if let project::Event::DisconnectedFromRemote { server_not_running } = event {
+                    recorded_disconnect_events.lock().push(*server_not_running);
+                }
+            })
+        });
+
+        assert!(!cx.update(|cx| { is_remote_connection_disconnected(project.read(cx), cx) }));
+        cx.update(|cx| reconnect_if_remote_disconnected(project.clone(), cx));
+        cx.run_until_parked();
+        assert!(disconnect_events.lock().is_empty());
+
+        remote_client.update(cx, |remote_client, cx| {
+            remote_client.force_heartbeat_timeout(1, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            remote_client.read_with(cx, |remote_client, _| remote_client.connection_state()),
+            ConnectionState::Reconnecting
+        );
+        assert!(!cx.update(|cx| { is_remote_connection_disconnected(project.read(cx), cx) }));
+        cx.update(|cx| reconnect_if_remote_disconnected(project.clone(), cx));
+        cx.run_until_parked();
+        assert!(disconnect_events.lock().is_empty());
+
+        remote_client.update(cx, |remote_client, cx| {
+            remote_client.force_server_not_running(cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.update(|cx| { is_remote_connection_disconnected(project.read(cx), cx) }));
+        let events_before_click = disconnect_events.lock().len();
+        cx.update(|cx| reconnect_if_remote_disconnected(project.clone(), cx));
+        cx.run_until_parked();
+        assert_eq!(
+            disconnect_events.lock().get(events_before_click),
+            Some(&false),
+            "the toast action should re-emit the existing disconnect event only while disconnected"
+        );
+        drop(subscription);
+    }
+
+    #[gpui::test]
+    async fn test_failed_restore_at_load_shows_exited_thread_with_restart_bar(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+            TerminalThreadMetadataStore::init_global(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        fs.insert_tree("/project", json!({ "file.txt": "" })).await;
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        let fake = project.update(cx, |p, _| p.enable_fake_shpool(&[]));
+        // Configure probe failure
+        fake.state.lock().probe_error = Some("shpool daemon unreachable".to_string());
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .expect("workspace should be present");
+        workspace.update(cx, |w, _| w.set_random_database_id());
+        let workspace_id = workspace
+            .read_with(cx, |w, _| w.database_id())
+            .expect("database_id should be set");
+        let kvp = cx.update(|cx| KeyValueStore::global(cx));
+
+        let t1 = TerminalId::new();
+        let metadata = TerminalThreadMetadata {
+            terminal_id: t1,
+            title: "Build".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::default(),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx)
+                .update(cx, |s, cx| s.save(metadata.clone(), cx));
+        });
+
+        let serialized = SerializedAgentPanel {
+            last_active_terminal_id: Some(t1.to_key_string()),
+            ..SerializedAgentPanel::default()
+        };
+        cx.background_spawn(async move {
+            save_serialized_panel(workspace_id, serialized, kvp)
+                .await
+                .expect("save_serialized_panel should succeed");
+        })
+        .await;
+
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let async_cx = cx.update(|window, cx| window.to_async(cx));
+        let loaded = AgentPanel::load(workspace.downgrade(), async_cx)
+            .await
+            .expect("panel reload should succeed");
+        cx.run_until_parked();
+
+        loaded.update_in(cx, |panel, window, cx| {
+            panel.ensure_thread_initialized(window, cx);
+        });
+        cx.run_until_parked();
+
+        loaded.read_with(cx, |panel, cx| {
+            assert_eq!(
+                panel.active_terminal_id(),
+                Some(t1),
+                "failed restore must remain the active terminal"
+            );
+            assert!(
+                panel.terminal_has_exited(t1, cx),
+                "failed restore must be marked exited to show Restart bar"
+            );
+            assert_eq!(
+                panel.terminals.len(),
+                1,
+                "ensure_thread_initialized must NOT spawn a fresh terminal"
+            );
+        });
+
+        // Verify serialize preserves last_active_terminal_id
+        cx.update(|_window, cx| {
+            loaded.update(cx, |panel, cx| panel.serialize(cx));
+        });
+        cx.run_until_parked();
+        let kvp = cx.update(|_window, cx| KeyValueStore::global(cx));
+        let reloaded_serialized =
+            read_serialized_panel(workspace_id, &kvp).expect("serialized panel should exist");
+        assert_eq!(
+            reloaded_serialized.last_active_terminal_id,
+            Some(t1.to_key_string()),
+            "serialize must preserve last_active_terminal_id"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_failed_new_terminal_spawn_does_not_persist_or_insert_placeholder(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            TerminalThreadMetadataStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        let fake = project.update(cx, |p, _| p.enable_fake_shpool(&[]));
+        fake.state.lock().probe_error = Some("shpool daemon unreachable".to_string());
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .expect("workspace should be present");
+
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.new_terminal(None, AgentThreadSource::AgentPanel, window, cx);
+        });
+        cx.run_until_parked();
+
+        // 1. Panel must NOT insert a placeholder terminal into self.terminals
+        panel.read_with(cx, |panel, _cx| {
+            assert!(
+                panel.terminals.is_empty(),
+                "failed new terminal spawn must not insert a placeholder terminal"
+            );
+        });
+
+        // 2. Metadata store must NOT persist metadata for this failed new terminal
+        cx.update(|_window, cx| {
+            assert_eq!(
+                TerminalThreadMetadataStore::global(cx)
+                    .read(cx)
+                    .entries()
+                    .count(),
+                0,
+                "failed new terminal spawn must not persist metadata"
+            );
+        });
+
+        // 3. Workspace surfaced the error notification
+        assert!(
+            workspace.read_with(cx, |w, _| w.has_notification(
+                &workspace::notifications::NotificationId::unique::<anyhow::Error>()
+            )),
+            "spawn failure must be surfaced via workspace error notification"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_remote_disconnected_cancels_reconnect_restart_clear_task(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            TerminalThreadMetadataStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let params = cx.update(workspace::AppState::test);
+        let (opts, server_client, connect_guard) = RemoteClient::fake_server(cx, server_cx);
+        let ping_handler = server_cx.new(|_| ());
+        server_client.add_request_handler::<client::proto::Ping, _, _, _>(
+            ping_handler.downgrade(),
+            |_entity, _envelope, _cx| async { Ok(client::proto::Ack {}) },
+        );
+        drop(connect_guard);
+        let remote_client = RemoteClient::connect_mock(opts, cx).await;
+
+        let project = cx.update(|cx| {
+            Project::remote(
+                remote_client.clone(),
+                params.client.clone(),
+                params.node_runtime.clone(),
+                params.user_store.clone(),
+                params.languages.clone(),
+                params.fs.clone(),
+                false,
+                cx,
+            )
+        });
+        project.update(cx, |p, _| p.enable_fake_shpool(&[]));
+
+        let remote_multi_workspace = cx.add_window({
+            let params = params.clone();
+            let project = project.clone();
+            move |window, cx| {
+                let workspace =
+                    cx.new(|cx| Workspace::new(None, project.clone(), params.clone(), window, cx));
+                MultiWorkspace::new(workspace, window, cx)
+            }
+        });
+        let workspace = remote_multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .expect("remote multi-workspace should have an active workspace");
+        let cx = &mut VisualTestContext::from_window(remote_multi_workspace.into(), cx);
+
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+
+        // 1. Simulate reconnect: triggers handle_remote_reconnected, arming _reconnect_restart_clear_task
+        let project_remote_client = project.read_with(cx, |p, _| {
+            p.remote_client()
+                .expect("project should have remote client")
+        });
+        project_remote_client.update(cx, |_client, cx| {
+            cx.emit(RemoteClientEvent::Reconnected);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _cx| {
+            assert!(
+                panel._reconnect_restart_clear_task.is_some(),
+                "reconnected event must arm _reconnect_restart_clear_task"
+            );
+        });
+
+        // 2. Simulate disconnect: triggers handle_remote_disconnected, cancelling the task
+        project_remote_client.update(cx, |_client, cx| {
+            cx.emit(RemoteClientEvent::Disconnected {
+                server_not_running: false,
+            });
+        });
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _cx| {
+            assert!(
+                panel._reconnect_restart_clear_task.is_none(),
+                "disconnect event must cancel _reconnect_restart_clear_task"
+            );
+        });
+
+        // 3. Behavioral verification: insert a pending reconnect restart and advance time
+        let test_terminal_id = TerminalId::new();
+        panel.update(cx, |panel, _cx| {
+            panel.pending_reconnect_restart.insert(test_terminal_id);
+        });
+
+        cx.background_executor
+            .advance_clock(Duration::from_secs(12));
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _cx| {
+            assert!(
+                panel.pending_reconnect_restart.contains(&test_terminal_id),
+                "pending_reconnect_restart must not be cleared by cancelled task"
             );
         });
     }
