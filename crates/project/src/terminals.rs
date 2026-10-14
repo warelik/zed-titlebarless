@@ -16,7 +16,7 @@ use std::{
 };
 use task::{Shell, ShellBuilder, ShellKind, SpawnInTerminal};
 use terminal::{
-    Terminal, TerminalBuilder, TerminalMode, insert_zed_terminal_env,
+    PtyStartup, Terminal, TerminalBounds, TerminalBuilder, TerminalMode, insert_zed_terminal_env,
     terminal_settings::TerminalSettings,
 };
 use util::{
@@ -27,6 +27,251 @@ use crate::{Project, ProjectPath};
 
 pub struct Terminals {
     pub(crate) local_handles: Vec<WeakEntity<terminal::Terminal>>,
+}
+
+pub struct PersistentTerminal {
+    pub terminal: Entity<Terminal>,
+    pub session: PersistentSession,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PersistentSession {
+    /// The host has no usable shpool, so the terminal runs a plain shell.
+    Unavailable,
+    Created,
+    Reattached,
+}
+
+/// A program that replaces the configured shell of a terminal.
+struct ShellCommand {
+    program: String,
+    args: Vec<String>,
+    title_override: Option<String>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Default)]
+pub struct FakeShpoolStore {
+    pub state: Arc<parking_lot::Mutex<FakeShpoolState>>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub type FakeShpool = FakeShpoolStore;
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Default)]
+pub struct FakeShpoolState {
+    pub available: bool,
+    pub probe_error: Option<String>,
+    pub probe_delay: Option<Duration>,
+    pub program: String,
+    pub socket: PathBuf,
+    pub sessions: collections::HashSet<String>,
+    pub attach_history: Vec<String>,
+    pub attach_args_history: Vec<(String, Vec<String>)>,
+    pub kill_history: Vec<String>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl FakeShpoolStore {
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(parking_lot::Mutex::new(FakeShpoolState {
+                available: true,
+                program: "shpool".to_string(),
+                socket: PathBuf::from("/tmp/fake-shpool.socket"),
+                ..Default::default()
+            })),
+        }
+    }
+
+    pub fn with_sessions(sessions: impl IntoIterator<Item = String>) -> Self {
+        let store = Self::new();
+        store.state.lock().sessions = sessions.into_iter().collect();
+        store
+    }
+
+    pub fn add_session(&self, name: impl Into<String>) {
+        self.state.lock().sessions.insert(name.into());
+    }
+
+    pub fn remove_session(&self, name: &str) {
+        self.state.lock().sessions.remove(name);
+    }
+
+    pub fn has_session(&self, name: &str) -> bool {
+        self.state.lock().sessions.contains(name)
+    }
+
+    pub fn attach_history(&self) -> Vec<String> {
+        self.state.lock().attach_history.clone()
+    }
+
+    pub fn attach_args_history(&self) -> Vec<(String, Vec<String>)> {
+        self.state.lock().attach_args_history.clone()
+    }
+
+    pub fn kill_history(&self) -> Vec<String> {
+        self.state.lock().kill_history.clone()
+    }
+
+    pub fn sessions(&self) -> collections::HashSet<String> {
+        self.state.lock().sessions.clone()
+    }
+}
+
+macro_rules! shpool_script_prelude {
+    () => {
+        r#"
+SHPOOL_BIN=""
+for b in shpool "$HOME/.local/bin/shpool" "$HOME/.cargo/bin/shpool" /opt/homebrew/bin/shpool /usr/local/bin/shpool; do
+    if command -v "$b" >/dev/null 2>&1; then
+        SHPOOL_BIN="$(command -v "$b")"
+        break
+    elif [ -x "$b" ]; then
+        SHPOOL_BIN="$b"
+        break
+    fi
+done
+[ -n "$SHPOOL_BIN" ] || exit 0
+
+USER_ID="$(id -u 2>/dev/null || true)"
+
+SHPOOL_SOCK=""
+if [ -n "$XDG_RUNTIME_DIR" ]; then
+    SHPOOL_SOCK="$XDG_RUNTIME_DIR/shpool/shpool.socket"
+elif [ -n "$USER_ID" ] && [ -S "/run/user/$USER_ID/shpool/shpool.socket" ]; then
+    SHPOOL_SOCK="/run/user/$USER_ID/shpool/shpool.socket"
+elif [ -S "$HOME/.local/run/shpool/shpool.socket" ]; then
+    SHPOOL_SOCK="$HOME/.local/run/shpool/shpool.socket"
+elif [ -n "$USER_ID" ] && [ -d "/run/user/$USER_ID" ]; then
+    SHPOOL_SOCK="/run/user/$USER_ID/shpool/shpool.socket"
+else
+    SHPOOL_SOCK="$HOME/.local/run/shpool/shpool.socket"
+fi
+"#
+    };
+}
+
+/// Prelude searching for shpool binary and socket path.
+const SHPOOL_SCRIPT_PRELUDE: &str = shpool_script_prelude!();
+
+pub(crate) const SHPOOL_PROBE_MARKER: &str = "=== ZED_SHPOOL_PROBE_START ===";
+
+/// Complete script probing shpool binary, live/fallback socket, and running sessions.
+const SHPOOL_PROBE_SCRIPT: &str = concat!(
+    shpool_script_prelude!(),
+    r#"
+echo "=== ZED_SHPOOL_PROBE_START ==="
+echo "$SHPOOL_BIN"
+echo "$SHPOOL_SOCK"
+"$SHPOOL_BIN" -s "$SHPOOL_SOCK" list --json
+"#
+);
+
+pub(crate) const SHPOOL_PROBE_TIMEOUT: Duration = Duration::from_secs(17);
+
+pub struct ShpoolProbe {
+    pub program: String,
+    pub socket: PathBuf,
+    pub sessions: Vec<String>,
+}
+
+pub fn parse_shpool_probe(stdout: &str) -> Result<Option<ShpoolProbe>> {
+    #[derive(serde::Deserialize)]
+    struct SessionList {
+        sessions: Vec<Session>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Session {
+        name: String,
+    }
+
+    // If marker is absent, shpool binary was not found (script exited 0 before marker).
+    let Some(marker_index) = stdout.find(SHPOOL_PROBE_MARKER) else {
+        return Ok(None);
+    };
+
+    let probe_output = &stdout[marker_index + SHPOOL_PROBE_MARKER.len()..];
+    let probe_output = probe_output.trim_start_matches(['\r', '\n']);
+
+    let mut lines = probe_output.splitn(3, '\n');
+    let program = lines
+        .next()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("shpool probe output missing program line"))?;
+    let socket = lines
+        .next()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("shpool probe output missing socket line"))?;
+    let sessions_json = lines
+        .next()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("shpool probe output missing session JSON"))?;
+
+    let socket = PathBuf::from(socket);
+    if !socket.is_absolute() {
+        anyhow::bail!("shpool probe returned relative socket {socket:?}, rejecting");
+    }
+
+    let sessions = serde_json::from_str::<SessionList>(sessions_json)
+        .context("parsing `shpool list --json`")?;
+    Ok(Some(ShpoolProbe {
+        program: program.to_string(),
+        socket,
+        sessions: sessions
+            .sessions
+            .into_iter()
+            .map(|session| session.name)
+            .collect(),
+    }))
+}
+
+pub(crate) fn parse_shpool_probe_output(
+    output: &std::process::Output,
+) -> Result<Option<ShpoolProbe>> {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::warn!(
+            "shpool probe script failed with status {}: {}",
+            output.status,
+            stderr.trim()
+        );
+        anyhow::bail!(
+            "shpool probe script failed with status {}: {}",
+            output.status,
+            stderr.trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_shpool_probe(&stdout)
+}
+
+pub(crate) fn build_shpool_attach_args(
+    socket: &Path,
+    cwd: Option<&Path>,
+    session_name: &str,
+) -> Vec<String> {
+    let mut args = vec![
+        "-s".to_string(),
+        socket.to_string_lossy().into_owned(),
+        "attach".to_string(),
+        "--force".to_string(),
+    ];
+    if let Some(cwd) = cwd {
+        args.push("--dir".to_string());
+        args.push(cwd.to_string_lossy().into_owned());
+    }
+    // Always pass --cmd: shpool ignores it on a live session, but a dead-but-listed
+    // session is respawned with it (preventing sentinel injection and blank line returns).
+    // shpool's `--cmd` is a template, so avoid `{}` which would trigger invalid var errors.
+    args.push("--cmd".to_string());
+    args.push("/bin/sh -c \"exec $SHELL -l\"".to_string());
+    args.push(session_name.to_string());
+    args
 }
 
 impl Project {
@@ -253,6 +498,7 @@ impl Project {
                         cx,
                         activation_script,
                         path_style,
+                        PtyStartup::default(),
                     ))
                 })??
                 .await?;
@@ -287,7 +533,208 @@ impl Project {
         cwd: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) -> Task<Result<Entity<Terminal>>> {
-        self.create_terminal_shell_internal(cwd, false, cx)
+        self.create_terminal_shell_internal(cwd, false, None, PtyStartup::default(), cx)
+    }
+
+    /// Creates a terminal whose shell lives in the shpool session `session_name`
+    /// on the host the shell runs on, so the shell outlives the terminal, the
+    /// SSH connection and Zed itself. Reattaches when the session exists.
+    /// Without shpool on that host, the terminal runs a plain shell.
+    /// `bounds` is the size the terminal will be laid out at, when known: shpool
+    /// restores the session's screen at the size the terminal opens with.
+    pub fn create_persistent_terminal_shell(
+        &mut self,
+        cwd: Option<PathBuf>,
+        session_name: String,
+        bounds: Option<TerminalBounds>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<PersistentTerminal>> {
+        let probe = self.probe_shpool(cx);
+        let is_local = self.remote_client.is_none();
+        cx.spawn(async move |project, cx| {
+            let probe_result = probe.await?;
+            let (command, session) = match probe_result {
+                Some(shpool) => {
+                    let session = if shpool.sessions.contains(&session_name) {
+                        PersistentSession::Reattached
+                    } else {
+                        PersistentSession::Created
+                    };
+                    let args =
+                        build_shpool_attach_args(&shpool.socket, cwd.as_deref(), &session_name);
+                    // The foreground process of a local terminal is now the shpool
+                    // client, so a title built from it would name shpool, not the
+                    // program in the session. Remote shells get the same override.
+                    let title_override = is_local.then(|| {
+                        let directory = cwd
+                            .as_ref()
+                            .and_then(|cwd| cwd.file_name())
+                            .map(|name| name.to_string_lossy().into_owned());
+                        match directory {
+                            Some(directory) => format!("{directory} — Terminal"),
+                            None => "Terminal".to_string(),
+                        }
+                    });
+                    (
+                        Some(ShellCommand {
+                            program: shpool.program,
+                            args,
+                            title_override,
+                        }),
+                        session,
+                    )
+                }
+                None => (None, PersistentSession::Unavailable),
+            };
+            let pty_startup = PtyStartup {
+                bounds,
+                hold_resize_until_output: command.is_some(),
+            };
+            let terminal = project
+                .update(cx, |project, cx| {
+                    #[cfg(any(test, feature = "test-support"))]
+                    if let Some(fake) = &project.fake_shpool {
+                        if let Some(command) = &command {
+                            let mut state = fake.state.lock();
+                            state.attach_history.push(session_name.clone());
+                            state
+                                .attach_args_history
+                                .push((session_name.clone(), command.args.clone()));
+                            state.sessions.insert(session_name);
+                        }
+                        let settings = TerminalSettings::get(None, cx).clone();
+                        let path_style = project.path_style(cx);
+                        let background_executor = cx.background_executor().clone();
+                        let builder = terminal::TerminalBuilder::new_display_only_with_bounds(
+                            settings.cursor_shape,
+                            settings.alternate_scroll,
+                            settings.max_scroll_history_lines,
+                            cx.entity_id().as_u64(),
+                            &background_executor,
+                            path_style,
+                            bounds.unwrap_or_default(),
+                        );
+                        let terminal = cx.new(|cx| builder.subscribe(cx));
+                        project.terminals.local_handles.push(terminal.downgrade());
+                        return Task::ready(Ok(terminal));
+                    }
+
+                    project.create_terminal_shell_internal(cwd, false, command, pty_startup, cx)
+                })?
+                .await?;
+            Ok(PersistentTerminal { terminal, session })
+        })
+    }
+
+    /// Ends the shpool session `session_name` and everything running in it.
+    /// Does nothing on a host without shpool.
+    pub fn kill_persistent_terminal_session(
+        &mut self,
+        session_name: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(fake) = &self.fake_shpool {
+            let mut state = fake.state.lock();
+            state.kill_history.push(session_name.clone());
+            state.sessions.remove(&session_name);
+            return Task::ready(Ok(()));
+        }
+
+        if self.path_style(cx).is_windows() || self.fs.is_fake() {
+            return Task::ready(Ok(()));
+        }
+        let Some(quoted_name) = ShellKind::Posix.try_quote(&session_name) else {
+            return Task::ready(Err(anyhow::anyhow!(
+                "cannot quote shpool session name {session_name:?}"
+            )));
+        };
+        let script = format!(
+            r#"{SHPOOL_SCRIPT_PRELUDE}
+"$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
+"#
+        );
+        let command = self.exec_script_in_sh(script, cx);
+        cx.background_spawn(async move {
+            let output = command.await?.output().await?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !stderr.contains("not found") && !stderr.contains("no such session") {
+                    log::warn!(
+                        "failed to kill shpool session {session_name}: {}",
+                        stderr.trim()
+                    );
+                    anyhow::bail!("killing shpool session {session_name}: {}", stderr.trim());
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Finds shpool and its sessions on the host the project's shells run on.
+    /// `shpool list` starts the daemon when none runs, so a reachable daemon is
+    /// what makes shpool available, not only the binary.
+    fn probe_shpool(&mut self, cx: &mut Context<Self>) -> Task<Result<Option<ShpoolProbe>>> {
+        let probe = self.probe_shpool_unbounded(cx);
+        let executor = cx.background_executor().clone();
+        cx.background_spawn(async move {
+            let timeout = executor.timer(SHPOOL_PROBE_TIMEOUT);
+            futures::pin_mut!(probe, timeout);
+            match futures::future::select(probe, timeout).await {
+                futures::future::Either::Left((result, _)) => result,
+                futures::future::Either::Right(((), _)) => {
+                    log::warn!(
+                        "shpool probe timed out after {}s",
+                        SHPOOL_PROBE_TIMEOUT.as_secs()
+                    );
+                    Err(anyhow::anyhow!(
+                        "shpool probe timed out after {}s",
+                        SHPOOL_PROBE_TIMEOUT.as_secs()
+                    ))
+                }
+            }
+        })
+    }
+
+    fn probe_shpool_unbounded(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Option<ShpoolProbe>>> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(fake) = &self.fake_shpool {
+            let (result, delay) = {
+                let state = fake.state.lock();
+                let result = match (&state.probe_error, state.available) {
+                    (Some(error), _) => Err(anyhow::anyhow!("{error}")),
+                    (None, false) => Ok(None),
+                    (None, true) => Ok(Some(ShpoolProbe {
+                        program: state.program.clone(),
+                        socket: state.socket.clone(),
+                        sessions: state.sessions.iter().cloned().collect(),
+                    })),
+                };
+                (result, state.probe_delay)
+            };
+            if let Some(delay) = delay {
+                let executor = cx.background_executor().clone();
+                return cx.background_spawn(async move {
+                    executor.timer(delay).await;
+                    result
+                });
+            }
+            return Task::ready(result);
+        }
+
+        // A project on a fake filesystem must not reach the sessions of the
+        // machine it runs on.
+        if self.path_style(cx).is_windows() || self.fs.is_fake() {
+            return Task::ready(Ok(None));
+        }
+        let command = self.exec_script_in_sh(SHPOOL_PROBE_SCRIPT.to_string(), cx);
+        cx.background_spawn(async move {
+            let output = command.await?.output().await?;
+            parse_shpool_probe_output(&output)
+        })
     }
 
     /// Creates a local terminal even if the project is remote.
@@ -304,16 +751,25 @@ impl Project {
             // Local project: use project directory like normal terminals
             self.active_project_directory(cx).map(|p| p.to_path_buf())
         };
-        self.create_terminal_shell_internal(working_directory, true, cx)
+        self.create_terminal_shell_internal(
+            working_directory,
+            true,
+            None,
+            PtyStartup::default(),
+            cx,
+        )
     }
 
     /// Internal method for creating terminal shells.
     /// If force_local is true, creates a local terminal even if the project has a remote client.
     /// This allows "breaking out" to a local shell in remote projects.
+    /// `command` replaces the configured shell.
     fn create_terminal_shell_internal(
         &mut self,
         cwd: Option<PathBuf>,
         force_local: bool,
+        command: Option<ShellCommand>,
+        pty_startup: PtyStartup,
         cx: &mut Context<Self>,
     ) -> Task<Result<Entity<Terminal>>> {
         let path = cwd.map(|p| Arc::from(&*p));
@@ -344,9 +800,11 @@ impl Project {
             })
             .into_iter()
             .collect();
+        // An activation script is typed into the shell, while the shell that
+        // `command` starts, e.g. a reattached shpool session, may already run a program.
         let toolchains = project_path_contexts
             .into_iter()
-            .filter(|_| detect_venv)
+            .filter(|_| detect_venv && command.is_none())
             .map(|p| self.active_toolchain(p, LanguageName::new_static("Python"), cx))
             .collect::<Vec<_>>();
         let remote_client = if force_local {
@@ -430,16 +888,29 @@ impl Project {
                         match remote_client {
                             Some(remote_client) => {
                                 let empty_args = Vec::new();
-                                let spawn_command = match remote_shell.as_ref() {
-                                    Some(Shell::System) | None => None,
-                                    Some(Shell::Program(program)) => Some((program, &empty_args)),
-                                    Some(Shell::WithArguments { program, args, .. }) => {
+                                let spawn_command = match (&command, remote_shell.as_ref()) {
+                                    (Some(command), _) => Some((&command.program, &command.args)),
+                                    (None, Some(Shell::System) | None) => None,
+                                    (None, Some(Shell::Program(program))) => {
+                                        Some((program, &empty_args))
+                                    }
+                                    (None, Some(Shell::WithArguments { program, args, .. })) => {
                                         Some((program, args))
                                     }
                                 };
                                 create_remote_shell(spawn_command, env, path, remote_client, cx)?
                             }
-                            None => (settings.shell, env),
+                            None => match command {
+                                Some(command) => (
+                                    Shell::WithArguments {
+                                        program: command.program,
+                                        args: command.args,
+                                        title_override: command.title_override,
+                                    },
+                                    env,
+                                ),
+                                None => (settings.shell, env),
+                            },
                         }
                     };
                     anyhow::Ok(TerminalBuilder::new(
@@ -457,6 +928,7 @@ impl Project {
                         cx,
                         activation_script,
                         path_style,
+                        pty_startup,
                     ))
                 })??
                 .await?;
@@ -548,6 +1020,66 @@ impl Project {
             });
         }
         TerminalSettings::get(settings_location, cx)
+    }
+
+    pub fn exec_script_in_sh(
+        &self,
+        script: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<smol::process::Command>> {
+        if self.path_style(cx).is_windows() {
+            return Task::ready(Err(anyhow::anyhow!("POSIX sh is not supported on Windows")));
+        }
+
+        let path = self.first_project_directory(cx);
+        let remote_client = self.remote_client.clone();
+        let settings = self.terminal_settings(&path, cx).clone();
+        let program = "/bin/sh".to_string();
+        let args = vec!["-c".to_string(), script];
+
+        let env_task = self.resolve_directory_environment(
+            &program,
+            path.as_ref().map(|path| Arc::from(&**path)),
+            remote_client.clone(),
+            cx,
+        );
+
+        cx.spawn(async move |project, cx| {
+            let mut env = env_task.await.unwrap_or_default();
+            env.extend(settings.env);
+
+            project.update(cx, move |_, cx| {
+                match remote_client {
+                    Some(remote_client) => {
+                        let command_template = remote_client.read(cx).build_command(
+                            Some(program),
+                            &args,
+                            &env,
+                            None,
+                            None,
+                            Interactive::No,
+                        )?;
+                        let mut command = new_std_command(command_template.program);
+                        command.args(command_template.args);
+                        command.envs(command_template.env);
+                        Ok(command)
+                    }
+                    None => {
+                        let mut command = new_std_command(program);
+                        command.args(args);
+                        command.envs(env);
+                        if let Some(path) = path {
+                            command.current_dir(path);
+                        }
+                        Ok(command)
+                    }
+                }
+                .map(|mut process| {
+                    util::set_pre_exec_to_start_new_session(&mut process);
+                    smol::process::Command::from(process)
+                })
+            })?
+        })
     }
 
     pub fn exec_in_shell(
@@ -824,6 +1356,652 @@ mod tests {
         assert_eq!(
             format_task_for_activation(&task, ShellKind::PowerShell, "powershell.exe", true),
             "&cargo test 'some test'"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_fake_shpool_seam_lifecycle(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = settings::SettingsStore::test(cx);
+            cx.set_global(store);
+            terminal::terminal_settings::TerminalSettings::register(cx);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+
+        let probe = project
+            .update(cx, |p, cx| p.probe_shpool(cx))
+            .await
+            .expect("probe should succeed");
+        assert!(probe.is_none());
+
+        project.update(cx, |p, _| {
+            p.enable_fake_shpool(&["zed-existing"]);
+        });
+
+        let probe = project
+            .update(cx, |p, cx| p.probe_shpool(cx))
+            .await
+            .expect("probe should succeed")
+            .expect("fake shpool should be available");
+        assert_eq!(probe.program, "shpool");
+        assert_eq!(probe.sessions, vec!["zed-existing"]);
+
+        let term1 = project
+            .update(cx, |p, cx| {
+                p.create_persistent_terminal_shell(None, "zed-existing".to_string(), None, cx)
+            })
+            .await
+            .expect("should spawn persistent terminal");
+        assert_eq!(term1.session, PersistentSession::Reattached);
+        assert_eq!(
+            project.read_with(cx, |p, _| p.fake_shpool_attached_sessions()),
+            vec!["zed-existing"]
+        );
+
+        let term2 = project
+            .update(cx, |p, cx| {
+                p.create_persistent_terminal_shell(None, "zed-new".to_string(), None, cx)
+            })
+            .await
+            .expect("should spawn persistent terminal");
+        assert_eq!(term2.session, PersistentSession::Created);
+        assert_eq!(
+            project.read_with(cx, |p, _| p.fake_shpool_attached_sessions()),
+            vec!["zed-existing", "zed-new"]
+        );
+        let attach_args = project.read_with(cx, |p, _| p.fake_shpool_attached_args());
+        assert_eq!(attach_args.len(), 2);
+        let (existing_session, existing_args) = &attach_args[0];
+        assert_eq!(existing_session, "zed-existing");
+        assert!(
+            existing_args.contains(&"--cmd".to_string()),
+            "reattached session must also pass --cmd for dead-session respawn"
+        );
+        let existing_cmd_index = existing_args
+            .iter()
+            .position(|argument| argument == "--cmd")
+            .expect("missing --cmd on existing session attach");
+        assert_eq!(
+            existing_args[existing_cmd_index + 1],
+            "/bin/sh -c \"exec $SHELL -l\""
+        );
+        let (new_session, new_args) = &attach_args[1];
+        assert_eq!(new_session, "zed-new");
+        assert!(
+            new_args.contains(&"--cmd".to_string()),
+            "new session must pass --cmd to bypass shpool prompt sentinels"
+        );
+        let new_cmd_index = new_args
+            .iter()
+            .position(|argument| argument == "--cmd")
+            .expect("missing --cmd on new session attach");
+        assert_eq!(new_args[new_cmd_index + 1], "/bin/sh -c \"exec $SHELL -l\"");
+
+        project
+            .update(cx, |p, cx| {
+                p.kill_persistent_terminal_session("zed-existing".to_string(), cx)
+            })
+            .await
+            .expect("should kill session");
+        assert_eq!(
+            project.read_with(cx, |p, _| p.fake_shpool_killed_sessions()),
+            vec!["zed-existing"]
+        );
+        let fake = project
+            .read_with(cx, |p, _| p.fake_shpool())
+            .expect("fake shpool exists");
+        assert!(!fake.has_session("zed-existing"));
+        assert!(fake.has_session("zed-new"));
+    }
+
+    #[test]
+    fn test_build_shpool_attach_args() {
+        let socket = Path::new("/run/user/1000/shpool/shpool.socket");
+        let cwd = Path::new("/home/user/project");
+
+        let attach_args_with_cwd = build_shpool_attach_args(socket, Some(cwd), "zed-thread-1");
+        assert_eq!(
+            attach_args_with_cwd,
+            vec![
+                "-s",
+                "/run/user/1000/shpool/shpool.socket",
+                "attach",
+                "--force",
+                "--dir",
+                "/home/user/project",
+                "--cmd",
+                "/bin/sh -c \"exec $SHELL -l\"",
+                "zed-thread-1",
+            ]
+        );
+
+        let attach_args_without_cwd = build_shpool_attach_args(socket, None, "zed-thread-1");
+        assert_eq!(
+            attach_args_without_cwd,
+            vec![
+                "-s",
+                "/run/user/1000/shpool/shpool.socket",
+                "attach",
+                "--force",
+                "--cmd",
+                "/bin/sh -c \"exec $SHELL -l\"",
+                "zed-thread-1",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_shpool_probe_multiline_socket() {
+        let stdout = format!(
+            "{SHPOOL_PROBE_MARKER}\n/home/core/.local/bin/shpool\n/run/user/1000/shpool/shpool.socket\n{{\"sessions\":[{{\"name\":\"zed-session-1\"}}]}}"
+        );
+        let probe = parse_shpool_probe(&stdout)
+            .expect("should parse 3-line probe output")
+            .expect("marker found");
+        assert_eq!(probe.program, "/home/core/.local/bin/shpool");
+        assert_eq!(
+            probe.socket,
+            PathBuf::from("/run/user/1000/shpool/shpool.socket")
+        );
+        assert_eq!(probe.sessions, vec!["zed-session-1"]);
+
+        // Absent shpool (no marker) returns Ok(None)
+        assert!(parse_shpool_probe("").unwrap().is_none());
+        assert!(parse_shpool_probe("   \n   \n").unwrap().is_none());
+
+        // 2-line output is rejected (no fallback to relative socket)
+        let stdout_2line = format!(
+            "{SHPOOL_PROBE_MARKER}\nshpool\n{{\"sessions\":[{{\"name\":\"zed-session-2\"}}]}}"
+        );
+        assert!(
+            parse_shpool_probe(&stdout_2line).is_err(),
+            "2-line output without socket path must return error"
+        );
+
+        // Relative socket path is rejected
+        let stdout_relative = format!(
+            "{SHPOOL_PROBE_MARKER}\n/home/core/.local/bin/shpool\nshpool.socket\n{{\"sessions\":[{{\"name\":\"zed-session-1\"}}]}}"
+        );
+        assert!(
+            parse_shpool_probe(&stdout_relative).is_err(),
+            "relative socket path must return error"
+        );
+
+        // Invalid JSON is rejected
+        let stdout_invalid_json =
+            format!("{SHPOOL_PROBE_MARKER}\n/bin/shpool\n/run/socket\nnot json");
+        assert!(
+            parse_shpool_probe(&stdout_invalid_json).is_err(),
+            "invalid JSON must return error"
+        );
+    }
+
+    #[test]
+    fn test_parse_shpool_probe_robust_against_rc_banners() {
+        let stdout = r#"
+Welcome to Ubuntu 24.04.1 LTS (GNU/Linux 6.8.0-40-generic x86_64)
+Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
+[user@server ~]$ echo banner noise
+=== ZED_SHPOOL_PROBE_START ===
+/usr/bin/shpool
+/run/user/1000/shpool/shpool.socket
+{"sessions":[{"name":"zed-active-1"},{"name":"zed-active-2"}]}
+"#;
+        let probe = parse_shpool_probe(stdout)
+            .expect("parse must succeed")
+            .expect("marker must be found");
+        assert_eq!(probe.program, "/usr/bin/shpool");
+        assert_eq!(
+            probe.socket,
+            PathBuf::from("/run/user/1000/shpool/shpool.socket")
+        );
+        assert_eq!(
+            probe.sessions,
+            vec!["zed-active-1".to_string(), "zed-active-2".to_string()]
+        );
+    }
+
+    #[gpui::test]
+    async fn test_create_persistent_terminal_fails_when_probe_fails(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            let store = settings::SettingsStore::test(cx);
+            cx.set_global(store);
+            terminal::terminal_settings::TerminalSettings::register(cx);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+
+        let fake = FakeShpoolStore::new();
+        fake.state.lock().probe_error = Some("shpool daemon socket connection refused".to_string());
+        project.update(cx, |p, _| p.set_fake_shpool(fake));
+
+        let result = project
+            .update(cx, |p, cx| {
+                p.create_persistent_terminal_shell(None, "zed-probe-fail".to_string(), None, cx)
+            })
+            .await;
+
+        assert!(
+            result.is_err(),
+            "probe failure must NOT spawn a fallback plain shell"
+        );
+        let err_msg = result
+            .err()
+            .expect("probe failure must NOT spawn a fallback plain shell")
+            .to_string();
+        assert!(
+            err_msg.contains("shpool daemon socket connection refused"),
+            "expected daemon connection refused error, got: {err_msg}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_shpool_probe_timeout_returns_error_without_plain_shell_fallback(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            let store = settings::SettingsStore::test(cx);
+            cx.set_global(store);
+            terminal::terminal_settings::TerminalSettings::register(cx);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+
+        let fake = FakeShpoolStore::new();
+        fake.state.lock().probe_delay = Some(SHPOOL_PROBE_TIMEOUT + Duration::from_secs(1));
+        project.update(cx, |project, _| project.set_fake_shpool(fake.clone()));
+
+        let terminal_task = project.update(cx, |project, cx| {
+            project.create_persistent_terminal_shell(
+                None,
+                "zed-timed-out-probe".to_string(),
+                None,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(SHPOOL_PROBE_TIMEOUT + Duration::from_secs(2));
+        cx.run_until_parked();
+
+        let error = terminal_task
+            .await
+            .err()
+            .expect("timed-out probe must not create a plain shell");
+        assert!(
+            error
+                .to_string()
+                .contains("shpool probe timed out after 17s"),
+            "unexpected timeout error: {error:#}"
+        );
+        assert!(
+            fake.attach_history().is_empty(),
+            "timed-out probe must not attach a plain shell or shpool session"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_shpool_probe_output_nonzero_exit_bails() {
+        use std::os::unix::process::ExitStatusExt;
+        let valid_stdout = format!(
+            "{SHPOOL_PROBE_MARKER}\n/usr/bin/shpool\n/run/user/1000/shpool/shpool.socket\n{{\"sessions\":[{{\"name\":\"zed-active-1\"}}]}}\n"
+        );
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(1 << 8), // exit code 1
+            stdout: valid_stdout.into_bytes(),
+            stderr: b"error: connection to shpool daemon failed: connection refused\n".to_vec(),
+        };
+        let result = parse_shpool_probe_output(&output);
+        assert!(
+            result.is_err(),
+            "non-zero exit status must bail even if stdout has valid probe data"
+        );
+        let err = result
+            .err()
+            .expect("non-zero exit status must bail")
+            .to_string();
+        assert!(
+            err.contains("shpool probe script failed with status"),
+            "error must describe non-zero status: {err}"
+        );
+        assert!(
+            err.contains("connection refused"),
+            "error must include stderr message: {err}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_create_persistent_terminal_when_shpool_absent_spawns_plain_shell(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            let store = settings::SettingsStore::test(cx);
+            cx.set_global(store);
+            terminal::terminal_settings::TerminalSettings::register(cx);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+
+        let fake = FakeShpoolStore::new();
+        fake.state.lock().available = false;
+        project.update(cx, |p, _| p.set_fake_shpool(fake));
+
+        let persistent = project
+            .update(cx, |p, cx| {
+                p.create_persistent_terminal_shell(None, "zed-plain".to_string(), None, cx)
+            })
+            .await
+            .expect("spawning plain shell fallback should succeed");
+
+        assert_eq!(
+            persistent.session,
+            PersistentSession::Unavailable,
+            "absent shpool must yield PersistentSession::Unavailable"
+        );
+        let fake = project
+            .read_with(cx, |p, _| p.fake_shpool())
+            .expect("fake_shpool should be initialized on project");
+        assert!(
+            fake.attach_history().is_empty(),
+            "absent shpool must not record any attach in history"
+        );
+    }
+
+    #[gpui::test]
+    #[cfg(unix)]
+    async fn test_exec_script_in_sh_runs_under_posix_sh(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            let store = settings::SettingsStore::test(cx);
+            cx.set_global(store);
+            terminal::terminal_settings::TerminalSettings::register(cx);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+
+        let task = project.update(cx, |p, cx| {
+            p.exec_script_in_sh(
+                "for x in item1 item2; do echo \"posix_$x\"; done".to_string(),
+                cx,
+            )
+        });
+        let mut cmd = task.await.expect("command creation should succeed");
+        let output = cmd.output().await.expect("execution should succeed");
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("posix_item1"));
+        assert!(stdout.contains("posix_item2"));
+    }
+
+    #[gpui::test]
+    #[cfg(unix)]
+    async fn test_shpool_probe_script_syntax_under_posix_sh(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let output = smol::process::Command::new("/bin/sh")
+            .args(["-n", "-c", SHPOOL_PROBE_SCRIPT])
+            .output()
+            .await
+            .expect("sh -n execution should succeed");
+        assert!(
+            output.status.success(),
+            "probe script syntax invalid under /bin/sh: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    struct IsolatedDaemonGuard {
+        runtime_dir: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl Drop for IsolatedDaemonGuard {
+        fn drop(&mut self) {
+            let pid_path = self
+                .runtime_dir
+                .join("shpool")
+                .join("daemonized-shpool.pid");
+            if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+                if let Ok(daemon_pid) = pid_str.trim().parse::<u32>() {
+                    let runtime_str = self.runtime_dir.to_string_lossy().into_owned();
+                    smol::block_on(async {
+                        let ps_output = smol::process::Command::new("/bin/ps")
+                            .args(["-p", &daemon_pid.to_string(), "-o", "command="])
+                            .output()
+                            .await
+                            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                            .unwrap_or_default();
+                        if ps_output.contains(&runtime_str) {
+                            if let Ok(status) = smol::process::Command::new("/bin/kill")
+                                .args(["-TERM", &daemon_pid.to_string()])
+                                .status()
+                                .await
+                            {
+                                if !status.success() {
+                                    // already exited
+                                }
+                            }
+                            for _ in 0..50 {
+                                let check = smol::process::Command::new("/bin/kill")
+                                    .args(["-0", &daemon_pid.to_string()])
+                                    .status()
+                                    .await;
+                                if let Ok(check) = check {
+                                    if !check.success() {
+                                        return;
+                                    }
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(100));
+                            }
+                            if let Ok(status) = smol::process::Command::new("/bin/kill")
+                                .args(["-KILL", &daemon_pid.to_string()])
+                                .status()
+                                .await
+                            {
+                                if !status.success() {
+                                    // already exited
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    #[gpui::test]
+    #[cfg(unix)]
+    async fn test_isolated_shpool_daemon_probe_and_kill(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        if std::env::var("ZED_TEST_REAL_SHPOOL").is_err() {
+            return;
+        }
+        let has_shpool = smol::process::Command::new("/bin/sh")
+            .args(["-c", "command -v shpool || [ -x /opt/homebrew/bin/shpool ] || [ -x $HOME/.local/bin/shpool ] || [ -x $HOME/.cargo/bin/shpool ]"])
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !has_shpool {
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().expect("tempdir creation");
+        let isolated_runtime = temp_dir.path().join("runtime");
+        let isolated_home = temp_dir.path().join("home");
+        std::fs::create_dir_all(&isolated_runtime).expect("create isolated runtime");
+        std::fs::create_dir_all(&isolated_home).expect("create isolated home");
+
+        let _daemon_guard = IsolatedDaemonGuard {
+            runtime_dir: isolated_runtime.clone(),
+        };
+
+        let runtime_str = isolated_runtime.to_string_lossy().into_owned();
+        let home_str = isolated_home.to_string_lossy().into_owned();
+
+        cx.update(|cx| {
+            let mut store = settings::SettingsStore::test(cx);
+            let config = serde_json::json!({
+                "terminal": {
+                    "env": {
+                        "HOME": home_str.clone(),
+                        "XDG_RUNTIME_DIR": runtime_str.clone(),
+                    }
+                }
+            });
+            store
+                .set_user_settings(&config.to_string(), cx)
+                .expect("user settings should apply");
+            cx.set_global(store);
+            terminal::terminal_settings::TerminalSettings::register(cx);
+        });
+
+        // Use RealFs with temp_dir so fs.is_fake() is false and production kill is exercised
+        let fs = fs::RealFs::new(None, cx.executor());
+        let project = Project::test(fs, [temp_dir.path()], cx).await;
+
+        // 1. Run probe script: starts the isolated daemon
+        let probe_script = format!(
+            "export HOME={home_str:?} XDG_RUNTIME_DIR={runtime_str:?}\n{SHPOOL_PROBE_SCRIPT}"
+        );
+        let task = project.update(cx, |p, cx| p.exec_script_in_sh(probe_script, cx));
+        let mut cmd = task.await.expect("probe command creation");
+        let output = cmd.output().await.expect("probe execution");
+        assert!(output.status.success(), "probe script must succeed");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let probe = parse_shpool_probe(&stdout)
+            .expect("should parse output")
+            .expect("should find probe marker");
+        assert!(probe.socket.is_absolute());
+        assert!(probe.socket.starts_with(&isolated_runtime));
+
+        // 2a. Create real session in the isolated daemon using attach -b
+        let attach_script = format!(
+            "export HOME={home_str:?} XDG_RUNTIME_DIR={runtime_str:?}\n{SHPOOL_SCRIPT_PRELUDE}\n\"$SHPOOL_BIN\" -s \"$SHPOOL_SOCK\" attach -b zed-test-isolated\n"
+        );
+        let task = project.update(cx, |p, cx| p.exec_script_in_sh(attach_script, cx));
+        let mut cmd = task.await.expect("attach command creation");
+        let output = cmd.output().await.expect("attach execution");
+        assert!(
+            output.status.success(),
+            "shpool attach -b must succeed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // 2b. Verify session exists in isolated daemon
+        let list_script = format!(
+            "export HOME={home_str:?} XDG_RUNTIME_DIR={runtime_str:?}\n{SHPOOL_SCRIPT_PRELUDE}\n\"$SHPOOL_BIN\" -s \"$SHPOOL_SOCK\" list --json\n"
+        );
+        let task = project.update(cx, |p, cx| p.exec_script_in_sh(list_script.clone(), cx));
+        let mut cmd = task.await.expect("list command creation");
+        let output = cmd.output().await.expect("list execution");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("zed-test-isolated"),
+            "isolated daemon must list attached session before kill"
+        );
+
+        // 2c. Exercise production kill: kill_persistent_terminal_session
+        let kill_res = project
+            .update(cx, |p, cx| {
+                p.kill_persistent_terminal_session("zed-test-isolated".to_string(), cx)
+            })
+            .await;
+        assert!(kill_res.is_ok(), "production kill must succeed");
+
+        // 2d. Verify session is now absent from isolated daemon
+        let task = project.update(cx, |p, cx| p.exec_script_in_sh(list_script, cx));
+        let mut cmd = task.await.expect("list command creation");
+        let output = cmd.output().await.expect("list execution");
+        assert!(
+            !String::from_utf8_lossy(&output.stdout).contains("zed-test-isolated"),
+            "session must be absent from isolated daemon after production kill"
+        );
+
+        // 2e. Production kill on non-existent session must succeed idempotently
+        let kill_nonexistent = project
+            .update(cx, |p, cx| {
+                p.kill_persistent_terminal_session("zed-test-isolated".to_string(), cx)
+            })
+            .await;
+        assert!(
+            kill_nonexistent.is_ok(),
+            "production kill on non-existent session must succeed idempotently"
+        );
+
+        // 3. Strict raw kill verification: rc=1 and exact stderr message
+        let raw_kill_script = format!(
+            "export HOME={home_str:?} XDG_RUNTIME_DIR={runtime_str:?}\n{SHPOOL_SCRIPT_PRELUDE}\n\"$SHPOOL_BIN\" -s \"$SHPOOL_SOCK\" kill zed-test-isolated\n"
+        );
+        let raw_task = project.update(cx, |p, cx| p.exec_script_in_sh(raw_kill_script, cx));
+        let mut raw_cmd = raw_task.await.expect("raw kill command creation");
+        let raw_output = raw_cmd.output().await.expect("raw kill execution");
+        let raw_stderr = String::from_utf8_lossy(&raw_output.stderr);
+        assert_eq!(
+            raw_output.status.code(),
+            Some(1),
+            "shpool kill of non-existent session must exit with status 1"
+        );
+        assert!(
+            raw_stderr.contains("not found: zed-test-isolated")
+                || raw_stderr.contains("no such session: zed-test-isolated"),
+            "stderr must report not found for nonexistent session, got: {raw_stderr}"
+        );
+
+        // 4. Shutdown daemon explicitly before dropping tempdir
+        let pid_path = isolated_runtime
+            .join("shpool")
+            .join("daemonized-shpool.pid");
+        assert!(pid_path.exists(), "daemonized-shpool.pid must exist");
+        let pid_str = std::fs::read_to_string(&pid_path).expect("read daemonized-shpool.pid");
+        let daemon_pid = pid_str.trim().parse::<u32>().expect("valid pid");
+
+        // Verify that the PID's cmdline contains tempdir before sending any signal
+        let ps_output = smol::process::Command::new("/bin/ps")
+            .args(["-p", &daemon_pid.to_string(), "-o", "command="])
+            .output()
+            .await
+            .expect("ps command");
+        let ps_cmd = String::from_utf8_lossy(&ps_output.stdout);
+        assert!(
+            ps_cmd.contains(&runtime_str),
+            "daemon process command line must contain isolated temp runtime directory"
+        );
+
+        // Kill daemon via SIGTERM
+        let kill_status = smol::process::Command::new("/bin/kill")
+            .args(["-TERM", &daemon_pid.to_string()])
+            .output()
+            .await;
+        assert!(
+            kill_status.is_ok(),
+            "SIGTERM invocation must not fail to execute"
+        );
+
+        // Poll until process is gone
+        let mut daemon_dead = false;
+        for _ in 0..50 {
+            let check = smol::process::Command::new("/bin/kill")
+                .args(["-0", &daemon_pid.to_string()])
+                .output()
+                .await;
+            if let Ok(check) = check {
+                if !check.status.success() {
+                    daemon_dead = true;
+                    break;
+                }
+            }
+            cx.background_executor
+                .timer(std::time::Duration::from_millis(100))
+                .await;
+        }
+        assert!(
+            daemon_dead,
+            "daemon PID {daemon_pid} must exit cleanly after SIGTERM"
         );
     }
 }

@@ -670,6 +670,8 @@ pub enum Event {
     TitleChanged,
     BreadcrumbsChanged,
     OutputReplaced,
+    /// The terminal's process finished, whether or not the terminal asks to be closed.
+    ProcessExited,
     CloseTerminal,
     Bell,
     Wakeup,
@@ -828,6 +830,35 @@ fn normalize_terminal_bounds(mut bounds: TerminalBounds) -> TerminalBounds {
     bounds.bounds.size.height = cmp::max(bounds.line_height, bounds.height());
     bounds.bounds.size.width = cmp::max(bounds.cell_width, bounds.width());
     bounds
+}
+
+/// How a PTY gets its size before the terminal is laid out.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PtyStartup {
+    /// The size to open the PTY with. Without it the PTY opens at a placeholder
+    /// size, and the first layout resizes it.
+    pub bounds: Option<TerminalBounds>,
+    /// Keeps the PTY at its opening size until the program writes its first
+    /// output, then applies the latest layout size. A shpool client drops resizes
+    /// that arrive while it attaches its session, so the session would keep the
+    /// opening size while the terminal shows another one.
+    pub hold_resize_until_output: bool,
+}
+
+/// See [`PtyStartup::hold_resize_until_output`].
+enum PtyResizeHold {
+    Released,
+    /// Holding until first output or timeout.
+    HoldingOutput {
+        pending_bounds: Option<TerminalBounds>,
+        _timeout_task: Option<Task<()>>,
+    },
+    /// Timeout expired before first output; will force SIGWINCH when first output arrives.
+    TimedOut {
+        bounds: Option<TerminalBounds>,
+    },
+    /// Output arrived before layout bounds were provided.
+    AwaitingLayout,
 }
 
 #[derive(Error, Debug)]
@@ -1041,6 +1072,7 @@ impl TerminalBuilder {
                 terminal_bounds,
                 ..Default::default()
             },
+            pty_resize_hold: PtyResizeHold::Released,
             last_mouse: None,
             mouse_down_position: None,
             matches: Vec::new(),
@@ -1070,6 +1102,7 @@ impl TerminalBuilder {
                 window_id,
             },
             child_exited: None,
+            process_exited: false,
             keyboard_input_sent: false,
             init_command_startup_marker: None,
             init_command_startup_tx: None,
@@ -1107,6 +1140,7 @@ impl TerminalBuilder {
         cx: &App,
         activation_script: Vec<String>,
         path_style: PathStyle,
+        pty_startup: PtyStartup,
     ) -> Task<Result<TerminalBuilder>> {
         let version = release_channel::AppVersion::global(cx);
         let background_executor = cx.background_executor().clone();
@@ -1220,13 +1254,17 @@ impl TerminalBuilder {
             };
             let config = pty_term_config(scrolling_history, cursor_shape);
 
+            let initial_bounds = pty_startup
+                .bounds
+                .map(normalize_terminal_bounds)
+                .unwrap_or_default();
             //Spawn a task so the Alacritty EventLoop (or the subprocess reader) can communicate with us
             //TODO: Remove with a bounded sender which can be dispatched on &self
             let (events_tx, events_rx) = unbounded();
             //Set up the terminal...
             let term = new_term(
                 &config,
-                TerminalBounds::default(),
+                initial_bounds,
                 events_tx.clone(),
                 alternate_scroll,
                 0,
@@ -1286,7 +1324,7 @@ impl TerminalBuilder {
                 );
 
                 //Setup the pty...
-                let pty = match open_pty(&pty_options, TerminalBounds::default(), window_id) {
+                let pty = match open_pty(&pty_options, initial_bounds, window_id) {
                     Ok(pty) => pty,
                     Err(error) => {
                         bail!(TerminalError {
@@ -1315,6 +1353,16 @@ impl TerminalBuilder {
             };
 
             let no_task = task.is_none();
+            let pty_resize_hold = if pty_startup.hold_resize_until_output
+                && matches!(terminal_type, TerminalType::Pty { .. })
+            {
+                PtyResizeHold::HoldingOutput {
+                    pending_bounds: None,
+                    _timeout_task: None,
+                }
+            } else {
+                PtyResizeHold::Released
+            };
             let terminal = Terminal {
                 task,
                 terminal_type,
@@ -1327,7 +1375,11 @@ impl TerminalBuilder {
                 output_generation: 0,
                 title_override: terminal_title_override,
                 events: VecDeque::with_capacity(10), //Should never get this high.
-                last_content: Default::default(),
+                last_content: Content {
+                    terminal_bounds: initial_bounds,
+                    ..Content::default()
+                },
+                pty_resize_hold,
                 last_mouse: None,
                 mouse_down_position: None,
                 matches: Vec::new(),
@@ -1360,6 +1412,7 @@ impl TerminalBuilder {
                     window_id,
                 },
                 child_exited: None,
+                process_exited: false,
                 keyboard_input_sent: false,
                 init_command_startup_marker: None,
                 init_command_startup_tx: None,
@@ -1418,6 +1471,18 @@ impl TerminalBuilder {
     }
 
     pub fn subscribe(mut self, cx: &Context<Terminal>) -> Terminal {
+        if let PtyResizeHold::HoldingOutput { _timeout_task, .. } =
+            &mut self.terminal.pty_resize_hold
+        {
+            *_timeout_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(5)).await;
+                this.update(cx, |this, cx| {
+                    this.release_resize_hold_timeout(cx);
+                })
+                .ok();
+            }));
+        }
+
         //Event loop
         self.terminal.event_loop_task = cx.spawn(async move |terminal, cx| {
             while let Some(event) = self.events_rx.next().await {
@@ -1538,6 +1603,7 @@ pub struct Terminal {
     mouse_down_position: Option<GpuiPoint<Pixels>>,
     pub matches: Vec<Range>,
     pub last_content: Content,
+    pty_resize_hold: PtyResizeHold,
     pub selection_head: Option<Point>,
 
     pub breadcrumb_text: String,
@@ -1557,6 +1623,9 @@ pub struct Terminal {
     template: CopyTemplate,
     activation_script: Vec<String>,
     child_exited: Option<ExitStatus>,
+    // The PTY can report `Exit` without a `ChildExit` status, so `child_exited`
+    // alone does not tell whether the process is gone.
+    process_exited: bool,
     keyboard_input_sent: bool,
     init_command_startup_marker: Option<String>,
     init_command_startup_tx: Option<Sender<()>>,
@@ -1699,6 +1768,30 @@ impl Terminal {
                 //NOOP, Handled in render
             }
             TerminalBackendEvent::Wakeup => {
+                let held = std::mem::replace(&mut self.pty_resize_hold, PtyResizeHold::Released);
+                match held {
+                    PtyResizeHold::HoldingOutput {
+                        pending_bounds: Some(bounds),
+                        ..
+                    } => {
+                        self.emit_forced_pty_resize(bounds);
+                    }
+                    PtyResizeHold::HoldingOutput {
+                        pending_bounds: None,
+                        ..
+                    } => {
+                        self.pty_resize_hold = PtyResizeHold::AwaitingLayout;
+                    }
+                    PtyResizeHold::TimedOut {
+                        bounds: Some(bounds),
+                    } => {
+                        self.emit_forced_pty_resize(bounds);
+                    }
+                    PtyResizeHold::AwaitingLayout | PtyResizeHold::TimedOut { bounds: None } => {
+                        self.pty_resize_hold = PtyResizeHold::AwaitingLayout;
+                    }
+                    PtyResizeHold::Released => {}
+                }
                 self.detect_init_command_startup_marker();
                 cx.emit(Event::Wakeup);
 
@@ -1741,6 +1834,14 @@ impl Terminal {
             &InternalEvent::Resize(new_bounds) => {
                 let new_bounds = normalize_terminal_bounds(new_bounds);
                 trace!("Resizing: new_bounds={new_bounds:?}");
+
+                // The grid follows the PTY, so the program's output keeps matching it.
+                if let PtyResizeHold::HoldingOutput { pending_bounds, .. } =
+                    &mut self.pty_resize_hold
+                {
+                    *pending_bounds = Some(new_bounds);
+                    return;
+                }
 
                 let columns_changed =
                     self.last_content.terminal_bounds.num_columns() != new_bounds.num_columns();
@@ -2172,6 +2273,22 @@ impl Terminal {
     pub fn set_size(&mut self, new_bounds: TerminalBounds) {
         let new_bounds = normalize_terminal_bounds(new_bounds);
 
+        match &mut self.pty_resize_hold {
+            PtyResizeHold::HoldingOutput { pending_bounds, .. } => {
+                *pending_bounds = Some(new_bounds);
+                return;
+            }
+            PtyResizeHold::TimedOut { bounds } => {
+                *bounds = Some(new_bounds);
+            }
+            PtyResizeHold::AwaitingLayout => {
+                self.pty_resize_hold = PtyResizeHold::Released;
+                self.emit_forced_pty_resize(new_bounds);
+                return;
+            }
+            PtyResizeHold::Released => {}
+        }
+
         let old_bounds = self.last_content.terminal_bounds;
         self.last_content.terminal_bounds = new_bounds;
 
@@ -2189,6 +2306,31 @@ impl Terminal {
         match self.events.back_mut() {
             Some(InternalEvent::Resize(pending_bounds)) => *pending_bounds = new_bounds,
             _ => self.events.push_back(InternalEvent::Resize(new_bounds)),
+        }
+    }
+
+    fn emit_forced_pty_resize(&mut self, target_bounds: TerminalBounds) {
+        let mut nudge_bounds = target_bounds;
+        if target_bounds.num_lines() > 1 {
+            nudge_bounds.bounds.size.height -= nudge_bounds.line_height;
+        } else {
+            nudge_bounds.bounds.size.height += nudge_bounds.line_height;
+        }
+        self.events.push_back(InternalEvent::Resize(nudge_bounds));
+        self.events.push_back(InternalEvent::Resize(target_bounds));
+    }
+
+    fn release_resize_hold_timeout(&mut self, cx: &mut Context<Self>) {
+        if let PtyResizeHold::HoldingOutput { pending_bounds, .. } =
+            std::mem::replace(&mut self.pty_resize_hold, PtyResizeHold::Released)
+        {
+            self.pty_resize_hold = PtyResizeHold::TimedOut {
+                bounds: pending_bounds,
+            };
+            if let Some(bounds) = pending_bounds {
+                self.events.push_back(InternalEvent::Resize(bounds));
+                cx.notify();
+            }
         }
     }
 
@@ -3201,6 +3343,15 @@ impl Terminal {
         Task::ready(None)
     }
 
+    pub fn has_exited(&self) -> bool {
+        self.process_exited
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_process_exit(&mut self, cx: &mut Context<Self>) {
+        self.register_task_finished(None, cx);
+    }
+
     fn register_task_finished(
         &mut self,
         exit_status: Option<ExitStatus>,
@@ -3209,8 +3360,12 @@ impl Terminal {
         if let Some(tx) = &self.completion_tx {
             tx.try_send(exit_status).ok();
         }
-        if let Some(e) = exit_status {
-            self.child_exited = Some(e);
+        if let Some(exit_status) = exit_status {
+            self.child_exited = Some(exit_status);
+        }
+        if !self.process_exited {
+            self.process_exited = true;
+            cx.emit(Event::ProcessExited);
         }
         self.complete_init_command_startup_handshake();
         let task = match &mut self.task {
@@ -3296,6 +3451,7 @@ impl Terminal {
             cx,
             self.activation_script.clone(),
             self.path_style,
+            PtyStartup::default(),
         )
     }
 }
@@ -3837,6 +3993,7 @@ mod tests {
                     cx,
                     vec![],
                     PathStyle::local(),
+                    PtyStartup::default(),
                 )
             })
             .await
@@ -3881,6 +4038,7 @@ mod tests {
                     cx,
                     vec![],
                     PathStyle::local(),
+                    PtyStartup::default(),
                 )
             })
             .await
@@ -4365,6 +4523,7 @@ mod tests {
                     cx,
                     Vec::new(),
                     PathStyle::local(),
+                    PtyStartup::default(),
                 )
             })
             .await
@@ -4432,6 +4591,7 @@ mod tests {
                     cx,
                     Vec::new(),
                     PathStyle::local(),
+                    PtyStartup::default(),
                 )
             })
             .await
@@ -4497,6 +4657,7 @@ mod tests {
                     cx,
                     Vec::new(),
                     PathStyle::local(),
+                    PtyStartup::default(),
                 )
             })
             .await
@@ -6459,5 +6620,313 @@ mod tests {
 
         assert!(terminal.cwd_history.is_empty());
         assert_eq!(terminal.pending_cwd_boundary, None);
+    }
+
+    #[gpui::test]
+    async fn test_pty_resize_hold_wakeup_before_layout_and_forced_sigwinch_nudge(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let terminal = cx.new(|_cx| make_display_only_terminal());
+        let initial_bounds = terminal.read_with(cx, |t, _| t.last_content.terminal_bounds);
+
+        // 1. Wakeup arrives before layout set_size: transitions to AwaitingLayout via production process_event
+        terminal.update(cx, |term, cx| {
+            term.pty_resize_hold = PtyResizeHold::HoldingOutput {
+                pending_bounds: None,
+                _timeout_task: None,
+            };
+            term.process_event(TerminalBackendEvent::Wakeup, cx);
+        });
+
+        terminal.read_with(cx, |term, _| {
+            assert!(matches!(
+                term.pty_resize_hold,
+                PtyResizeHold::AwaitingLayout
+            ));
+            assert!(
+                term.events.is_empty(),
+                "no events queued before layout bounds"
+            );
+        });
+
+        // 2. Layout set_size arrives subsequent to Wakeup:
+        // releases hold and pushes forced resize nudge (rows-1, then rows) to guarantee SIGWINCH
+        terminal.update(cx, |term, _cx| {
+            term.set_size(initial_bounds);
+        });
+
+        terminal.read_with(cx, |term, _| {
+            assert!(matches!(term.pty_resize_hold, PtyResizeHold::Released));
+            assert_eq!(term.events.len(), 2, "must push 2 resize events for nudge");
+            let first = term.events.get(0).unwrap();
+            let second = term.events.get(1).unwrap();
+            assert!(matches!(first, InternalEvent::Resize(_)));
+            assert!(matches!(second, InternalEvent::Resize(b) if *b == initial_bounds));
+        });
+
+        // 3. Layout set_size arrives before Wakeup with equal bounds:
+        terminal.update(cx, |term, _cx| {
+            term.events.clear();
+            term.pty_resize_hold = PtyResizeHold::HoldingOutput {
+                pending_bounds: None,
+                _timeout_task: None,
+            };
+            term.set_size(initial_bounds);
+        });
+
+        terminal.read_with(cx, |term, _| {
+            assert!(matches!(
+                term.pty_resize_hold,
+                PtyResizeHold::HoldingOutput {
+                    pending_bounds: Some(_),
+                    ..
+                }
+            ));
+            assert!(term.events.is_empty(), "events held during HoldingOutput");
+        });
+
+        // When Wakeup arrives via production process_event, forced nudge is dispatched:
+        terminal.update(cx, |term, cx| {
+            term.process_event(TerminalBackendEvent::Wakeup, cx);
+        });
+
+        terminal.read_with(cx, |term, _| {
+            assert!(matches!(term.pty_resize_hold, PtyResizeHold::Released));
+            assert_eq!(term.events.len(), 2, "must push 2 resize events for nudge");
+            let first = term.events.get(0).unwrap();
+            let second = term.events.get(1).unwrap();
+            assert!(matches!(first, InternalEvent::Resize(_)));
+            assert!(matches!(second, InternalEvent::Resize(b) if *b == initial_bounds));
+        });
+
+        // 4. Timeout fires while holding bounds, followed by late Wakeup
+        terminal.update(cx, |term, cx| {
+            term.events.clear();
+            term.pty_resize_hold = PtyResizeHold::HoldingOutput {
+                pending_bounds: Some(initial_bounds),
+                _timeout_task: None,
+            };
+            term.release_resize_hold_timeout(cx);
+        });
+
+        terminal.read_with(cx, |term, _| {
+            assert!(matches!(
+                term.pty_resize_hold,
+                PtyResizeHold::TimedOut { .. }
+            ));
+            assert_eq!(term.events.len(), 1, "timeout flushed pending bounds");
+        });
+
+        // Late Wakeup arrives after timeout: triggers forced nudge
+        terminal.update(cx, |term, cx| {
+            term.events.clear();
+            term.process_event(TerminalBackendEvent::Wakeup, cx);
+        });
+
+        terminal.read_with(cx, |term, _| {
+            assert!(matches!(term.pty_resize_hold, PtyResizeHold::Released));
+            assert_eq!(term.events.len(), 2, "late wakeup triggers forced nudge");
+        });
+    }
+
+    #[gpui::test]
+    async fn test_pty_resize_hold_multiple_wakeups_before_layout(cx: &mut gpui::TestAppContext) {
+        let terminal = cx.new(|_cx| make_display_only_terminal());
+        let initial_bounds = terminal.read_with(cx, |t, _| t.last_content.terminal_bounds);
+
+        terminal.update(cx, |term, cx| {
+            term.pty_resize_hold = PtyResizeHold::HoldingOutput {
+                pending_bounds: None,
+                _timeout_task: None,
+            };
+            // First wakeup: transitions to AwaitingLayout
+            term.process_event(TerminalBackendEvent::Wakeup, cx);
+            assert!(matches!(
+                term.pty_resize_hold,
+                PtyResizeHold::AwaitingLayout
+            ));
+
+            // Second wakeup before layout: must KEEP AwaitingLayout!
+            term.process_event(TerminalBackendEvent::Wakeup, cx);
+            assert!(
+                matches!(term.pty_resize_hold, PtyResizeHold::AwaitingLayout),
+                "second Wakeup before layout must NOT drop AwaitingLayout to Released"
+            );
+
+            // Now layout arrives:
+            term.set_size(initial_bounds);
+            assert!(matches!(term.pty_resize_hold, PtyResizeHold::Released));
+            assert_eq!(
+                term.events.len(),
+                2,
+                "layout after multiple wakeups must still emit forced SIGWINCH nudge"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_pty_resize_hold_timed_out_pushes_resize_on_set_size(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let terminal = cx.new(|_cx| make_display_only_terminal());
+        let initial_bounds = terminal.read_with(cx, |t, _| t.last_content.terminal_bounds);
+
+        terminal.update(cx, |term, cx| {
+            term.pty_resize_hold = PtyResizeHold::HoldingOutput {
+                pending_bounds: None,
+                _timeout_task: None,
+            };
+            term.release_resize_hold_timeout(cx);
+            assert!(matches!(
+                term.pty_resize_hold,
+                PtyResizeHold::TimedOut { .. }
+            ));
+            term.events.clear();
+
+            // Change bounds while in TimedOut state:
+            let mut new_bounds = initial_bounds;
+            new_bounds.bounds.size.height += px(100.);
+            term.set_size(new_bounds);
+
+            assert_eq!(
+                term.events.len(),
+                1,
+                "set_size in TimedOut state must push InternalEvent::Resize"
+            );
+            assert!(matches!(
+                term.events.back(),
+                Some(InternalEvent::Resize(b)) if *b == new_bounds
+            ));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_pty_resize_hold_timer_fires_via_advance_clock(cx: &mut gpui::TestAppContext) {
+        let term = cx.new(|cx| {
+            let mut builder = TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                &cx.background_executor(),
+                PathStyle::local(),
+            );
+            builder.terminal.pty_resize_hold = PtyResizeHold::HoldingOutput {
+                pending_bounds: None,
+                _timeout_task: None,
+            };
+            builder.subscribe(cx)
+        });
+
+        term.read_with(cx, |term, _| {
+            assert!(matches!(
+                term.pty_resize_hold,
+                PtyResizeHold::HoldingOutput { .. }
+            ));
+        });
+
+        // Advance clock by 5 seconds:
+        cx.background_executor.advance_clock(Duration::from_secs(5));
+        cx.run_until_parked();
+
+        term.read_with(cx, |term, _| {
+            assert!(
+                matches!(term.pty_resize_hold, PtyResizeHold::TimedOut { .. }),
+                "5s timer task must fire and transition hold to TimedOut"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_pty_resize_hold_awaiting_layout_set_size_resets_cwd_history(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (terminal, cx) = init_terminal_test_with_window(cx, b"");
+        let initial_bounds = terminal.read_with(cx, |t, _| t.last_content.terminal_bounds);
+
+        cx.update_window_entity(&terminal, |term, window, cx| {
+            // Setup AwaitingLayout state
+            term.pty_resize_hold = PtyResizeHold::HoldingOutput {
+                pending_bounds: None,
+                _timeout_task: None,
+            };
+            term.process_event(TerminalBackendEvent::Wakeup, cx);
+            assert!(matches!(
+                term.pty_resize_hold,
+                PtyResizeHold::AwaitingLayout
+            ));
+
+            // Seed stale cwd history and pending boundary
+            term.cwd_history.push(CwdHistoryEntry {
+                scrollback_position: 42,
+                working_directory: PathBuf::from("/tmp/stale"),
+            });
+            term.pending_cwd_boundary = Some(43);
+
+            // Change column dimensions in set_size:
+            let mut new_bounds = initial_bounds;
+            new_bounds.bounds.size.width += px(200.);
+            assert_ne!(
+                initial_bounds.num_columns(),
+                new_bounds.num_columns(),
+                "test setup must change columns"
+            );
+
+            term.set_size(new_bounds);
+            assert!(matches!(term.pty_resize_hold, PtyResizeHold::Released));
+
+            // Sync queued events
+            term.sync(window, cx);
+
+            // Stale cwd history must be reset!
+            assert!(
+                term.cwd_history.is_empty(),
+                "columns change during AwaitingLayout set_size must reset cwd history"
+            );
+            assert_eq!(
+                term.pending_cwd_boundary, None,
+                "pending cwd boundary must be cleared on columns change"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_pty_resize_hold_wakeup_after_timeout_without_bounds_awaits_layout(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let terminal = cx.new(|_cx| make_display_only_terminal());
+        let initial_bounds = terminal.read_with(cx, |t, _| t.last_content.terminal_bounds);
+
+        terminal.update(cx, |term, cx| {
+            // 1. Enter HoldingOutput with pending_bounds: None
+            term.pty_resize_hold = PtyResizeHold::HoldingOutput {
+                pending_bounds: None,
+                _timeout_task: None,
+            };
+
+            // 2. Timeout fires before layout: transitions to TimedOut { bounds: None }
+            term.release_resize_hold_timeout(cx);
+            assert!(matches!(
+                term.pty_resize_hold,
+                PtyResizeHold::TimedOut { bounds: None }
+            ));
+
+            // 3. Wakeup arrives: production process_event must transition to AwaitingLayout
+            term.process_event(TerminalBackendEvent::Wakeup, cx);
+            assert!(
+                matches!(term.pty_resize_hold, PtyResizeHold::AwaitingLayout),
+                "Wakeup after TimedOut {{ bounds: None }} must transition to AwaitingLayout"
+            );
+
+            // 4. Subsequent layout set_size: must emit forced SIGWINCH nudge (2 events)
+            term.events.clear();
+            term.set_size(initial_bounds);
+            assert!(matches!(term.pty_resize_hold, PtyResizeHold::Released));
+            assert_eq!(
+                term.events.len(),
+                2,
+                "layout arriving after TimedOut{{None}} + Wakeup must emit forced SIGWINCH nudge"
+            );
+        });
     }
 }

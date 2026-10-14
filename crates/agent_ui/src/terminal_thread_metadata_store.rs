@@ -162,6 +162,7 @@ pub struct TerminalThreadMetadataStore {
     reload_task: Option<Shared<Task<()>>>,
     pending_terminal_ops_tx: async_channel::Sender<DbOperation>,
     _db_operations_task: Task<()>,
+    deleted_terminal_ids: HashSet<TerminalId>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -222,6 +223,11 @@ impl TerminalThreadMetadataStore {
             .unwrap_or_else(|| Task::ready(()).shared())
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_deleted_terminal_id(&self, terminal_id: TerminalId) -> bool {
+        self.deleted_terminal_ids.contains(&terminal_id)
+    }
+
     pub fn entries_for_path<'a>(
         &'a self,
         path_list: &PathList,
@@ -279,6 +285,7 @@ impl TerminalThreadMetadataStore {
     }
 
     pub fn save(&mut self, metadata: TerminalThreadMetadata, cx: &mut Context<Self>) {
+        self.deleted_terminal_ids.remove(&metadata.terminal_id);
         self.save_internal(metadata);
         cx.notify();
     }
@@ -339,8 +346,57 @@ impl TerminalThreadMetadataStore {
         cx.notify();
     }
 
-    fn save_internal(&mut self, metadata: TerminalThreadMetadata) {
+    pub fn update_worktree_paths_for_project(
+        &mut self,
+        worktree_paths: &WorktreePaths,
+        remote_connection: Option<&RemoteConnectionOptions>,
+        cx: &mut Context<Self>,
+    ) {
+        if worktree_paths.is_empty() {
+            return;
+        }
+        let mut changed = false;
+        let terminal_ids: Vec<TerminalId> = self.terminals.keys().copied().collect();
+        for terminal_id in terminal_ids {
+            if let Some(terminal) = self.terminals.get(&terminal_id).cloned() {
+                if terminal.folder_paths().is_empty()
+                    && same_remote_connection_identity(
+                        terminal.remote_connection.as_ref(),
+                        remote_connection,
+                    )
+                    && terminal
+                        .working_directory
+                        .as_ref()
+                        .is_some_and(|working_directory| {
+                            worktree_paths
+                                .folder_path_list()
+                                .paths()
+                                .iter()
+                                .any(|folder_path| working_directory.starts_with(folder_path))
+                        })
+                {
+                    let mut updated = terminal;
+                    updated.worktree_paths = worktree_paths.clone();
+                    self.save_internal(updated);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn save_internal(&mut self, mut metadata: TerminalThreadMetadata) {
         if let Some(existing) = self.terminals.get(&metadata.terminal_id) {
+            metadata.created_at = existing.created_at;
+            if metadata.folder_paths().is_empty() && !existing.folder_paths().is_empty() {
+                metadata.worktree_paths = existing.worktree_paths.clone();
+            }
+            if metadata.remote_connection.is_none() && existing.remote_connection.is_some() {
+                metadata.remote_connection = existing.remote_connection.clone();
+            }
+
             if existing.folder_paths() != metadata.folder_paths()
                 && let Some(ids) = self.terminals_by_paths.get_mut(existing.folder_paths())
             {
@@ -380,6 +436,9 @@ impl TerminalThreadMetadataStore {
     }
 
     pub fn delete(&mut self, terminal_id: TerminalId, cx: &mut Context<Self>) {
+        if self.reload_task.is_some() {
+            self.deleted_terminal_ids.insert(terminal_id);
+        }
         if let Some(terminal) = self.terminals.remove(&terminal_id) {
             if let Some(ids) = self.terminals_by_paths.get_mut(terminal.folder_paths()) {
                 ids.remove(&terminal_id);
@@ -428,6 +487,7 @@ impl TerminalThreadMetadataStore {
             terminals: HashMap::default(),
             terminals_by_paths: HashMap::default(),
             terminals_by_main_paths: HashMap::default(),
+            deleted_terminal_ids: HashSet::default(),
             reload_task: None,
             pending_terminal_ops_tx: tx,
             _db_operations_task,
@@ -461,14 +521,16 @@ impl TerminalThreadMetadataStore {
                     .unwrap_or_default();
 
                 this.update(cx, |this, cx| {
-                    this.terminals.clear();
-                    this.terminals_by_paths.clear();
-                    this.terminals_by_main_paths.clear();
-
                     for row in rows {
-                        this.cache_terminal_metadata(row);
+                        if !this.deleted_terminal_ids.contains(&row.terminal_id)
+                            && !this.terminals.contains_key(&row.terminal_id)
+                        {
+                            this.cache_terminal_metadata(row);
+                        }
                     }
 
+                    this.deleted_terminal_ids.clear();
+                    this.reload_task = None;
                     cx.notify();
                 })
                 .ok();
@@ -547,13 +609,13 @@ impl TerminalThreadMetadataDb {
                        ON CONFLICT(terminal_id) DO UPDATE SET \
                            title = excluded.title, \
                            custom_title = excluded.custom_title, \
-                           created_at = excluded.created_at, \
+                           created_at = sidebar_terminal_threads.created_at, \
                            working_directory = excluded.working_directory, \
-                           folder_paths = excluded.folder_paths, \
-                           folder_paths_order = excluded.folder_paths_order, \
-                           main_worktree_paths = excluded.main_worktree_paths, \
-                           main_worktree_paths_order = excluded.main_worktree_paths_order, \
-                           remote_connection = excluded.remote_connection";
+                           folder_paths = COALESCE(excluded.folder_paths, sidebar_terminal_threads.folder_paths), \
+                           folder_paths_order = COALESCE(excluded.folder_paths_order, sidebar_terminal_threads.folder_paths_order), \
+                           main_worktree_paths = COALESCE(excluded.main_worktree_paths, sidebar_terminal_threads.main_worktree_paths), \
+                           main_worktree_paths_order = COALESCE(excluded.main_worktree_paths_order, sidebar_terminal_threads.main_worktree_paths_order), \
+                           remote_connection = COALESCE(excluded.remote_connection, sidebar_terminal_threads.remote_connection)";
             let mut stmt = Statement::prepare(conn, sql)?;
             let mut i = stmt.bind(&terminal_id, 1)?;
             i = stmt.bind(&title, i)?;
@@ -797,6 +859,345 @@ mod tests {
                     .main_worktree_paths()
                     .paths(),
                 old_main_paths.paths()
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_created_at_immutable_on_resave(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let initial_time = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut meta = metadata(
+            "Test",
+            WorktreePaths::from_folder_paths(&PathList::default()),
+        );
+        meta.created_at = initial_time;
+        let terminal_id = meta.terminal_id;
+
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(meta.clone(), cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let new_time = DateTime::parse_from_rfc3339("2026-02-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        meta.created_at = new_time;
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(meta, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let store = TerminalThreadMetadataStore::global(cx);
+            let entry = store.read(cx).entry(terminal_id).unwrap().clone();
+            assert_eq!(
+                entry.created_at, initial_time,
+                "in-memory created_at must be immutable"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_worktree_paths_not_overwritten_by_empty(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let paths = PathList::new(&[Path::new("/project")]);
+        let worktree_paths = WorktreePaths::from_folder_paths(&paths);
+        let mut meta = metadata("Test", worktree_paths.clone());
+        let terminal_id = meta.terminal_id;
+
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(meta.clone(), cx);
+            });
+        });
+        cx.run_until_parked();
+
+        meta.worktree_paths = WorktreePaths::default();
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(meta, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let store = TerminalThreadMetadataStore::global(cx);
+            let entry = store.read(cx).entry(terminal_id).unwrap().clone();
+            assert_eq!(
+                entry.worktree_paths, worktree_paths,
+                "worktree paths must not be overwritten by empty"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_reload_preserves_concurrent_writes_and_honors_deleted_tombstones(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let database = cx.update(|cx| {
+            let store = TerminalThreadMetadataStore::global(cx);
+            store.read(cx).db.clone()
+        });
+        let deleted_metadata = metadata("Deleted", WorktreePaths::default());
+        let old_folder_paths = PathList::new(&[Path::new("/project/old")]);
+        let old_worktree_paths = WorktreePaths::from_folder_paths(&old_folder_paths);
+        let old_metadata = metadata("Old value", old_worktree_paths.clone());
+        let deleted_terminal_id = deleted_metadata.terminal_id;
+        let replaced_terminal_id = old_metadata.terminal_id;
+        database
+            .save(deleted_metadata)
+            .await
+            .expect("deleted metadata should seed the database");
+        database
+            .save(old_metadata.clone())
+            .await
+            .expect("old metadata should seed the database");
+
+        let new_folder_paths = PathList::new(&[Path::new("/project/new")]);
+        let new_worktree_paths = WorktreePaths::from_folder_paths(&new_folder_paths);
+        let mut replacement_metadata = old_metadata;
+        replacement_metadata.title = "New value".into();
+        replacement_metadata.worktree_paths = new_worktree_paths.clone();
+        let added_metadata = metadata("Added during reload", new_worktree_paths.clone());
+        let added_terminal_id = added_metadata.terminal_id;
+
+        let (pending_terminal_ops_tx, pending_terminal_ops_rx) = async_channel::unbounded();
+        let store = cx.update(|cx| {
+            cx.new(|_| TerminalThreadMetadataStore {
+                db: database.clone(),
+                terminals: HashMap::default(),
+                terminals_by_paths: HashMap::default(),
+                terminals_by_main_paths: HashMap::default(),
+                reload_task: None,
+                pending_terminal_ops_tx,
+                _db_operations_task: Task::ready(()),
+                deleted_terminal_ids: HashSet::default(),
+            })
+        });
+        let _held_operations_receiver = pending_terminal_ops_rx;
+
+        store.update(cx, |store, cx| store.reload(cx));
+        let reload_task = store.read_with(cx, |store, _cx| store.reload_task());
+        store.update(cx, |store, cx| {
+            store.delete(deleted_terminal_id, cx);
+            store.save(replacement_metadata.clone(), cx);
+            store.save(added_metadata.clone(), cx);
+        });
+
+        reload_task.await;
+        cx.run_until_parked();
+
+        store.read_with(cx, |store, _cx| {
+            assert!(
+                store.entry(deleted_terminal_id).is_none(),
+                "deleted database row must not return during reload"
+            );
+            let replacement = store
+                .entry(replaced_terminal_id)
+                .expect("replacement metadata should remain in the store");
+            assert_eq!(replacement.title.as_ref(), "New value");
+            assert_eq!(
+                replacement.worktree_paths,
+                replacement_metadata.worktree_paths
+            );
+            assert!(store.entry(added_terminal_id).is_some());
+            assert!(
+                store
+                    .entries_for_path(&old_folder_paths, None)
+                    .next()
+                    .is_none(),
+                "replaced metadata must leave the old path index"
+            );
+            let new_path_terminal_ids = store
+                .entries_for_path(&new_folder_paths, None)
+                .map(|metadata| metadata.terminal_id)
+                .collect::<HashSet<_>>();
+            assert_eq!(
+                new_path_terminal_ids,
+                [replaced_terminal_id, added_terminal_id]
+                    .into_iter()
+                    .collect::<HashSet<_>>()
+            );
+            let new_main_path_terminal_ids = store
+                .entries_for_main_worktree_path(new_worktree_paths.main_worktree_path_list(), None)
+                .map(|metadata| metadata.terminal_id)
+                .collect::<HashSet<_>>();
+            assert_eq!(
+                new_main_path_terminal_ids,
+                [replaced_terminal_id, added_terminal_id]
+                    .into_iter()
+                    .collect::<HashSet<_>>()
+            );
+            assert!(
+                store.deleted_terminal_ids.is_empty(),
+                "reload completion should clear deleted tombstones"
+            );
+            assert!(
+                store.reload_task.is_none(),
+                "completed reload should clear the in-flight task"
+            );
+        });
+
+        store.update(cx, |store, cx| store.delete(added_terminal_id, cx));
+        store.read_with(cx, |store, _cx| {
+            assert!(
+                !store.deleted_terminal_ids.contains(&added_terminal_id),
+                "a delete after reload should not create a tombstone"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_update_worktree_paths_for_project_scopes_adoption_to_working_directory(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let remote_connection = RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+            host: "same-host".into(),
+            ..Default::default()
+        });
+        let other_remote_connection = RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+            host: "other-host".into(),
+            ..Default::default()
+        });
+        let project_folder_paths = PathList::new(&[Path::new("/repo")]);
+        let project_worktree_paths = WorktreePaths::from_folder_paths(&project_folder_paths);
+        let existing_folder_paths = PathList::new(&[Path::new("/existing")]);
+        let existing_worktree_paths = WorktreePaths::from_folder_paths(&existing_folder_paths);
+
+        let mut nested_metadata = metadata("Nested", WorktreePaths::default());
+        nested_metadata.working_directory = Some(PathBuf::from("/repo/nested"));
+        nested_metadata.remote_connection = Some(remote_connection.clone());
+        let nested_terminal_id = nested_metadata.terminal_id;
+
+        let mut root_metadata = metadata("Root", WorktreePaths::default());
+        root_metadata.working_directory = Some(PathBuf::from("/repo"));
+        root_metadata.remote_connection = Some(remote_connection.clone());
+        let root_terminal_id = root_metadata.terminal_id;
+
+        let mut sibling_metadata = metadata("Sibling prefix", WorktreePaths::default());
+        sibling_metadata.working_directory = Some(PathBuf::from("/repo-other/nested"));
+        sibling_metadata.remote_connection = Some(remote_connection.clone());
+        let sibling_terminal_id = sibling_metadata.terminal_id;
+
+        let mut other_host_metadata = metadata("Other host", WorktreePaths::default());
+        other_host_metadata.working_directory = Some(PathBuf::from("/repo/nested"));
+        other_host_metadata.remote_connection = Some(other_remote_connection);
+        let other_host_terminal_id = other_host_metadata.terminal_id;
+
+        let mut no_directory_metadata = metadata("No directory", WorktreePaths::default());
+        no_directory_metadata.remote_connection = Some(remote_connection.clone());
+        let no_directory_terminal_id = no_directory_metadata.terminal_id;
+
+        let mut existing_metadata = metadata("Existing paths", existing_worktree_paths.clone());
+        existing_metadata.working_directory = Some(PathBuf::from("/repo/nested"));
+        existing_metadata.remote_connection = Some(remote_connection.clone());
+        let existing_terminal_id = existing_metadata.terminal_id;
+
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(nested_metadata, cx);
+                store.save(root_metadata, cx);
+                store.save(sibling_metadata, cx);
+                store.save(other_host_metadata, cx);
+                store.save(no_directory_metadata, cx);
+                store.save(existing_metadata, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.update_worktree_paths_for_project(
+                    &project_worktree_paths,
+                    Some(&remote_connection),
+                    cx,
+                );
+            });
+        });
+
+        cx.update(|cx| {
+            let store_entity = TerminalThreadMetadataStore::global(cx);
+            let store = store_entity.read(cx);
+            assert_eq!(
+                store
+                    .entry(nested_terminal_id)
+                    .expect("nested directory metadata should remain")
+                    .worktree_paths,
+                project_worktree_paths
+            );
+            assert_eq!(
+                store
+                    .entry(root_terminal_id)
+                    .expect("root directory metadata should remain")
+                    .worktree_paths,
+                project_worktree_paths
+            );
+            assert!(
+                store
+                    .entry(sibling_terminal_id)
+                    .expect("sibling metadata should remain")
+                    .worktree_paths
+                    .is_empty(),
+                "a sibling path with a shared string prefix must not be adopted"
+            );
+            assert!(
+                store
+                    .entry(other_host_terminal_id)
+                    .expect("other-host metadata should remain")
+                    .worktree_paths
+                    .is_empty(),
+                "paths from another remote identity must not be adopted"
+            );
+            assert!(
+                store
+                    .entry(no_directory_terminal_id)
+                    .expect("metadata without a working directory should remain")
+                    .worktree_paths
+                    .is_empty(),
+                "missing working directory is insufficient evidence for adoption"
+            );
+            assert_eq!(
+                store
+                    .entry(existing_terminal_id)
+                    .expect("metadata with existing paths should remain")
+                    .worktree_paths,
+                existing_worktree_paths
+            );
+            let indexed_terminal_ids = store
+                .entries_for_path(&project_folder_paths, Some(&remote_connection))
+                .map(|metadata| metadata.terminal_id)
+                .collect::<HashSet<_>>();
+            assert_eq!(
+                indexed_terminal_ids,
+                [nested_terminal_id, root_terminal_id]
+                    .into_iter()
+                    .collect::<HashSet<_>>()
+            );
+            let indexed_main_worktree_ids = store
+                .entries_for_main_worktree_path(
+                    project_worktree_paths.main_worktree_path_list(),
+                    Some(&remote_connection),
+                )
+                .map(|metadata| metadata.terminal_id)
+                .collect::<HashSet<_>>();
+            assert_eq!(
+                indexed_main_worktree_ids,
+                [nested_terminal_id, root_terminal_id]
+                    .into_iter()
+                    .collect::<HashSet<_>>()
             );
         });
     }
