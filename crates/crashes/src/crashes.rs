@@ -50,6 +50,7 @@ pub fn init<F, S, C, P>(
     spawn: S,
     socket_path: P,
     wait_timer: C,
+    logs_dir: PathBuf,
 ) -> impl Future<Output = Arc<Client>> + use<F, C, S, P>
 where
     F: Future<Output = ()> + Send + Sync + 'static,
@@ -57,7 +58,7 @@ where
     S: FnOnce(Pin<Box<dyn Future<Output = ()> + Send + 'static>>),
     P: FnOnce(u32) -> PathBuf,
 {
-    connect_and_keepalive(crash_init, socket_path, wait_timer, spawn)
+    connect_and_keepalive(crash_init, socket_path, wait_timer, spawn, logs_dir)
 }
 
 /// Spawn the crash-handler subprocess, connect the IPC client, and run the
@@ -68,6 +69,7 @@ async fn connect_and_keepalive<F, C, S, P>(
     socket_path: P,
     wait_timer: C,
     spawn: S,
+    logs_dir: PathBuf,
 ) -> Arc<Client>
 where
     F: Future<Output = ()> + Send + Sync + 'static,
@@ -77,7 +79,7 @@ where
 {
     let exe = env::current_exe().expect("unable to find ourselves");
     let socket_path = socket_path(process::id());
-    let mut _crash_handler = spawn_crash_handler(&exe, &socket_path);
+    let mut _crash_handler = spawn_crash_handler(&exe, &socket_path, &logs_dir);
     info!("spawning crash handler process");
     let mut elapsed = Duration::ZERO;
     let retry_frequency = Duration::from_millis(100);
@@ -642,16 +644,22 @@ mod macos {
     }
 }
 #[cfg(not(target_os = "windows"))]
-fn spawn_crash_handler(exe: &Path, socket_name: &Path) -> async_process::Child {
-    async_process::Command::new(exe)
-        .arg("--crash-handler")
-        .arg(&socket_name)
+fn crash_handler_command(exe: &Path, socket_name: &Path, logs_dir: &Path) -> process::Command {
+    let mut command = process::Command::new(exe);
+    command.arg("--crash-handler").arg(socket_name)
+        .arg("--crash-handler-logs-dir").arg(logs_dir);
+    command
+}
+
+#[cfg(not(target_os = "windows"))]
+fn spawn_crash_handler(exe: &Path, socket_name: &Path, logs_dir: &Path) -> async_process::Child {
+    async_process::Command::from(crash_handler_command(exe, socket_name, logs_dir))
         .spawn()
         .expect("unable to spawn server process")
 }
 
 #[cfg(target_os = "windows")]
-fn spawn_crash_handler(exe: &Path, socket_name: &Path) {
+fn spawn_crash_handler(exe: &Path, socket_name: &Path, logs_dir: &Path) {
     use std::ffi::OsStr;
     use std::iter::once;
     use std::os::windows::ffi::OsStrExt;
@@ -662,9 +670,10 @@ fn spawn_crash_handler(exe: &Path, socket_name: &Path) {
     use windows::core::PWSTR;
 
     let mut command_line: Vec<u16> = OsStr::new(&format!(
-        "\"{}\" --crash-handler \"{}\"",
+        "\"{}\" --crash-handler \"{}\" --crash-handler-logs-dir \"{}\"",
         exe.display(),
-        socket_name.display()
+        socket_name.display(),
+        logs_dir.display()
     ))
     .encode_wide()
     .chain(once(0))
@@ -928,4 +937,22 @@ mod tests {
             logs_dir: PathBuf::new(),
         }
     }
+    #[cfg(unix)]
+    #[test]
+    fn test_crash_handler_child_uses_the_resolved_log_directory() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = env::temp_dir().join(format!("zed-crash-path-{}-{unique}", process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("fake crash handler");
+        fs::write(&executable, b"#!/bin/sh\n[ \"$1\" = --crash-handler ] && [ \"$3\" = --crash-handler-logs-dir ] || exit 1\nmkdir -p \"$4\" || exit 1\nprintf isolated > \"$4/test-minidump\"\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let logs = root.join("custom logs 'with spaces'");
+        let output = crash_handler_command(&executable, &root.join("socket path"), &logs).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(fs::read(logs.join("test-minidump")).unwrap(), b"isolated");
+        assert!(!root.join("logs/test-minidump").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
 }
