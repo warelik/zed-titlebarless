@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 16:10:17 +0300
-Subject: [PATCH 5/8] Add toolbar.compact and panel_rows_tab_height settings
+Subject: [PATCH 05/11] Add toolbar.compact and panel_rows_tab_height settings
 
 Both settings line rows up with the tab bar height.
 

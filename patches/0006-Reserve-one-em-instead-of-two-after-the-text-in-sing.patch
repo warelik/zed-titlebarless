@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 22:31:38 +0300
-Subject: [PATCH 6/8] Reserve one em instead of two after the text in
+Subject: [PATCH 06/11] Reserve one em instead of two after the text in
  single-line editors
 
 Single-line editors have nothing to scroll past their end, yet they

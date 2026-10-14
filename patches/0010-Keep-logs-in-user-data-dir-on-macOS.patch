@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: warelik <warelik@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 10:36:47 +0300
+Subject: [PATCH 10/11] Keep logs in --user-data-dir on macOS
+
+--user-data-dir is documented to hold the logs, but on macOS they stayed in
+~/Library/Logs/Zed. A second instance started with its own data directory, such
+as a development build run next to the installed Zed, then wrote into the
+installed instance's Zed.log and truncated its telemetry.log. Without the flag
+the logs stay where they were.
+---
+ crates/paths/src/paths.rs | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/crates/paths/src/paths.rs b/crates/paths/src/paths.rs
+index 9c16f1db28..801688a8f4 100644
+--- a/crates/paths/src/paths.rs
++++ b/crates/paths/src/paths.rs
+@@ -228,7 +228,9 @@ pub fn hang_traces_dir() -> &'static PathBuf {
+ pub fn logs_dir() -> &'static PathBuf {
+     static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
+     LOGS_DIR.get_or_init(|| {
+-        if cfg!(target_os = "macos") {
++        // `--user-data-dir` keeps the logs too, so that a second instance does not write into
++        // the logs of the instance using the default location.
++        if cfg!(target_os = "macos") && CUSTOM_DATA_DIR.get().is_none() {
+             home_dir().join("Library/Logs").join(APP_NAME)
+         } else {
+             data_dir().join("logs")
+-- 
+2.55.0
+

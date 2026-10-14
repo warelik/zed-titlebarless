@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 11:28:27 +0300
-Subject: [PATCH 1/8] Add title_bar_to_status_bar setting
+Subject: [PATCH 01/11] Add title_bar_to_status_bar setting
 
 The title bar spends a whole row of vertical space on a few controls,
 while the status bar at the bottom of the window has room for them.

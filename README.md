@@ -47,6 +47,8 @@ Without any setting:
 - Single-line editors (such as the threads sidebar search) reserve one em instead of two after the text.
 - A flat light theme, Mono Light, is bundled. It only appears in the theme picker (`"theme": "Mono Light"`); the default theme is unchanged.
 - Auto-update comes from this repository's releases. SSH remoting still downloads the official remote server, since the version matches upstream.
+- Agent panel terminal threads keep their shell in a [shpool](https://github.com/shell-pool/shpool) session when `shpool` is on the host's `PATH`, so they survive restarts and dropped SSH connections; a thread is closed only with its × button. Without shpool the terminal runs a plain shell as before.
+- On macOS `--user-data-dir` also holds the logs, as documented, so a second instance no longer writes into the default instance's `Zed.log`.
 
 ### Optional density settings
 
@@ -59,7 +61,7 @@ Every setting below defaults to stock Zed. None of them has a Settings UI entry:
   "tab_bar": { "pinned_tab_chips": true, "unpinned_tab_chips": true },
   "toolbar": { "compact": true },
   "panel_rows_tab_height": true,
-  "agent": { "threads_sidebar": { "compact": true } },
+  "agent": { "threads_sidebar": { "compact": true, "in_agent_panel": true } },
   "shadows": { "project_panel": false, "minimap": false }
 }
 ```
@@ -72,6 +74,7 @@ Every setting below defaults to stock Zed. None of them has a Settings UI entry:
 | `toolbar.compact` | `false` | The pane toolbar gets the height of the tab bar: no vertical padding, no gap above secondary rows, and search rows, errors, hints and banners are sized to the tab height, so a single-row toolbar equals the tab bar. The search bar above an agent panel terminal is compacted too. |
 | `panel_rows_tab_height` | `false` | Every row in the project, git and outline panels takes the tab bar height. |
 | `agent.threads_sidebar.compact` | `false` | Each thread is one row at the tab bar height; hovering a thread shows its metadata and actions instead of the title. Project group headers and the "No threads yet" row take the same height. |
+| `agent.threads_sidebar.in_agent_panel` | `false` | The threads sidebar is not shown; its contents become two tab rows at the top of the agent panel, in place of the thread title: the window's projects, then the threads and terminals of the active project. The rows use the editor's tabs and tab settings (chips, width bounds, close button). Click activates, double-click renames, middle-click or × archives a thread or closes a terminal, right-click opens the sidebar's menu. Thread history is in the agent panel's ⋯ menu. |
 | `shadows.project_panel` | `true` | `false` removes the shadow under the sticky folder rows of the project panel. |
 | `shadows.minimap` | `true` | `false` removes the shadow around the minimap. |
 
@@ -90,6 +93,6 @@ Other changes will come later, if upstream rejects them.
 
 ## How it's built
 
-- [`patches/`](patches) holds the changes on top of upstream stable: one patch per commit of the fork, eight in total, written against `v1.23.2` and applied in file name order.
+- [`patches/`](patches) holds the changes on top of upstream stable: one patch per commit of the fork, eleven in total, written against `v1.23.2` and applied in file name order.
 - [`.github/workflows/release.yml`](.github/workflows/release.yml) checks for a new upstream stable release every 6 hours, applies the patches, builds the DMG on a GitHub macOS runner and publishes a release with `latest.json` for auto-update.
 - If a patch stops applying, the workflow fails. Regenerate the patches against the new tag and push.

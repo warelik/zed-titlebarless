@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 11:28:27 +0300
-Subject: [PATCH 3/8] Add compact threads sidebar and halve its minimum width
+Subject: [PATCH 03/11] Add compact threads sidebar and halve its minimum width
 
 Each sidebar thread takes two lines even when its only metadata is a
 timestamp, so few threads fit on screen. With

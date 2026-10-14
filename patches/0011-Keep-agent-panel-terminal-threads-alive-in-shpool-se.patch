@@ -1,0 +1,1299 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: warelik <warelik@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 13:09:08 +0300
+Subject: [PATCH 11/11] Keep agent panel terminal threads alive in shpool
+ sessions
+
+A terminal thread in the agent panel runs its shell in the shpool session
+`zed-<terminal id>` when shpool is available on the host the shell runs on,
+the Mac or the SSH server. The session outlives the terminal, the SSH
+connection and Zed, and the thread reattaches to it. Without shpool the
+thread runs a plain shell, as before.
+
+A thread is removed only by closing it. When its process exits, from `exit`,
+an SSH drop or sleep, the thread stays with a bar offering a restart, and the
+active thread restarts on its own once the remote connection is back.
+Closing a thread kills its session.
+
+The PTY of a shpool terminal opens at the size the terminal will be laid out
+at and keeps it until shpool writes output: a shpool client drops resizes that
+arrive while it attaches, which left sessions at the 6x100 placeholder size.
+The panel saves the terminal size so the first terminal after a restart opens
+at it.
+
+Remote reconnects now make 5 attempts with exponential backoff, so a network
+that comes up seconds after a wake from sleep is still reached.
+---
+ crates/acp_thread/src/acp_thread.rs       |   1 +
+ crates/agent_ui/src/agent_panel.rs        | 192 ++++++++++++++++---
+ crates/agent_ui/src/conversation_view.rs  |   1 -
+ crates/project/src/terminals.rs           | 218 +++++++++++++++++++++-
+ crates/remote/src/remote_client.rs        |  10 +-
+ crates/sidebar/src/sidebar.rs             |  16 +-
+ crates/sidebar/src/sidebar_tests.rs       | 110 ++++-------
+ crates/terminal/src/terminal.rs           |  78 +++++++-
+ crates/terminal_view/src/terminal_view.rs |   1 +
+ 9 files changed, 510 insertions(+), 117 deletions(-)
+
+diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs
+index 832766aec7..f1cb1d6eca 100644
+--- a/crates/acp_thread/src/acp_thread.rs
++++ b/crates/acp_thread/src/acp_thread.rs
+@@ -9798,6 +9798,7 @@ mod tests {
+                     cx,
+                     vec![],
+                     PathStyle::local(),
++                    ::terminal::PtyStartup::default(),
+                 )
+             })
+             .await
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index d1a8a392ef..a9e160242e 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -75,18 +75,21 @@ use fs::Fs;
+ use futures::FutureExt as _;
+ use gpui::{
+     Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, ClipboardItem,
+-    Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyContext, Pixels,
++    Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyContext, KeyDownEvent, Pixels,
+     PlatformDisplay, Subscription, Task, TaskExt, WeakEntity, WindowHandle, prelude::*,
+     pulsating_between,
+ };
+ use language::LanguageRegistry;
+ use language_model::LanguageModelRegistry;
+ use notifications::status_toast::StatusToast;
++use project::terminals::{PersistentSession, PersistentTerminal};
+ use project::{Project, ProjectPath, Worktree};
++use remote::RemoteClientEvent;
+ use settings::{NotifyWhenAgentWaiting, Settings, SettingsStore, update_settings_file};
+ 
+ use search::{BufferSearchBar, buffer_search::Deploy as DeployBufferSearch};
+ use terminal::Event as TerminalEvent;
++use terminal::TerminalBounds;
+ #[cfg(any(test, feature = "test-support"))]
+ use terminal::terminal_settings::TerminalSettings;
+ use terminal_view::TerminalView;
+@@ -165,6 +168,11 @@ impl TerminalId {
+     pub(crate) fn from_key_string(key: &str) -> anyhow::Result<Self> {
+         Ok(Self(uuid::Uuid::parse_str(key)?))
+     }
++
++    /// The shpool session that keeps this terminal thread's shell alive.
++    fn session_name(self) -> String {
++        format!("zed-{}", self.to_key_string())
++    }
+ }
+ 
+ impl fmt::Display for TerminalId {
+@@ -345,6 +353,8 @@ struct SerializedAgentPanel {
+     last_active_terminal_id: Option<String>,
+     #[serde(default)]
+     new_draft_thread_id: Option<ThreadId>,
++    #[serde(default)]
++    terminal_bounds: Option<TerminalBounds>,
+ }
+ 
+ #[derive(Serialize, Deserialize, Debug)]
+@@ -1123,6 +1133,9 @@ pub struct AgentPanel {
+     agent_panel_menu_handle: PopoverMenuHandle<ContextMenu>,
+     _extension_subscription: Option<Subscription>,
+     _project_subscription: Subscription,
++    _remote_client_subscription: Option<Subscription>,
++    /// The terminal size saved by the previous run, until a terminal is laid out.
++    restored_terminal_bounds: Option<TerminalBounds>,
+     zoomed: bool,
+     pending_serialization: Option<Task<Result<()>>>,
+     persist_selected_agent_task: Task<()>,
+@@ -1208,6 +1221,8 @@ impl AgentPanel {
+             .as_ref()
+             .map(|draft| draft.read(cx).thread_id);
+ 
++        let terminal_bounds = self.laid_out_terminal_bounds(None, cx);
++
+         let kvp = KeyValueStore::global(cx);
+         self.pending_serialization = Some(cx.background_spawn(async move {
+             save_serialized_panel(
+@@ -1218,6 +1233,7 @@ impl AgentPanel {
+                     last_active_thread,
+                     last_active_terminal_id,
+                     new_draft_thread_id,
++                    terminal_bounds,
+                 },
+                 kvp,
+             )
+@@ -1375,6 +1391,7 @@ impl AgentPanel {
+ 
+                     if let Some(serialized_panel) = &serialized_panel {
+                         panel.last_created_entry_kind = serialized_panel.last_created_entry_kind;
++                        panel.restored_terminal_bounds = serialized_panel.terminal_bounds;
+                     } else if let Some(entry_kind) = global_last_created_entry_kind {
+                         panel.last_created_entry_kind = entry_kind;
+                     }
+@@ -1445,7 +1462,7 @@ impl AgentPanel {
+         })
+     }
+ 
+-    pub(crate) fn new(workspace: &Workspace, _window: &mut Window, cx: &mut Context<Self>) -> Self {
++    pub(crate) fn new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
+         let fs = workspace.app_state().fs.clone();
+         let user_store = workspace.app_state().user_store.clone();
+         let project = workspace.project();
+@@ -1512,6 +1529,26 @@ impl AgentPanel {
+             },
+         );
+ 
++        // A remote terminal's process ends with the SSH connection; once it is
++        // back, the terminal on screen reattaches without the user asking.
++        let _remote_client_subscription = project.read(cx).remote_client().map(|remote_client| {
++            cx.subscribe_in(
++                &remote_client,
++                window,
++                |this, _remote_client, event, window, cx| match event {
++                    RemoteClientEvent::Reconnected => {
++                        if let Some(terminal_id) = this
++                            .active_terminal_id()
++                            .filter(|terminal_id| this.terminal_has_exited(*terminal_id, cx))
++                        {
++                            this.restart_terminal(terminal_id, false, window, cx);
++                        }
++                    }
++                    RemoteClientEvent::Disconnected { .. } => {}
++                },
++            )
++        });
++
+         let _settings_subscription = cx.observe_global::<SettingsStore>(|this, cx| {
+             this.cleanup_retained_threads(cx);
+         });
+@@ -1545,6 +1582,8 @@ impl AgentPanel {
+ 
+             _extension_subscription: extension_subscription,
+             _project_subscription,
++            _remote_client_subscription,
++            restored_terminal_bounds: None,
+             zoomed: false,
+             pending_serialization: None,
+             new_user_onboarding: onboarding,
+@@ -2040,13 +2079,13 @@ impl AgentPanel {
+         self.pending_terminal_spawn = Some(terminal_id);
+         let terminal_working_directory = working_directory.clone();
+         let init_command = Self::terminal_init_command(run_init_command, cx);
+-        let terminal_task = self.create_terminal_shell(working_directory, cx);
++        let terminal_task = self.create_terminal_shell(terminal_id, working_directory, cx);
+         let workspace = self.workspace.clone();
+         let workspace_id = self.workspace_id;
+         let project = self.project.downgrade();
+ 
+         cx.spawn_in(window, async move |this, cx| {
+-            let terminal = match terminal_task.await {
++            let PersistentTerminal { terminal, session } = match terminal_task.await {
+                 Ok(terminal) => terminal,
+                 Err(error) => {
+                     log::error!("failed to spawn agent panel terminal: {error:#}");
+@@ -2063,6 +2102,9 @@ impl AgentPanel {
+                     return anyhow::Ok(());
+                 }
+             };
++            // A reattached session already ran the init command when it started,
++            // and its program would receive the command as input.
++            let init_command = init_command.filter(|_| session != PersistentSession::Reattached);
+             this.update_in(cx, |this, window, cx| {
+                 let terminal_for_init_command = terminal.clone();
+                 let terminal_view = cx.new(|cx| {
+@@ -2093,9 +2135,10 @@ impl AgentPanel {
+ 
+     fn create_terminal_shell(
+         &mut self,
++        terminal_id: TerminalId,
+         working_directory: Option<PathBuf>,
+         cx: &mut Context<Self>,
+-    ) -> Task<Result<Entity<terminal::Terminal>>> {
++    ) -> Task<Result<PersistentTerminal>> {
+         // A real shell ties the spawn's timing to the host, so a test that needs
+         // to observe the panel mid-spawn installs a gate and gets a display-only
+         // terminal when it releases it.
+@@ -2103,15 +2146,48 @@ impl AgentPanel {
+         if let Some(gate) = self.test_terminal_spawn_gate.take() {
+             return cx.spawn(async move |this, cx| {
+                 gate.await.ok();
+-                this.update(cx, |this, cx| this.build_display_only_terminal(cx))
++                let terminal = this.update(cx, |this, cx| this.build_display_only_terminal(cx))?;
++                Ok(PersistentTerminal {
++                    terminal,
++                    session: PersistentSession::Unavailable,
++                })
+             });
+         }
+ 
++        let session_name = terminal_id.session_name();
++        let bounds = self.laid_out_terminal_bounds(Some(terminal_id), cx);
+         self.project.update(cx, |project, cx| {
+-            project.create_terminal_shell(working_directory, cx)
++            project.create_persistent_terminal_shell(working_directory, session_name, bounds, cx)
+         })
+     }
+ 
++    /// The size of a terminal in this panel that has been laid out, or else the
++    /// size saved by the previous run. Terminals share the panel's area, and the
++    /// active one has the current size.
++    fn laid_out_terminal_bounds(
++        &self,
++        terminal_id: Option<TerminalId>,
++        cx: &App,
++    ) -> Option<TerminalBounds> {
++        let placeholder = TerminalBounds::default();
++        self.active_terminal_id()
++            .into_iter()
++            .chain(terminal_id)
++            .filter_map(|terminal_id| self.terminals.get(&terminal_id))
++            .chain(self.terminals.values())
++            .map(|terminal| {
++                terminal
++                    .view
++                    .read(cx)
++                    .terminal()
++                    .read(cx)
++                    .last_content
++                    .terminal_bounds
++            })
++            .find(|bounds| *bounds != placeholder)
++            .or(self.restored_terminal_bounds)
++    }
++
+     fn terminal_init_command(run_init_command: bool, cx: &App) -> Option<String> {
+         run_init_command
+             .then(|| AgentSettings::get_global(cx).terminal_init_command.clone())
+@@ -2217,10 +2293,14 @@ impl AgentPanel {
+                     this.report_terminal_program(terminal_id, source, cx);
+                 }
+                 TerminalEvent::Bell => this.mark_terminal_notification(terminal_id, window, cx),
+-                TerminalEvent::CloseTerminal => {
+-                    this.request_close_terminal_from_terminal_event(terminal_id, cx);
++                // The thread outlives its process: an SSH drop, sleep or `exit`
++                // leaves it to be restarted, and only closing it removes it.
++                TerminalEvent::ProcessExited => {
++                    cx.emit(AgentPanelEvent::EntryChanged);
++                    cx.notify();
+                 }
+-                TerminalEvent::BlinkChanged(_)
++                TerminalEvent::CloseTerminal
++                | TerminalEvent::BlinkChanged(_)
+                 | TerminalEvent::OutputReplaced
+                 | TerminalEvent::SelectionsChanged
+                 | TerminalEvent::NewNavigationTarget(_)
+@@ -2315,6 +2395,13 @@ impl AgentPanel {
+             self.pending_terminal_spawn = None;
+         }
+         self.dismiss_terminal_notifications(terminal_id, cx);
++        // Closing is the only way a terminal thread goes away, so its session
++        // goes with it, also when the thread was not spawned in this run.
++        self.project
++            .update(cx, |project, cx| {
++                project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
++            })
++            .detach_and_log_err(cx);
+         if self.terminals.remove(&terminal_id).is_none() {
+             return;
+         }
+@@ -2335,14 +2422,60 @@ impl AgentPanel {
+         cx.notify();
+     }
+ 
+-    fn request_close_terminal_from_terminal_event(
++    fn terminal_has_exited(&self, terminal_id: TerminalId, cx: &App) -> bool {
++        self.terminals
++            .get(&terminal_id)
++            .is_some_and(|terminal| terminal.view.read(cx).terminal().read(cx).has_exited())
++    }
++
++    /// Starts a finished terminal thread again under the same id: it reattaches
++    /// to its shpool session, or starts a new shell in its last directory.
++    fn restart_terminal(
+         &mut self,
+         terminal_id: TerminalId,
++        focus: bool,
++        window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
+-        if let Some(metadata) = self.terminal_metadata(terminal_id, cx) {
+-            cx.emit(AgentPanelEvent::TerminalCloseRequested { metadata });
+-        }
++        let Some(metadata) = self.terminal_metadata(terminal_id, cx) else {
++            return;
++        };
++        self.restore_terminal(
++            metadata,
++            focus,
++            AgentThreadSource::AgentPanel,
++            None,
++            window,
++            cx,
++        );
++    }
++
++    fn render_exited_terminal_bar(
++        &self,
++        terminal_id: TerminalId,
++        cx: &mut Context<Self>,
++    ) -> impl IntoElement {
++        h_flex()
++            .w_full()
++            .px(DynamicSpacing::Base08.rems(cx))
++            .py(DynamicSpacing::Base04.rems(cx))
++            .gap_2()
++            .justify_between()
++            .border_t_1()
++            .border_color(cx.theme().colors().border_variant)
++            .bg(cx.theme().colors().toolbar_background)
++            .child(
++                Label::new("Process exited. Press Enter to restart.")
++                    .size(LabelSize::Small)
++                    .color(Color::Muted),
++            )
++            .child(
++                Button::new("restart-terminal", "Restart")
++                    .label_size(LabelSize::Small)
++                    .on_click(cx.listener(move |this, _, window, cx| {
++                        this.restart_terminal(terminal_id, true, window, cx);
++                    })),
++            )
+     }
+ 
+     fn emit_terminal_thread_started(
+@@ -2428,7 +2561,12 @@ impl AgentPanel {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
+-        if self.has_terminal(metadata.terminal_id) {
++        if self.pending_terminal_spawn == Some(metadata.terminal_id) {
++            return;
++        }
++        if self.has_terminal(metadata.terminal_id)
++            && !self.terminal_has_exited(metadata.terminal_id, cx)
++        {
+             self.activate_terminal(metadata.terminal_id, focus, window, cx);
+             return;
+         }
+@@ -2780,9 +2918,7 @@ impl AgentPanel {
+                 AgentPanelEvent::ActiveViewChanged | AgentPanelEvent::ActiveViewFocused => {
+                     this.dismiss_terminal_pop_up_if_visible(terminal_id, &pop_up_weak, window, cx);
+                 }
+-                AgentPanelEvent::EntryChanged
+-                | AgentPanelEvent::TerminalCloseRequested { .. }
+-                | AgentPanelEvent::ThreadInteracted { .. } => {}
++                AgentPanelEvent::EntryChanged | AgentPanelEvent::ThreadInteracted { .. } => {}
+             }
+         });
+ 
+@@ -4987,7 +5123,6 @@ pub enum AgentPanelEvent {
+     ActiveViewChanged,
+     ActiveViewFocused,
+     EntryChanged,
+-    TerminalCloseRequested { metadata: TerminalThreadMetadata },
+     ThreadInteracted { thread_id: ThreadId },
+ }
+ 
+@@ -6657,6 +6792,9 @@ impl Render for AgentPanel {
+                         .active_terminal_id()
+                         .and_then(|terminal_id| self.terminals.get(&terminal_id))
+                         .and_then(|terminal| terminal.search_bar.clone());
++                    let exited_terminal_id = self
++                        .active_terminal_id()
++                        .filter(|terminal_id| self.terminal_has_exited(*terminal_id, cx));
+                     let terminal_content = v_flex()
+                         .size_full()
+                         .when_some(search_bar, |this, search_bar| {
+@@ -6676,7 +6814,18 @@ impl Render for AgentPanel {
+                                 )
+                             })
+                         })
+-                        .child(terminal_view.clone());
++                        .child(terminal_view.clone())
++                        .when_some(exited_terminal_id, |this, terminal_id| {
++                            this.capture_key_down(cx.listener(
++                                move |this, event: &KeyDownEvent, window, cx| {
++                                    if event.keystroke.key == "enter" {
++                                        cx.stop_propagation();
++                                        this.restart_terminal(terminal_id, true, window, cx);
++                                    }
++                                },
++                            ))
++                            .child(self.render_exited_terminal_bar(terminal_id, cx))
++                        });
+ 
+                     parent
+                         .child(terminal_content)
+@@ -6968,7 +7117,7 @@ impl AgentPanel {
+     }
+ 
+     #[cfg(any(test, feature = "test-support"))]
+-    pub fn emit_test_terminal_close(&mut self, terminal_id: TerminalId, cx: &mut Context<Self>) {
++    pub fn emit_test_terminal_exit(&mut self, terminal_id: TerminalId, cx: &mut Context<Self>) {
+         let Some(terminal_entity) = self
+             .terminals
+             .get(&terminal_id)
+@@ -6977,6 +7126,7 @@ impl AgentPanel {
+             return;
+         };
+         terminal_entity.update(cx, |_terminal, cx| {
++            cx.emit(TerminalEvent::ProcessExited);
+             cx.emit(TerminalEvent::CloseTerminal);
+         });
+     }
+diff --git a/crates/agent_ui/src/conversation_view.rs b/crates/agent_ui/src/conversation_view.rs
+index ce890d8fa9..603ea69473 100644
+--- a/crates/agent_ui/src/conversation_view.rs
++++ b/crates/agent_ui/src/conversation_view.rs
+@@ -3240,7 +3240,6 @@ impl ConversationView {
+                             dismiss_if_visible(this, window, cx);
+                         }
+                         AgentPanelEvent::EntryChanged
+-                        | AgentPanelEvent::TerminalCloseRequested { .. }
+                         | AgentPanelEvent::ThreadInteracted { .. } => {}
+                     },
+                 ));
+diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
+index c9406078c9..f7eab9bcf2 100644
+--- a/crates/project/src/terminals.rs
++++ b/crates/project/src/terminals.rs
+@@ -16,11 +16,12 @@ use std::{
+ };
+ use task::{Shell, ShellBuilder, ShellKind, SpawnInTerminal};
+ use terminal::{
+-    Terminal, TerminalBuilder, TerminalMode, insert_zed_terminal_env,
++    PtyStartup, Terminal, TerminalBounds, TerminalBuilder, TerminalMode, insert_zed_terminal_env,
+     terminal_settings::TerminalSettings,
+ };
+ use util::{
+-    command::new_std_command, get_default_system_shell, get_system_shell, maybe, rel_path::RelPath,
++    ResultExt as _, command::new_std_command, get_default_system_shell, get_system_shell, maybe,
++    rel_path::RelPath,
+ };
+ 
+ use crate::{Project, ProjectPath};
+@@ -29,6 +30,62 @@ pub struct Terminals {
+     pub(crate) local_handles: Vec<WeakEntity<terminal::Terminal>>,
+ }
+ 
++pub struct PersistentTerminal {
++    pub terminal: Entity<Terminal>,
++    pub session: PersistentSession,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum PersistentSession {
++    /// The host has no usable shpool, so the terminal runs a plain shell.
++    Unavailable,
++    Created,
++    Reattached,
++}
++
++/// A program that replaces the configured shell of a terminal.
++struct ShellCommand {
++    program: String,
++    args: Vec<String>,
++    title_override: Option<String>,
++}
++
++/// Prints the shpool binary on the first line, then its sessions as JSON.
++const SHPOOL_PROBE_COMMAND: &str = "command -v shpool && shpool list --json";
++
++struct ShpoolProbe {
++    program: String,
++    sessions: Vec<String>,
++}
++
++fn parse_shpool_probe(stdout: &str) -> Option<ShpoolProbe> {
++    #[derive(serde::Deserialize)]
++    struct SessionList {
++        sessions: Vec<Session>,
++    }
++    #[derive(serde::Deserialize)]
++    struct Session {
++        name: String,
++    }
++
++    let (program, sessions) = stdout.split_once('\n')?;
++    let program = program.trim();
++    if program.is_empty() {
++        return None;
++    }
++    let sessions = serde_json::from_str::<SessionList>(sessions)
++        .context("parsing `shpool list --json`")
++        .log_err()?;
++    Some(ShpoolProbe {
++        program: program.to_string(),
++        sessions: sessions
++            .sessions
++            .into_iter()
++            .map(|session| session.name)
++            .collect(),
++    })
++}
++
+ impl Project {
+     pub fn active_entry_directory(&self, cx: &App) -> Option<PathBuf> {
+         let entry_id = self.active_entry()?;
+@@ -253,6 +310,7 @@ impl Project {
+                         cx,
+                         activation_script,
+                         path_style,
++                        PtyStartup::default(),
+                     ))
+                 })??
+                 .await?;
+@@ -287,7 +345,122 @@ impl Project {
+         cwd: Option<PathBuf>,
+         cx: &mut Context<Self>,
+     ) -> Task<Result<Entity<Terminal>>> {
+-        self.create_terminal_shell_internal(cwd, false, cx)
++        self.create_terminal_shell_internal(cwd, false, None, PtyStartup::default(), cx)
++    }
++
++    /// Creates a terminal whose shell lives in the shpool session `session_name`
++    /// on the host the shell runs on, so the shell outlives the terminal, the
++    /// SSH connection and Zed itself. Reattaches when the session exists.
++    /// Without shpool on that host, the terminal runs a plain shell.
++    /// `bounds` is the size the terminal will be laid out at, when known: shpool
++    /// restores the session's screen at the size the terminal opens with.
++    pub fn create_persistent_terminal_shell(
++        &mut self,
++        cwd: Option<PathBuf>,
++        session_name: String,
++        bounds: Option<TerminalBounds>,
++        cx: &mut Context<Self>,
++    ) -> Task<Result<PersistentTerminal>> {
++        let probe = self.probe_shpool(cx);
++        let is_local = self.remote_client.is_none();
++        cx.spawn(async move |project, cx| {
++            let (command, session) = match probe.await {
++                Some(shpool) => {
++                    let session = if shpool.sessions.contains(&session_name) {
++                        PersistentSession::Reattached
++                    } else {
++                        PersistentSession::Created
++                    };
++                    let mut args = vec!["attach".to_string(), "--force".to_string()];
++                    if let Some(cwd) = &cwd {
++                        args.push("--dir".to_string());
++                        args.push(cwd.to_string_lossy().into_owned());
++                    }
++                    args.push(session_name);
++                    // The foreground process of a local terminal is now the shpool
++                    // client, so a title built from it would name shpool, not the
++                    // program in the session. Remote shells get the same override.
++                    let title_override = is_local.then(|| {
++                        let directory = cwd
++                            .as_ref()
++                            .and_then(|cwd| cwd.file_name())
++                            .map(|name| name.to_string_lossy().into_owned());
++                        match directory {
++                            Some(directory) => format!("{directory} — Terminal"),
++                            None => "Terminal".to_string(),
++                        }
++                    });
++                    (
++                        Some(ShellCommand {
++                            program: shpool.program,
++                            args,
++                            title_override,
++                        }),
++                        session,
++                    )
++                }
++                None => (None, PersistentSession::Unavailable),
++            };
++            let pty_startup = PtyStartup {
++                bounds,
++                hold_resize_until_output: command.is_some(),
++            };
++            let terminal = project
++                .update(cx, |project, cx| {
++                    project.create_terminal_shell_internal(cwd, false, command, pty_startup, cx)
++                })?
++                .await?;
++            Ok(PersistentTerminal { terminal, session })
++        })
++    }
++
++    /// Ends the shpool session `session_name` and everything running in it.
++    /// Does nothing on a host without shpool.
++    pub fn kill_persistent_terminal_session(
++        &mut self,
++        session_name: String,
++        cx: &mut Context<Self>,
++    ) -> Task<Result<()>> {
++        if self.path_style(cx).is_windows() || self.fs.is_fake() {
++            return Task::ready(Ok(()));
++        }
++        let Some(quoted_name) = ShellKind::Posix.try_quote(&session_name) else {
++            return Task::ready(Err(anyhow::anyhow!(
++                "cannot quote shpool session name {session_name:?}"
++            )));
++        };
++        let command = self.exec_in_shell(
++            format!("command -v shpool >/dev/null 2>&1 || exit 0; shpool kill {quoted_name}"),
++            cx,
++        );
++        cx.background_spawn(async move {
++            let output = command.await?.output().await?;
++            anyhow::ensure!(
++                output.status.success(),
++                "killing shpool session {session_name}: {}",
++                String::from_utf8_lossy(&output.stderr).trim()
++            );
++            Ok(())
++        })
++    }
++
++    /// Finds shpool and its sessions on the host the project's shells run on.
++    /// `shpool list` starts the daemon when none runs, so a reachable daemon is
++    /// what makes shpool available, not only the binary.
++    fn probe_shpool(&mut self, cx: &mut Context<Self>) -> Task<Option<ShpoolProbe>> {
++        // A project on a fake filesystem must not reach the sessions of the
++        // machine it runs on.
++        if self.path_style(cx).is_windows() || self.fs.is_fake() {
++            return Task::ready(None);
++        }
++        let command = self.exec_in_shell(SHPOOL_PROBE_COMMAND.to_string(), cx);
++        cx.background_spawn(async move {
++            let output = command.await.log_err()?.output().await.log_err()?;
++            if !output.status.success() {
++                return None;
++            }
++            parse_shpool_probe(&String::from_utf8_lossy(&output.stdout))
++        })
+     }
+ 
+     /// Creates a local terminal even if the project is remote.
+@@ -304,16 +477,25 @@ impl Project {
+             // Local project: use project directory like normal terminals
+             self.active_project_directory(cx).map(|p| p.to_path_buf())
+         };
+-        self.create_terminal_shell_internal(working_directory, true, cx)
++        self.create_terminal_shell_internal(
++            working_directory,
++            true,
++            None,
++            PtyStartup::default(),
++            cx,
++        )
+     }
+ 
+     /// Internal method for creating terminal shells.
+     /// If force_local is true, creates a local terminal even if the project has a remote client.
+     /// This allows "breaking out" to a local shell in remote projects.
++    /// `command` replaces the configured shell.
+     fn create_terminal_shell_internal(
+         &mut self,
+         cwd: Option<PathBuf>,
+         force_local: bool,
++        command: Option<ShellCommand>,
++        pty_startup: PtyStartup,
+         cx: &mut Context<Self>,
+     ) -> Task<Result<Entity<Terminal>>> {
+         let path = cwd.map(|p| Arc::from(&*p));
+@@ -344,9 +526,11 @@ impl Project {
+             })
+             .into_iter()
+             .collect();
++        // An activation script is typed into the shell, while the shell that
++        // `command` starts, e.g. a reattached shpool session, may already run a program.
+         let toolchains = project_path_contexts
+             .into_iter()
+-            .filter(|_| detect_venv)
++            .filter(|_| detect_venv && command.is_none())
+             .map(|p| self.active_toolchain(p, LanguageName::new_static("Python"), cx))
+             .collect::<Vec<_>>();
+         let remote_client = if force_local {
+@@ -430,16 +614,29 @@ impl Project {
+                         match remote_client {
+                             Some(remote_client) => {
+                                 let empty_args = Vec::new();
+-                                let spawn_command = match remote_shell.as_ref() {
+-                                    Some(Shell::System) | None => None,
+-                                    Some(Shell::Program(program)) => Some((program, &empty_args)),
+-                                    Some(Shell::WithArguments { program, args, .. }) => {
++                                let spawn_command = match (&command, remote_shell.as_ref()) {
++                                    (Some(command), _) => Some((&command.program, &command.args)),
++                                    (None, Some(Shell::System) | None) => None,
++                                    (None, Some(Shell::Program(program))) => {
++                                        Some((program, &empty_args))
++                                    }
++                                    (None, Some(Shell::WithArguments { program, args, .. })) => {
+                                         Some((program, args))
+                                     }
+                                 };
+                                 create_remote_shell(spawn_command, env, path, remote_client, cx)?
+                             }
+-                            None => (settings.shell, env),
++                            None => match command {
++                                Some(command) => (
++                                    Shell::WithArguments {
++                                        program: command.program,
++                                        args: command.args,
++                                        title_override: command.title_override,
++                                    },
++                                    env,
++                                ),
++                                None => (settings.shell, env),
++                            },
+                         }
+                     };
+                     anyhow::Ok(TerminalBuilder::new(
+@@ -457,6 +654,7 @@ impl Project {
+                         cx,
+                         activation_script,
+                         path_style,
++                        pty_startup,
+                     ))
+                 })??
+                 .await?;
+diff --git a/crates/remote/src/remote_client.rs b/crates/remote/src/remote_client.rs
+index 91eb5c5a2f..ea255c8c04 100644
+--- a/crates/remote/src/remote_client.rs
++++ b/crates/remote/src/remote_client.rs
+@@ -163,7 +163,10 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
+ const INITIAL_CONNECTION_TIMEOUT: Duration =
+     Duration::from_secs(if cfg!(debug_assertions) { 5 } else { 60 });
+ 
+-pub const MAX_RECONNECT_ATTEMPTS: usize = 3;
++pub const MAX_RECONNECT_ATTEMPTS: usize = 5;
++/// Each retry waits twice as long as the one before: after a wake from sleep the
++/// network often comes up seconds later, and immediate retries would all fail.
++const RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
+ 
+ enum State {
+     Connecting,
+@@ -667,6 +670,11 @@ impl RemoteClient {
+                 };
+             }
+ 
++            if attempts > 1 {
++                let backoff = RECONNECT_BACKOFF * 2u32.pow((attempts - 2) as u32);
++                cx.background_executor().timer(backoff).await;
++            }
++
+             if let Err(error) = remote_connection
+                 .kill()
+                 .await
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index 209c477952..5f7b94c240 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -1078,10 +1078,10 @@ impl Sidebar {
+         cx.subscribe_in(
+             workspace,
+             window,
+-            move |this, workspace, event: &workspace::Event, window, cx| {
++            move |this, _workspace, event: &workspace::Event, window, cx| {
+                 if let workspace::Event::PanelAdded(view) = event {
+                     if let Ok(agent_panel) = view.clone().downcast::<AgentPanel>() {
+-                        this.subscribe_to_agent_panel(workspace, &agent_panel, window, cx);
++                        this.subscribe_to_agent_panel(&agent_panel, window, cx);
+                         this.schedule_update_entries(false, cx);
+                     }
+                 }
+@@ -1092,7 +1092,7 @@ impl Sidebar {
+         self.observe_docks(workspace, cx);
+ 
+         if let Some(agent_panel) = workspace.read(cx).panel::<AgentPanel>(cx) {
+-            self.subscribe_to_agent_panel(workspace, &agent_panel, window, cx);
++            self.subscribe_to_agent_panel(&agent_panel, window, cx);
+         }
+     }
+ 
+@@ -1160,28 +1160,20 @@ impl Sidebar {
+ 
+     fn subscribe_to_agent_panel(
+         &mut self,
+-        workspace: &Entity<Workspace>,
+         agent_panel: &Entity<AgentPanel>,
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
+-        let workspace = workspace.downgrade();
+         cx.subscribe_in(
+             agent_panel,
+             window,
+-            move |this, agent_panel, event: &AgentPanelEvent, window, cx| match event {
++            move |this, agent_panel, event: &AgentPanelEvent, _window, cx| match event {
+                 AgentPanelEvent::ActiveViewChanged
+                 | AgentPanelEvent::ActiveViewFocused
+                 | AgentPanelEvent::EntryChanged => {
+                     this.sync_active_entry_from_panel(agent_panel, cx);
+                     this.schedule_update_entries(false, cx);
+                 }
+-                AgentPanelEvent::TerminalCloseRequested { metadata } => {
+-                    if let Some(workspace) = workspace.upgrade() {
+-                        let workspace = ThreadEntryWorkspace::Open(workspace);
+-                        this.close_terminal(metadata, &workspace, window, cx);
+-                    }
+-                }
+                 AgentPanelEvent::ThreadInteracted { thread_id } => {
+                     this.record_thread_interacted(thread_id, cx);
+                     this.schedule_update_entries(false, cx);
+diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
+index d6ae15cad5..f843699292 100644
+--- a/crates/sidebar/src/sidebar_tests.rs
++++ b/crates/sidebar/src/sidebar_tests.rs
+@@ -25,6 +25,29 @@ use std::{
+ };
+ use util::{path_list::PathList, rel_path::rel_path};
+ 
++fn close_terminal_from_sidebar(
++    sidebar: &Entity<Sidebar>,
++    terminal_id: TerminalId,
++    cx: &mut VisualTestContext,
++) {
++    let (metadata, workspace) = sidebar.read_with(cx, |sidebar, _cx| {
++        sidebar
++            .contents
++            .entries
++            .iter()
++            .find_map(|entry| match entry {
++                ListEntry::Terminal(terminal) if terminal.metadata.terminal_id == terminal_id => {
++                    Some((terminal.metadata.clone(), terminal.workspace.clone()))
++                }
++                _ => None,
++            })
++            .expect("terminal should be visible in sidebar")
++    });
++    sidebar.update_in(cx, |sidebar, window, cx| {
++        sidebar.close_terminal(&metadata, &workspace, window, cx);
++    });
++}
++
+ fn use_unique_metadata_databases(cx: &mut TestAppContext) {
+     use std::sync::atomic::{AtomicUsize, Ordering};
+ 
+@@ -2515,7 +2538,7 @@ async fn test_agent_panel_terminal_shows_project_and_linked_worktree(cx: &mut Te
+ }
+ 
+ #[gpui::test]
+-async fn test_terminal_close_event_on_archived_linked_worktree_removes_workspace(
++async fn test_closing_terminal_on_archived_linked_worktree_removes_workspace(
+     cx: &mut TestAppContext,
+ ) {
+     init_test(cx);
+@@ -2657,9 +2680,7 @@ async fn test_terminal_close_event_on_archived_linked_worktree_removes_workspace
+         "expected linked worktree terminal before closing, got: {entries_before:?}"
+     );
+ 
+-    worktree_panel.update(cx, |panel, cx| {
+-        panel.emit_test_terminal_close(terminal_id, cx);
+-    });
++    close_terminal_from_sidebar(&sidebar, terminal_id, cx);
+     for _ in 0..4 {
+         cx.run_until_parked();
+     }
+@@ -2714,7 +2735,7 @@ async fn test_terminal_close_event_on_archived_linked_worktree_removes_workspace
+ }
+ 
+ #[gpui::test]
+-async fn test_terminal_close_event_deletes_empty_draft_when_linked_worktree_has_no_archive_root(
++async fn test_closing_terminal_deletes_empty_draft_when_linked_worktree_has_no_archive_root(
+     cx: &mut TestAppContext,
+ ) {
+     init_test(cx);
+@@ -2757,7 +2778,7 @@ async fn test_terminal_close_event_deletes_empty_draft_when_linked_worktree_has_
+ 
+     let (multi_workspace, cx) =
+         cx.add_window_view(|window, cx| MultiWorkspace::test_new(main_project.clone(), window, cx));
+-    let _sidebar = setup_sidebar(&multi_workspace, cx);
++    let sidebar = setup_sidebar(&multi_workspace, cx);
+     let worktree_workspace = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+         multi_workspace.test_add_workspace(worktree_project.clone(), window, cx)
+     });
+@@ -2789,9 +2810,7 @@ async fn test_terminal_close_event_deletes_empty_draft_when_linked_worktree_has_
+         .expect("test terminal should be inserted");
+     cx.run_until_parked();
+ 
+-    worktree_panel.update(cx, |panel, cx| {
+-        panel.emit_test_terminal_close(terminal_id, cx);
+-    });
++    close_terminal_from_sidebar(&sidebar, terminal_id, cx);
+     for _ in 0..4 {
+         cx.run_until_parked();
+     }
+@@ -2821,7 +2840,7 @@ async fn test_terminal_close_event_deletes_empty_draft_when_linked_worktree_has_
+ }
+ 
+ #[gpui::test]
+-async fn test_terminal_close_event_keeps_linked_worktree_workspace_with_live_editor_draft(
++async fn test_closing_terminal_keeps_linked_worktree_workspace_with_live_editor_draft(
+     cx: &mut TestAppContext,
+ ) {
+     init_test(cx);
+@@ -2881,7 +2900,7 @@ async fn test_terminal_close_event_keeps_linked_worktree_workspace_with_live_edi
+ 
+     let (multi_workspace, cx) =
+         cx.add_window_view(|window, cx| MultiWorkspace::test_new(main_project.clone(), window, cx));
+-    let _sidebar = setup_sidebar(&multi_workspace, cx);
++    let sidebar = setup_sidebar(&multi_workspace, cx);
+     let worktree_workspace = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+         multi_workspace.test_add_workspace(worktree_project.clone(), window, cx)
+     });
+@@ -2965,9 +2984,7 @@ async fn test_terminal_close_event_keeps_linked_worktree_workspace_with_live_edi
+         "should start with main and linked worktree workspaces"
+     );
+ 
+-    worktree_panel.update(cx, |panel, cx| {
+-        panel.emit_test_terminal_close(terminal_id, cx);
+-    });
++    close_terminal_from_sidebar(&sidebar, terminal_id, cx);
+     for _ in 0..4 {
+         cx.run_until_parked();
+     }
+@@ -3394,7 +3411,7 @@ async fn test_archive_selected_draft_archives_closed_linked_worktree(cx: &mut Te
+ }
+ 
+ #[gpui::test]
+-async fn test_terminal_close_event_closes_sidebar_terminal(cx: &mut TestAppContext) {
++async fn test_terminal_process_exit_keeps_terminal_thread(cx: &mut TestAppContext) {
+     let project = init_test_project_with_agent_panel("/my-project", cx).await;
+     let (multi_workspace, cx) =
+         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+@@ -3407,75 +3424,30 @@ async fn test_terminal_close_event_closes_sidebar_terminal(cx: &mut TestAppConte
+         .expect("test terminal should be inserted");
+     cx.run_until_parked();
+ 
+-    assert_eq!(
+-        visible_entries_as_strings(&sidebar, cx),
+-        vec!["v [my-project]", "  Dev Server"]
+-    );
+-
+     panel.update(cx, |panel, cx| {
+-        panel.emit_test_terminal_close(terminal_id, cx);
++        panel.emit_test_terminal_exit(terminal_id, cx);
+     });
+     cx.run_until_parked();
+ 
+     panel.read_with(cx, |panel, _cx| {
+-        assert!(!panel.has_terminal(terminal_id));
+-    });
+-    sidebar.read_with(cx, |sidebar, _cx| {
+-        assert!(sidebar.contents.entries.iter().all(|entry| {
+-            !matches!(entry, ListEntry::Terminal(terminal) if terminal.metadata.terminal_id == terminal_id)
+-        }));
++        assert!(panel.has_terminal(terminal_id));
++        assert_eq!(panel.active_terminal_id(), Some(terminal_id));
+     });
++    assert_eq!(
++        visible_entries_as_strings(&sidebar, cx),
++        vec!["v [my-project]", "  Dev Server"]
++    );
+     sidebar.read_with(cx, |_sidebar, cx| {
+         assert!(
+             TerminalThreadMetadataStore::global(cx)
+                 .read(cx)
+                 .entry(terminal_id)
+-                .is_none(),
+-            "terminal metadata should be deleted when the terminal requests close"
++                .is_some(),
++            "terminal metadata should survive its process exiting"
+         );
+     });
+ }
+ 
+-#[gpui::test]
+-async fn test_terminal_close_event_activates_neighbor(cx: &mut TestAppContext) {
+-    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+-    let (multi_workspace, cx) =
+-        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+-    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+-    let build_terminal_id = panel
+-        .update_in(cx, |panel, window, cx| {
+-            panel.insert_test_terminal("Build", true, window, cx)
+-        })
+-        .expect("build test terminal should be inserted");
+-    let server_terminal_id = panel
+-        .update_in(cx, |panel, window, cx| {
+-            panel.insert_test_terminal("Server", true, window, cx)
+-        })
+-        .expect("server test terminal should be inserted");
+-    cx.run_until_parked();
+-
+-    panel.update(cx, |panel, cx| {
+-        panel.emit_test_terminal_close(server_terminal_id, cx);
+-    });
+-    cx.run_until_parked();
+-
+-    panel.read_with(cx, |panel, _cx| {
+-        assert!(!panel.has_terminal(server_terminal_id));
+-        assert_eq!(panel.active_terminal_id(), Some(build_terminal_id));
+-    });
+-    sidebar.read_with(cx, |sidebar, _cx| {
+-        assert!(
+-            matches!(&sidebar.active_entry, Some(ActiveEntry::Terminal { terminal_id, .. }) if *terminal_id == build_terminal_id),
+-            "expected remaining terminal to become active, got {:?}",
+-            sidebar.active_entry,
+-        );
+-    });
+-    assert_eq!(
+-        visible_entries_as_strings(&sidebar, cx),
+-        vec!["v [my-project]", "  Build"]
+-    );
+-}
+-
+ #[gpui::test]
+ async fn test_agent_panel_terminal_notifications_update_sidebar(cx: &mut TestAppContext) {
+     let project = init_test_project_with_agent_panel("/my-project", cx).await;
+diff --git a/crates/terminal/src/terminal.rs b/crates/terminal/src/terminal.rs
+index aee760ec58..5993e60f7f 100644
+--- a/crates/terminal/src/terminal.rs
++++ b/crates/terminal/src/terminal.rs
+@@ -670,6 +670,8 @@ pub enum Event {
+     TitleChanged,
+     BreadcrumbsChanged,
+     OutputReplaced,
++    /// The terminal's process finished, whether or not the terminal asks to be closed.
++    ProcessExited,
+     CloseTerminal,
+     Bell,
+     Wakeup,
+@@ -830,6 +832,26 @@ fn normalize_terminal_bounds(mut bounds: TerminalBounds) -> TerminalBounds {
+     bounds
+ }
+ 
++/// How a PTY gets its size before the terminal is laid out.
++#[derive(Clone, Copy, Debug, Default)]
++pub struct PtyStartup {
++    /// The size to open the PTY with. Without it the PTY opens at a placeholder
++    /// size, and the first layout resizes it.
++    pub bounds: Option<TerminalBounds>,
++    /// Keeps the PTY at its opening size until the program writes its first
++    /// output, then applies the latest layout size. A shpool client drops resizes
++    /// that arrive while it attaches its session, so the session would keep the
++    /// opening size while the terminal shows another one.
++    pub hold_resize_until_output: bool,
++}
++
++/// See [`PtyStartup::hold_resize_until_output`].
++enum PtyResizeHold {
++    Released,
++    /// The latest size requested while the program has written nothing yet.
++    Holding(Option<TerminalBounds>),
++}
++
+ #[derive(Error, Debug)]
+ pub struct TerminalError {
+     pub directory: Option<PathBuf>,
+@@ -1041,6 +1063,7 @@ impl TerminalBuilder {
+                 terminal_bounds,
+                 ..Default::default()
+             },
++            pty_resize_hold: PtyResizeHold::Released,
+             last_mouse: None,
+             mouse_down_position: None,
+             matches: Vec::new(),
+@@ -1070,6 +1093,7 @@ impl TerminalBuilder {
+                 window_id,
+             },
+             child_exited: None,
++            process_exited: false,
+             keyboard_input_sent: false,
+             init_command_startup_marker: None,
+             init_command_startup_tx: None,
+@@ -1107,6 +1131,7 @@ impl TerminalBuilder {
+         cx: &App,
+         activation_script: Vec<String>,
+         path_style: PathStyle,
++        pty_startup: PtyStartup,
+     ) -> Task<Result<TerminalBuilder>> {
+         let version = release_channel::AppVersion::global(cx);
+         let background_executor = cx.background_executor().clone();
+@@ -1220,13 +1245,17 @@ impl TerminalBuilder {
+             };
+             let config = pty_term_config(scrolling_history, cursor_shape);
+ 
++            let initial_bounds = pty_startup
++                .bounds
++                .map(normalize_terminal_bounds)
++                .unwrap_or_default();
+             //Spawn a task so the Alacritty EventLoop (or the subprocess reader) can communicate with us
+             //TODO: Remove with a bounded sender which can be dispatched on &self
+             let (events_tx, events_rx) = unbounded();
+             //Set up the terminal...
+             let term = new_term(
+                 &config,
+-                TerminalBounds::default(),
++                initial_bounds,
+                 events_tx.clone(),
+                 alternate_scroll,
+                 0,
+@@ -1286,7 +1315,7 @@ impl TerminalBuilder {
+                 );
+ 
+                 //Setup the pty...
+-                let pty = match open_pty(&pty_options, TerminalBounds::default(), window_id) {
++                let pty = match open_pty(&pty_options, initial_bounds, window_id) {
+                     Ok(pty) => pty,
+                     Err(error) => {
+                         bail!(TerminalError {
+@@ -1315,6 +1344,13 @@ impl TerminalBuilder {
+             };
+ 
+             let no_task = task.is_none();
++            let pty_resize_hold = if pty_startup.hold_resize_until_output
++                && matches!(terminal_type, TerminalType::Pty { .. })
++            {
++                PtyResizeHold::Holding(None)
++            } else {
++                PtyResizeHold::Released
++            };
+             let terminal = Terminal {
+                 task,
+                 terminal_type,
+@@ -1327,7 +1363,11 @@ impl TerminalBuilder {
+                 output_generation: 0,
+                 title_override: terminal_title_override,
+                 events: VecDeque::with_capacity(10), //Should never get this high.
+-                last_content: Default::default(),
++                last_content: Content {
++                    terminal_bounds: initial_bounds,
++                    ..Content::default()
++                },
++                pty_resize_hold,
+                 last_mouse: None,
+                 mouse_down_position: None,
+                 matches: Vec::new(),
+@@ -1360,6 +1400,7 @@ impl TerminalBuilder {
+                     window_id,
+                 },
+                 child_exited: None,
++                process_exited: false,
+                 keyboard_input_sent: false,
+                 init_command_startup_marker: None,
+                 init_command_startup_tx: None,
+@@ -1538,6 +1579,7 @@ pub struct Terminal {
+     mouse_down_position: Option<GpuiPoint<Pixels>>,
+     pub matches: Vec<Range>,
+     pub last_content: Content,
++    pty_resize_hold: PtyResizeHold,
+     pub selection_head: Option<Point>,
+ 
+     pub breadcrumb_text: String,
+@@ -1557,6 +1599,9 @@ pub struct Terminal {
+     template: CopyTemplate,
+     activation_script: Vec<String>,
+     child_exited: Option<ExitStatus>,
++    // The PTY can report `Exit` without a `ChildExit` status, so `child_exited`
++    // alone does not tell whether the process is gone.
++    process_exited: bool,
+     keyboard_input_sent: bool,
+     init_command_startup_marker: Option<String>,
+     init_command_startup_tx: Option<Sender<()>>,
+@@ -1699,6 +1744,13 @@ impl Terminal {
+                 //NOOP, Handled in render
+             }
+             TerminalBackendEvent::Wakeup => {
++                if let PtyResizeHold::Holding(pending_bounds) =
++                    std::mem::replace(&mut self.pty_resize_hold, PtyResizeHold::Released)
++                    && let Some(bounds) = pending_bounds
++                {
++                    // Resizes still queued are newer than the held one.
++                    self.events.push_front(InternalEvent::Resize(bounds));
++                }
+                 self.detect_init_command_startup_marker();
+                 cx.emit(Event::Wakeup);
+ 
+@@ -1742,6 +1794,12 @@ impl Terminal {
+                 let new_bounds = normalize_terminal_bounds(new_bounds);
+                 trace!("Resizing: new_bounds={new_bounds:?}");
+ 
++                // The grid follows the PTY, so the program's output keeps matching it.
++                if let PtyResizeHold::Holding(pending_bounds) = &mut self.pty_resize_hold {
++                    *pending_bounds = Some(new_bounds);
++                    return;
++                }
++
+                 let columns_changed =
+                     self.last_content.terminal_bounds.num_columns() != new_bounds.num_columns();
+                 self.last_content.terminal_bounds = new_bounds;
+@@ -3210,6 +3268,10 @@ impl Terminal {
+         Task::ready(None)
+     }
+ 
++    pub fn has_exited(&self) -> bool {
++        self.process_exited
++    }
++
+     fn register_task_finished(
+         &mut self,
+         exit_status: Option<ExitStatus>,
+@@ -3221,6 +3283,10 @@ impl Terminal {
+         if let Some(e) = exit_status {
+             self.child_exited = Some(e);
+         }
++        if !self.process_exited {
++            self.process_exited = true;
++            cx.emit(Event::ProcessExited);
++        }
+         self.complete_init_command_startup_handshake();
+         let task = match &mut self.task {
+             Some(task) => task,
+@@ -3305,6 +3371,7 @@ impl Terminal {
+             cx,
+             self.activation_script.clone(),
+             self.path_style,
++            PtyStartup::default(),
+         )
+     }
+ }
+@@ -3846,6 +3913,7 @@ mod tests {
+                     cx,
+                     vec![],
+                     PathStyle::local(),
++                    PtyStartup::default(),
+                 )
+             })
+             .await
+@@ -3890,6 +3958,7 @@ mod tests {
+                     cx,
+                     vec![],
+                     PathStyle::local(),
++                    PtyStartup::default(),
+                 )
+             })
+             .await
+@@ -4374,6 +4443,7 @@ mod tests {
+                     cx,
+                     Vec::new(),
+                     PathStyle::local(),
++                    PtyStartup::default(),
+                 )
+             })
+             .await
+@@ -4441,6 +4511,7 @@ mod tests {
+                     cx,
+                     Vec::new(),
+                     PathStyle::local(),
++                    PtyStartup::default(),
+                 )
+             })
+             .await
+@@ -4506,6 +4577,7 @@ mod tests {
+                     cx,
+                     Vec::new(),
+                     PathStyle::local(),
++                    PtyStartup::default(),
+                 )
+             })
+             .await
+diff --git a/crates/terminal_view/src/terminal_view.rs b/crates/terminal_view/src/terminal_view.rs
+index 223c5fa607..28a6804760 100644
+--- a/crates/terminal_view/src/terminal_view.rs
++++ b/crates/terminal_view/src/terminal_view.rs
+@@ -1310,6 +1310,7 @@ fn subscribe_for_terminal_events(
+                     ),
+                 },
+                 Event::BreadcrumbsChanged => cx.emit(ItemEvent::UpdateBreadcrumbs),
++                Event::ProcessExited => {}
+                 Event::CloseTerminal => cx.emit(ItemEvent::CloseItem),
+                 Event::SelectionsChanged => {
+                     window.invalidate_character_coordinates();
+-- 
+2.55.0
+

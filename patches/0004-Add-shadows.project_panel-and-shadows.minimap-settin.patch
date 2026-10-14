@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 21:24:41 +0300
-Subject: [PATCH 4/8] Add shadows.project_panel and shadows.minimap settings
+Subject: [PATCH 04/11] Add shadows.project_panel and shadows.minimap settings
 
 The sticky folder rows of the project panel and the minimap draw
 shadows that read as visual noise in flat themes. These toggles turn

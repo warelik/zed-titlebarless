@@ -1,0 +1,1883 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: warelik <warelik@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 11:03:26 +0300
+Subject: [PATCH 09/11] Add agent.threads_sidebar.in_agent_panel setting
+
+Few people juggle as many threads as the threads sidebar holds, yet
+keeping them in view costs a whole column, and toggling the sidebar
+costs an action every time. With agent.threads_sidebar.in_agent_panel
+the sidebar is not shown; its contents become two tab rows at the top
+of the agent panel instead of the active thread's title: the window's
+projects, then the threads and terminals of the active project. The
+rows use the editor's tab component and follow the same tab settings
+(pinned/unpinned chips, width bounds, close button position and
+visibility), so they look and behave like the editor's two tab rows:
+click activates, double-click renames, middle-click and the close
+button archive a thread or close a terminal, right-click opens the
+sidebar's menu for the project or thread. Thread tabs keep the order
+they were opened in rather than the sidebar's most-recent-first order.
+
+The sidebar entity stays the single model; the agent panel only gets
+views of it through the SidebarHandle, since agent_ui cannot depend
+on the sidebar crate. Thread history opens from the agent panel's menu
+and replaces the thread until a tab is clicked or the history is
+closed. Add Project sits at the end of the projects row. Toggling the
+threads sidebar toggles the agent panel in this mode.
+
+The setting defaults to false, which keeps the sidebar.
+---
+ assets/settings/default.json                |   3 +
+ crates/agent/src/tool_permissions.rs        |   1 +
+ crates/agent_settings/src/agent_settings.rs |   2 +
+ crates/agent_ui/src/agent_panel.rs          | 109 ++-
+ crates/agent_ui/src/agent_ui.rs             |   1 +
+ crates/settings_content/src/agent.rs        |   6 +
+ crates/sidebar/src/sidebar.rs               | 387 +++++++----
+ crates/sidebar/src/thread_tabs.rs           | 721 ++++++++++++++++++++
+ crates/workspace/src/dock.rs                |  13 +-
+ crates/workspace/src/multi_workspace.rs     |  85 ++-
+ crates/workspace/src/status_bar.rs          |   2 +-
+ crates/workspace/src/workspace.rs           |  33 +-
+ 12 files changed, 1210 insertions(+), 153 deletions(-)
+ create mode 100644 crates/sidebar/src/thread_tabs.rs
+
+diff --git a/assets/settings/default.json b/assets/settings/default.json
+index 4ef8ff4d83..0747f964ec 100644
+--- a/assets/settings/default.json
++++ b/assets/settings/default.json
+@@ -1193,6 +1193,9 @@
+       "auto_open": true,
+       // Show each thread on a single line at the height of the tab bar, with its details on hover.
+       "compact": false,
++      // Show the projects, threads and terminals as two rows of tabs at the top of the agent panel
++      // instead of in the sidebar.
++      "in_agent_panel": false,
+     },
+     // Default fixed width when the agent panel is docked to the left or right and
+     // `flexible` is false.
+diff --git a/crates/agent/src/tool_permissions.rs b/crates/agent/src/tool_permissions.rs
+index 750154a1fe..7ad17cd055 100644
+--- a/crates/agent/src/tool_permissions.rs
++++ b/crates/agent/src/tool_permissions.rs
+@@ -614,6 +614,7 @@ mod tests {
+                 default_width: px(300.),
+                 position: settings::SidebarDockPosition::Left,
+                 compact: false,
++                in_agent_panel: false,
+             },
+             thinking_display: Default::default(),
+         }
+diff --git a/crates/agent_settings/src/agent_settings.rs b/crates/agent_settings/src/agent_settings.rs
+index e88b9a9e33..0b59099703 100644
+--- a/crates/agent_settings/src/agent_settings.rs
++++ b/crates/agent_settings/src/agent_settings.rs
+@@ -258,6 +258,7 @@ pub struct ThreadsSidebarSettings {
+     pub position: SidebarDockPosition,
+     pub default_width: Pixels,
+     pub compact: bool,
++    pub in_agent_panel: bool,
+ }
+ 
+ impl AgentSettings {
+@@ -787,6 +788,7 @@ impl Settings for AgentSettings {
+                     .into_gpui()
+                     .clamp(THREADS_LIST_MIN_WIDTH, THREADS_LIST_MAX_WIDTH),
+                 compact: threads_sidebar.compact.unwrap(),
++                in_agent_panel: threads_sidebar.in_agent_panel.unwrap(),
+             },
+             default_width: agent.default_width.unwrap().into_gpui(),
+             default_height: agent.default_height.unwrap().into_gpui(),
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index 5a179247a1..d1a8a392ef 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -94,7 +94,7 @@ use text::OffsetRangeExt;
+ use theme_settings::ThemeSettings;
+ use ui::{
+     ContextMenu, ContextMenuEntry, GradientFade, IconButton, KeyBinding, PopoverMenu,
+-    PopoverMenuHandle, ProjectEmptyState, Tab, Tooltip, prelude::*, utils::WithRemSize,
++    PopoverMenuHandle, ProjectEmptyState, Tab, TabBar, Tooltip, prelude::*, utils::WithRemSize,
+ };
+ use util::ResultExt as _;
+ use workspace::{
+@@ -5102,6 +5102,10 @@ impl Panel for AgentPanel {
+         true
+     }
+ 
++    fn holds_traffic_lights(&self, window: &Window, cx: &App) -> bool {
++        Self::shows_sidebar_tab_rows(window, cx)
++    }
++
+     fn hide_button_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
+         Some(workspace::HideStatusItem::new(|settings| {
+             settings.agent.get_or_insert_default().button = Some(false);
+@@ -5644,6 +5648,7 @@ impl AgentPanel {
+             .is_some();
+ 
+         let workspace = self.workspace.clone();
++        let threads_in_panel = workspace::threads_sidebar_in_agent_panel(cx);
+ 
+         PopoverMenu::new("agent-options-menu")
+             .trigger_with_tooltip(
+@@ -5787,10 +5792,22 @@ impl AgentPanel {
+                                 .action("Profiles", Box::new(ManageProfiles::default()));
+                         }
+ 
+-                        menu = menu
+-                            .action("Settings", Box::new(OpenSettings))
+-                            .separator()
+-                            .action("Toggle Threads Sidebar", Box::new(ToggleWorkspaceSidebar));
++                        menu = menu.action("Settings", Box::new(OpenSettings)).separator();
++                        menu = if threads_in_panel {
++                            menu.entry("Thread History", None, |window, cx| {
++                                if let Some(multi_workspace) =
++                                    window.root::<MultiWorkspace>().flatten()
++                                {
++                                    multi_workspace.update(cx, |multi_workspace, cx| {
++                                        if let Some(sidebar) = multi_workspace.sidebar() {
++                                            sidebar.toggle_thread_history(window, cx);
++                                        }
++                                    });
++                                }
++                            })
++                        } else {
++                            menu.action("Toggle Threads Sidebar", Box::new(ToggleWorkspaceSidebar))
++                        };
+ 
+                         if has_auth_methods || supports_logout {
+                             menu = menu.separator()
+@@ -5837,8 +5854,39 @@ impl AgentPanel {
+         })
+     }
+ 
+-    fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
++    /// The sidebar's projects and threads rows, while `agent.threads_sidebar.in_agent_panel`
++    /// puts them here.
++    fn shows_sidebar_tab_rows(window: &Window, cx: &App) -> bool {
++        workspace::threads_sidebar_in_agent_panel(cx)
++            && window
++                .root::<MultiWorkspace>()
++                .flatten()
++                .is_some_and(|multi_workspace| multi_workspace.read(cx).sidebar().is_some())
++    }
++
++    fn sidebar_tab_rows(window: &Window, cx: &mut App) -> Option<workspace::AgentPanelTabRows> {
++        window
++            .root::<MultiWorkspace>()
++            .flatten()?
++            .update(cx, |multi_workspace, cx| {
++                multi_workspace
++                    .sidebar()
++                    .and_then(|sidebar| sidebar.agent_panel_tab_rows(cx))
++            })
++    }
++
++    fn sidebar_history(window: &Window, cx: &App) -> Option<gpui::AnyView> {
++        window
++            .root::<MultiWorkspace>()
++            .flatten()?
++            .read(cx)
++            .sidebar()?
++            .agent_panel_history(cx)
++    }
++
++    fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+         let agent_server_store = self.project.read(cx).agent_server_store().clone();
++        let sidebar_tab_rows = Self::sidebar_tab_rows(window, cx);
+ 
+         let focus_handle = self.focus_handle(cx);
+ 
+@@ -6171,6 +6219,49 @@ impl AgentPanel {
+                     thread_view.update(cx, |thread_view, cx| thread_view.render_sandbox_status(cx))
+                 });
+ 
++            // The rows replace the title: the active thread's tab carries it.
++            if let Some(rows) = sidebar_tab_rows {
++                // In the window's top-left corner the projects row holds the traffic lights the
++                // way the editor's tab bar does, and the threads row starts where they do.
++                let at_traffic_lights = workspace::traffic_lights_overlay_workspace(window, cx)
++                    && (self.position(window, cx) == DockPosition::Left || is_full_screen);
++                let threads_inset =
++                    workspace::traffic_light_inset(window, cx) - DynamicSpacing::Base02.px(cx);
++                return v_flex()
++                    .id("agent-panel-toolbar")
++                    .flex_none()
++                    .w_full()
++                    .child(
++                        TabBar::new("agent-panel-projects-tab-bar")
++                            .when(at_traffic_lights, |this| {
++                                this.start_child(
++                                    workspace::title_bar_area(
++                                        div().id("traffic-light-spacer"),
++                                        window,
++                                        cx,
++                                    )
++                                    .h_full()
++                                    .w(px(ui::utils::TRAFFIC_LIGHT_PADDING)),
++                                )
++                            })
++                            .child(rows.projects)
++                            .end_children(sandbox_status)
++                            .end_child(rows.add_project)
++                            .when(can_create_entries, |this| this.end_child(new_thread_menu))
++                            .end_child(full_screen_button)
++                            .end_child(self.render_panel_options_menu(window, cx)),
++                    )
++                    .child(
++                        TabBar::new("agent-panel-threads-tab-bar").child(
++                            div()
++                                .w_full()
++                                .when(at_traffic_lights, |this| this.pl(threads_inset))
++                                .child(rows.threads),
++                        ),
++                    )
++                    .into_any_element();
++            }
++
+             base_container
+                 .child(
+                     h_flex()
+@@ -6210,6 +6301,7 @@ impl AgentPanel {
+             .border_b_1()
+             .border_color(cx.theme().colors().border)
+             .child(toolbar_content)
++            .into_any_element()
+     }
+ 
+     fn should_render_trial_end_upsell(&self, cx: &mut Context<Self>) -> bool {
+@@ -6491,6 +6583,7 @@ impl AgentPanel {
+ 
+ impl Render for AgentPanel {
+     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
++        let sidebar_history = Self::sidebar_history(window, cx);
+         // WARNING: Changes to this element hierarchy can have
+         // non-obvious implications to the layout of children.
+         //
+@@ -6547,7 +6640,11 @@ impl Render for AgentPanel {
+             }))
+             .child(self.render_toolbar(window, cx))
+             .children(self.render_new_user_onboarding(window, cx))
++            .when_some(sidebar_history.clone(), |parent, history| {
++                parent.child(div().flex_1().min_h_0().child(history))
++            })
+             .map(|parent| match self.visible_surface() {
++                _ if sidebar_history.is_some() => parent,
+                 VisibleSurface::Uninitialized if !self.has_open_project(cx) => {
+                     parent.child(self.render_no_project_state(cx))
+                 }
+diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
+index d9bcdf1811..e08f10b51f 100644
+--- a/crates/agent_ui/src/agent_ui.rs
++++ b/crates/agent_ui/src/agent_ui.rs
+@@ -1015,6 +1015,7 @@ mod tests {
+                 default_width: px(300.),
+                 position: settings::SidebarDockPosition::Left,
+                 compact: false,
++                in_agent_panel: false,
+             },
+             thinking_display: Default::default(),
+         };
+diff --git a/crates/settings_content/src/agent.rs b/crates/settings_content/src/agent.rs
+index b23be559ce..19a03795bf 100644
+--- a/crates/settings_content/src/agent.rs
++++ b/crates/settings_content/src/agent.rs
+@@ -62,6 +62,12 @@ pub struct ThreadsSidebarSettingsContent {
+     ///
+     /// Default: false
+     pub compact: Option<bool>,
++    /// Whether to show the threads sidebar's contents as two rows of tabs at the top of the
++    /// agent panel instead of in the sidebar: the projects of the window, then the threads and
++    /// terminals of the active project.
++    ///
++    /// Default: false
++    pub in_agent_panel: Option<bool>,
+ }
+ 
+ #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index 3c09915d4c..209c477952 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -1,4 +1,5 @@
+ mod thread_switcher;
++mod thread_tabs;
+ 
+ use acp_thread::ThreadStatus;
+ use action_log::DiffStats;
+@@ -28,10 +29,10 @@ use feature_flags::{
+     AgentThreadWorktreeLabel, AgentThreadWorktreeLabelFlag, FeatureFlag, FeatureFlagAppExt as _,
+ };
+ use gpui::{
+-    Action as _, AnyElement, App, ClickEvent, Context, Decorations, DismissEvent, Entity, EntityId,
+-    FocusHandle, Focusable, KeyContext, ListState, Modifiers, Pixels, Render, SharedString, Task,
+-    TaskExt, WeakEntity, Window, WindowBackgroundAppearance, WindowHandle, linear_color_stop,
+-    linear_gradient, list, prelude::*, px,
++    Action as _, AnyElement, AnyView, App, ClickEvent, Context, Decorations, DismissEvent, Entity,
++    EntityId, FocusHandle, Focusable, KeyContext, ListState, Modifiers, Pixels, Render,
++    SharedString, Task, TaskExt, WeakEntity, Window, WindowBackgroundAppearance, WindowHandle,
++    linear_color_stop, linear_gradient, list, prelude::*, px,
+ };
+ use itertools::Itertools;
+ use language_model::LanguageModelRegistry;
+@@ -81,6 +82,7 @@ use crate::thread_switcher::{
+     ThreadSwitcher, ThreadSwitcherEntry, ThreadSwitcherEvent, ThreadSwitcherSelection,
+     ThreadSwitcherTerminalEntry, ThreadSwitcherThreadEntry,
+ };
++use crate::thread_tabs::{TabsRowKind, ThreadTabsRow};
+ 
+ #[cfg(test)]
+ mod sidebar_tests;
+@@ -826,6 +828,9 @@ pub struct Sidebar {
+     /// Display names of other release channels that have threads available to
+     /// import.
+     cross_channel_import_channels: Vec<SharedString>,
++    /// The projects and threads rows the agent panel shows while
++    /// `agent.threads_sidebar.in_agent_panel` is on; created on first use.
++    agent_panel_tab_rows: Option<[Entity<ThreadTabsRow>; 3]>,
+ }
+ 
+ impl Sidebar {
+@@ -842,6 +847,7 @@ impl Sidebar {
+ 
+         let mut previous_default_width =
+             AgentSettings::get_global(cx).threads_sidebar.default_width;
++        let mut previous_in_agent_panel = Self::in_agent_panel(cx);
+         cx.observe_global::<SettingsStore>(move |this, cx| {
+             let width = AgentSettings::get_global(cx).threads_sidebar.default_width;
+             if previous_default_width != width {
+@@ -849,6 +855,12 @@ impl Sidebar {
+                 this.set_width(None, cx);
+                 this.serialize(cx);
+             }
++            // Collapsed groups and the filter query only apply to the sidebar's own list.
++            let in_agent_panel = Self::in_agent_panel(cx);
++            if previous_in_agent_panel != in_agent_panel {
++                previous_in_agent_panel = in_agent_panel;
++                this.schedule_update_entries(false, cx);
++            }
+         })
+         .detach();
+ 
+@@ -970,6 +982,7 @@ impl Sidebar {
+             update_task: None,
+             import_banners_use_verbose_labels: None,
+             cross_channel_import_channels: Vec::new(),
++            agent_panel_tab_rows: None,
+         }
+     }
+ 
+@@ -977,7 +990,15 @@ impl Sidebar {
+         cx.emit(workspace::SidebarEvent::SerializeNeeded);
+     }
+ 
++    fn in_agent_panel(cx: &App) -> bool {
++        workspace::threads_sidebar_in_agent_panel(cx)
++    }
++
+     fn is_group_collapsed(&self, key: &ProjectGroupKey, cx: &App) -> bool {
++        // The agent panel shows every thread of the active project.
++        if Self::in_agent_panel(cx) {
++            return false;
++        }
+         self.multi_workspace
+             .upgrade()
+             .and_then(|mw| {
+@@ -1401,7 +1422,11 @@ impl Sidebar {
+             .first()
+             .map(|ws| ws.read(cx).project().read(cx).agent_server_store().clone());
+ 
+-        let query = self.filter_editor.read(cx).text(cx);
++        let query = if Self::in_agent_panel(cx) {
++            String::new()
++        } else {
++            self.filter_editor.read(cx).text(cx)
++        };
+ 
+         let previous = mem::take(&mut self.contents);
+ 
+@@ -2052,6 +2077,17 @@ impl Sidebar {
+         let previous_shapes: Vec<EntryShape> =
+             self.entry_shapes(multi_workspace.read(cx)).collect();
+ 
++        // Keeps the agent panel's list counted as visible, and the active project in it, like
++        // the open sidebar does; deferred because the window may be mid-update.
++        if Self::in_agent_panel(cx) && !multi_workspace.read(cx).sidebar_open() {
++            let multi_workspace = multi_workspace.downgrade();
++            cx.defer(move |cx| {
++                multi_workspace
++                    .update(cx, |multi_workspace, cx| multi_workspace.open_sidebar(cx))
++                    .log_err();
++            });
++        }
++
+         self.rebuild_contents(cx);
+         self.refresh_refilled_draft_times(cx);
+         self.refresh_draft_editor_observations(cx);
+@@ -2493,6 +2529,7 @@ impl Sidebar {
+                                 is_active,
+                                 has_threads,
+                                 &group_name,
++                                false,
+                                 cx,
+                             ))
+                             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+@@ -2854,6 +2891,7 @@ impl Sidebar {
+         is_active: bool,
+         has_threads: bool,
+         group_name: &SharedString,
++        in_tab: bool,
+         cx: &mut Context<Self>,
+     ) -> AnyElement {
+         let multi_workspace = self.multi_workspace.clone();
+@@ -2887,6 +2925,13 @@ impl Sidebar {
+                     })
+                     .selected_style(ButtonStyle::Tinted(TintColor::Accent))
+                     .icon_size(IconSize::Small)
++                    // Sized like the tab's close button it stands in for.
++                    .when(in_tab, |button| {
++                        button
++                            .shape(ui::IconButtonShape::Square)
++                            .size(ButtonSize::None)
++                            .icon_color(Color::Muted)
++                    })
+                     .when(!is_menu_open, |el| el.visible_on_hover(group_name)),
+             )
+             .on_open(Rc::new({
+@@ -3561,7 +3606,18 @@ impl Sidebar {
+         if self.rename_target.take().is_none() {
+             return false;
+         }
+-        self.focus_handle.focus(window, cx);
++        if Self::in_agent_panel(cx) {
++            // A blur ends the rename too; focus then already went where the user wanted.
++            if self.rename_editor.focus_handle(cx).is_focused(window)
++                && let Some(workspace) = self.active_workspace(cx)
++            {
++                workspace.update(cx, |workspace, cx| {
++                    workspace.focus_panel::<AgentPanel>(window, cx);
++                });
++            }
++        } else {
++            self.focus_handle.focus(window, cx);
++        }
+         self.update_entries(cx);
+         true
+     }
+@@ -6471,15 +6527,28 @@ impl Sidebar {
+                 })
+             });
+ 
+-        if is_draft || thread.metadata.session_id.is_none() {
+-            return thread_item.into_any_element();
+-        }
+-
+-        let Some(session_id) = thread.metadata.session_id.clone() else {
++        let Some(menu) = self.thread_context_menu(ix, thread, cx) else {
+             return thread_item.into_any_element();
+         };
++        right_click_menu(SharedString::from(format!("thread-context-menu-{}", ix)))
++            .trigger(move |_, _, _| thread_item)
++            .menu(menu)
++            .into_any_element()
++    }
+ 
+-        let context_menu_id = SharedString::from(format!("thread-context-menu-{}", ix));
++    /// The right-click menu of a thread row or tab; drafts have none.
++    fn thread_context_menu(
++        &self,
++        ix: usize,
++        thread: &ThreadEntry,
++        cx: &mut Context<Self>,
++    ) -> Option<impl Fn(&mut Window, &mut App) -> Entity<ContextMenu> + 'static> {
++        if thread.draft.is_some() {
++            return None;
++        }
++        let session_id = thread.metadata.session_id.clone()?;
++        let title = thread.metadata.display_title();
++        let thread_workspace = thread.workspace.clone();
+         let sidebar = cx.weak_entity();
+ 
+         let active_workspace = self.active_workspace(cx);
+@@ -6492,113 +6561,108 @@ impl Sidebar {
+         let can_open_as_markdown = thread.is_live || is_zed_thread;
+         let folder_paths = thread.metadata.folder_paths().clone();
+ 
+-        right_click_menu(context_menu_id)
+-            .trigger(move |_, _, _| thread_item)
+-            .menu({
+-                let thread_id = thread.metadata.thread_id;
+-                let markdown_title = Some(thread.metadata.display_title());
+-                let rename_title = title;
+-                move |_window, cx| {
+-                    let session_id = session_id.clone();
+-                    let sidebar = sidebar.clone();
+-                    let active_workspace = active_workspace.clone();
+-                    let thread_workspace = thread_workspace.clone();
+-                    let markdown_title = markdown_title.clone();
+-                    let rename_title = rename_title.clone();
+-                    let folder_paths = folder_paths.clone();
+-                    ContextMenu::build(_window, cx, move |mut menu, _window, _cx| {
+-                        menu = menu.entry("Rename Title", None, {
++        Some({
++            let thread_id = thread.metadata.thread_id;
++            let markdown_title = Some(thread.metadata.display_title());
++            let rename_title = title;
++            move |_window: &mut Window, cx: &mut App| {
++                let session_id = session_id.clone();
++                let sidebar = sidebar.clone();
++                let active_workspace = active_workspace.clone();
++                let thread_workspace = thread_workspace.clone();
++                let markdown_title = markdown_title.clone();
++                let rename_title = rename_title.clone();
++                let folder_paths = folder_paths.clone();
++                ContextMenu::build(_window, cx, move |mut menu, _window, _cx| {
++                    menu = menu.entry("Rename Title", None, {
++                        let sidebar = sidebar.clone();
++                        let rename_title = rename_title.clone();
++                        move |window, cx| {
++                            sidebar
++                                .update(cx, |sidebar, cx| {
++                                    sidebar.start_renaming_entry(
++                                        ix,
++                                        RenameTarget::Thread(thread_id),
++                                        rename_title.clone(),
++                                        window,
++                                        cx,
++                                    );
++                                })
++                                .ok();
++                        }
++                    });
++
++                    if is_zed_thread {
++                        menu = menu.entry("Regenerate Thread Title", None, {
++                            let session_id = session_id.clone();
+                             let sidebar = sidebar.clone();
+-                            let rename_title = rename_title.clone();
+-                            move |window, cx| {
++                            let thread_workspace = thread_workspace.clone();
++                            let folder_paths = folder_paths.clone();
++                            move |_window, cx| {
+                                 sidebar
+                                     .update(cx, |sidebar, cx| {
+-                                        sidebar.start_renaming_entry(
+-                                            ix,
+-                                            RenameTarget::Thread(thread_id),
+-                                            rename_title.clone(),
+-                                            window,
++                                        sidebar.regenerate_thread_title(
++                                            &session_id,
++                                            thread_id,
++                                            folder_paths.clone(),
++                                            thread_workspace.clone(),
+                                             cx,
+                                         );
+                                     })
+                                     .ok();
+                             }
+                         });
++                    }
+ 
+-                        if is_zed_thread {
+-                            menu = menu.entry("Regenerate Thread Title", None, {
+-                                let session_id = session_id.clone();
+-                                let sidebar = sidebar.clone();
+-                                let thread_workspace = thread_workspace.clone();
+-                                let folder_paths = folder_paths.clone();
+-                                move |_window, cx| {
+-                                    sidebar
+-                                        .update(cx, |sidebar, cx| {
+-                                            sidebar.regenerate_thread_title(
+-                                                &session_id,
+-                                                thread_id,
+-                                                folder_paths.clone(),
+-                                                thread_workspace.clone(),
+-                                                cx,
+-                                            );
+-                                        })
+-                                        .ok();
+-                                }
+-                            });
+-                        }
+-
+-                        if can_open_as_markdown {
+-                            menu = menu.entry("Open Thread as Markdown", None, {
+-                                let session_id = session_id.clone();
+-                                let markdown_title = markdown_title.clone();
+-                                let thread_workspace = thread_workspace.clone();
+-                                move |window, cx| {
+-                                    if let Some(thread_workspace) = thread_workspace.as_ref()
+-                                        && let Some(panel) =
+-                                            thread_workspace.read(cx).panel::<AgentPanel>(cx)
+-                                    {
+-                                        let opened = panel.update(cx, |panel, cx| {
+-                                            panel.open_thread_as_markdown(
+-                                                thread_id,
+-                                                thread_workspace.clone(),
+-                                                window,
+-                                                cx,
+-                                            )
+-                                        });
+-                                        if opened {
+-                                            return;
+-                                        }
+-                                    }
+-
+-                                    if is_zed_thread
+-                                        && let Some(active_workspace) = &active_workspace
+-                                    {
+-                                        Self::open_closed_native_thread_as_markdown(
+-                                            &session_id,
+-                                            markdown_title.clone(),
+-                                            active_workspace,
++                    if can_open_as_markdown {
++                        menu = menu.entry("Open Thread as Markdown", None, {
++                            let session_id = session_id.clone();
++                            let markdown_title = markdown_title.clone();
++                            let thread_workspace = thread_workspace.clone();
++                            move |window, cx| {
++                                if let Some(thread_workspace) = thread_workspace.as_ref()
++                                    && let Some(panel) =
++                                        thread_workspace.read(cx).panel::<AgentPanel>(cx)
++                                {
++                                    let opened = panel.update(cx, |panel, cx| {
++                                        panel.open_thread_as_markdown(
++                                            thread_id,
++                                            thread_workspace.clone(),
+                                             window,
+                                             cx,
+-                                        );
++                                        )
++                                    });
++                                    if opened {
++                                        return;
+                                     }
+                                 }
+-                            });
+-                        }
+ 
+-                        menu.separator().entry("Archive Thread", None, {
+-                            let session_id = session_id.clone();
+-                            move |window, cx| {
+-                                sidebar
+-                                    .update(cx, |sidebar, cx| {
+-                                        sidebar.archive_thread(&session_id, window, cx);
+-                                    })
+-                                    .ok();
++                                if is_zed_thread && let Some(active_workspace) = &active_workspace {
++                                    Self::open_closed_native_thread_as_markdown(
++                                        &session_id,
++                                        markdown_title.clone(),
++                                        active_workspace,
++                                        window,
++                                        cx,
++                                    );
++                                }
+                             }
+-                        })
++                        });
++                    }
++
++                    menu.separator().entry("Archive Thread", None, {
++                        let session_id = session_id.clone();
++                        move |window, cx| {
++                            sidebar
++                                .update(cx, |sidebar, cx| {
++                                    sidebar.archive_thread(&session_id, window, cx);
++                                })
++                                .ok();
++                        }
+                     })
+-                }
+-            })
+-            .into_any_element()
++                })
++            }
++        })
+     }
+ 
+     fn render_terminal(
+@@ -6697,33 +6761,41 @@ impl Sidebar {
+                 }
+             }));
+ 
+-        let context_menu_id = SharedString::from(format!("terminal-context-menu-{ix}"));
++        right_click_menu(SharedString::from(format!("terminal-context-menu-{ix}")))
++            .trigger(move |_, _, _| terminal_item)
++            .menu(Self::terminal_context_menu(ix, terminal, cx))
++            .into_any_element()
++    }
++
++    /// The right-click menu of a terminal row or tab.
++    fn terminal_context_menu(
++        ix: usize,
++        terminal: &TerminalEntry,
++        cx: &mut Context<Self>,
++    ) -> impl Fn(&mut Window, &mut App) -> Entity<ContextMenu> + 'static {
+         let terminal_id = terminal.metadata.terminal_id;
+         let rename_title = terminal.metadata.editable_title();
+         let sidebar = cx.weak_entity();
+ 
+-        right_click_menu(context_menu_id)
+-            .trigger(move |_, _, _| terminal_item)
+-            .menu(move |window, cx| {
+-                let sidebar = sidebar.clone();
+-                let rename_title = rename_title.clone();
+-                ContextMenu::build(window, cx, move |menu, _window, _cx| {
+-                    menu.entry("Rename Title", None, move |window, cx| {
+-                        sidebar
+-                            .update(cx, |sidebar, cx| {
+-                                sidebar.start_renaming_entry(
+-                                    ix,
+-                                    RenameTarget::Terminal(terminal_id),
+-                                    rename_title.clone(),
+-                                    window,
+-                                    cx,
+-                                );
+-                            })
+-                            .ok();
+-                    })
++        move |window: &mut Window, cx: &mut App| {
++            let sidebar = sidebar.clone();
++            let rename_title = rename_title.clone();
++            ContextMenu::build(window, cx, move |menu, _window, _cx| {
++                menu.entry("Rename Title", None, move |window, cx| {
++                    sidebar
++                        .update(cx, |sidebar, cx| {
++                            sidebar.start_renaming_entry(
++                                ix,
++                                RenameTarget::Terminal(terminal_id),
++                                rename_title.clone(),
++                                window,
++                                cx,
++                            );
++                        })
++                        .ok();
+                 })
+             })
+-            .into_any_element()
++        }
+     }
+ 
+     fn render_filter_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
+@@ -6738,7 +6810,11 @@ impl Sidebar {
+             .child(self.filter_editor.clone())
+     }
+ 
+-    fn render_recent_projects_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
++    fn render_recent_projects_button(
++        &self,
++        in_agent_panel: bool,
++        cx: &mut Context<Self>,
++    ) -> impl IntoElement {
+         let multi_workspace = self.multi_workspace.upgrade();
+ 
+         let workspace = multi_workspace
+@@ -6777,11 +6853,18 @@ impl Sidebar {
+                     .selected_style(ButtonStyle::Tinted(TintColor::Accent)),
+                 |_window, cx| Tooltip::for_action("Add Project", &OpenRecent::default(), cx),
+             )
+-            .offset(gpui::Point {
+-                x: px(-2.0),
+-                y: px(-2.0),
++            .map(|menu| {
++                if in_agent_panel {
++                    // Beside the agent panel's new-thread button, opening downwards like its menu.
++                    menu.anchor(gpui::Anchor::TopRight)
++                } else {
++                    menu.offset(gpui::Point {
++                        x: px(-2.0),
++                        y: px(-2.0),
++                    })
++                    .anchor(gpui::Anchor::BottomRight)
++                }
+             })
+-            .anchor(gpui::Anchor::BottomRight)
+     }
+ 
+     fn new_thread_in_group(
+@@ -7558,7 +7641,7 @@ impl Sidebar {
+                     })),
+             )
+             .child(div().flex_1())
+-            .child(self.render_recent_projects_button(cx))
++            .child(self.render_recent_projects_button(false, cx))
+     }
+ 
+     fn active_workspace(&self, cx: &App) -> Option<Entity<Workspace>> {
+@@ -7792,8 +7875,11 @@ impl Sidebar {
+     fn show_thread_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+         self.view = SidebarView::ThreadList;
+         self._subscriptions.clear();
+-        let handle = self.filter_editor.read(cx).focus_handle(cx);
+-        handle.focus(window, cx);
++        // The filter is not shown while the list lives in the agent panel.
++        if !Self::in_agent_panel(cx) {
++            let handle = self.filter_editor.read(cx).focus_handle(cx);
++            handle.focus(window, cx);
++        }
+         self.serialize(cx);
+         cx.notify();
+     }
+@@ -7912,6 +7998,45 @@ impl WorkspaceSidebar for Sidebar {
+         self.cycle_thread_impl(forward, window, cx);
+     }
+ 
++    fn agent_panel_tab_rows(
++        &mut self,
++        cx: &mut Context<Self>,
++    ) -> Option<workspace::AgentPanelTabRows> {
++        if !Self::in_agent_panel(cx) {
++            return None;
++        }
++        let [projects, threads, add_project] = self
++            .agent_panel_tab_rows
++            .get_or_insert_with(|| {
++                let sidebar = cx.entity();
++                [
++                    TabsRowKind::Projects,
++                    TabsRowKind::Threads,
++                    TabsRowKind::AddProject,
++                ]
++                .map(|kind| cx.new(|cx| ThreadTabsRow::new(&sidebar, kind, cx)))
++            })
++            .clone();
++        Some(workspace::AgentPanelTabRows {
++            projects: projects.into(),
++            threads: threads.into(),
++            add_project: add_project.into(),
++        })
++    }
++
++    fn agent_panel_history(&self, cx: &App) -> Option<AnyView> {
++        match &self.view {
++            SidebarView::Archive(archive_view) if Self::in_agent_panel(cx) => {
++                Some(archive_view.clone().into())
++            }
++            _ => None,
++        }
++    }
++
++    fn toggle_thread_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        self.toggle_archive(&ToggleThreadHistory, window, cx);
++    }
++
+     fn serialized_state(&self, _cx: &App) -> Option<String> {
+         let serialized = SerializedSidebar {
+             width: self.width_set_by_user.then(|| f32::from(self.width)),
+diff --git a/crates/sidebar/src/thread_tabs.rs b/crates/sidebar/src/thread_tabs.rs
+new file mode 100644
+index 0000000000..10fed67e52
+--- /dev/null
++++ b/crates/sidebar/src/thread_tabs.rs
+@@ -0,0 +1,721 @@
++use super::*;
++use gpui::ScrollHandle;
++use ui::{IconButtonShape, Indicator, TabCloseSide, TabPosition};
++use workspace::TabBarSettings;
++use workspace::item::{ClosePosition, ItemSettings, ShowCloseButton};
++
++#[derive(Clone, Copy, PartialEq, Eq)]
++pub(crate) enum TabsRowKind {
++    Projects,
++    Threads,
++    /// Not a row: the Add Project button, which sits with the agent panel's own buttons.
++    AddProject,
++}
++
++/// One of the two tab rows that stand in for the sidebar at the top of the agent panel. It
++/// renders from the sidebar's entries, so the rows and the sidebar share one model.
++pub(crate) struct ThreadTabsRow {
++    sidebar: WeakEntity<Sidebar>,
++    kind: TabsRowKind,
++    scroll_handle: ScrollHandle,
++    scrolled_to: Option<usize>,
++    _observe_sidebar: gpui::Subscription,
++}
++
++impl ThreadTabsRow {
++    pub(crate) fn new(
++        sidebar: &Entity<Sidebar>,
++        kind: TabsRowKind,
++        cx: &mut Context<Self>,
++    ) -> Self {
++        Self {
++            sidebar: sidebar.downgrade(),
++            kind,
++            scroll_handle: ScrollHandle::new(),
++            scrolled_to: None,
++            _observe_sidebar: cx.observe(sidebar, |_, _, cx| cx.notify()),
++        }
++    }
++}
++
++impl Render for ThreadTabsRow {
++    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
++        let Some(sidebar) = self.sidebar.upgrade() else {
++            return div().into_any_element();
++        };
++        let kind = self.kind;
++        let row = sidebar.update(cx, |sidebar, cx| match kind {
++            TabsRowKind::Projects => Ok(sidebar.render_project_tabs(window, cx)),
++            TabsRowKind::Threads => Ok(sidebar.render_thread_tabs(window, cx)),
++            TabsRowKind::AddProject => Err(sidebar
++                .render_recent_projects_button(true, cx)
++                .into_any_element()),
++        });
++        let row = match row {
++            Ok(row) => row,
++            Err(button) => return button,
++        };
++
++        // Like the editor's tab bar, bring the active tab into view when it changes.
++        if row.active_index != self.scrolled_to {
++            if let Some(index) = row.active_index {
++                self.scroll_handle.scroll_to_item(index);
++            }
++            self.scrolled_to = row.active_index;
++        }
++
++        let filler = div()
++            .id("tab_bar_filler")
++            .min_w_6()
++            .h(Tab::container_height(cx))
++            .flex_grow_1()
++            .child("");
++        let filler = if workspace::title_bar_in_status_bar(cx) {
++            workspace::move_window_on_drag(filler, window, cx)
++        } else {
++            filler
++        };
++
++        h_flex()
++            .id(match kind {
++                TabsRowKind::Projects => "agent_panel_project_tabs",
++                TabsRowKind::Threads | TabsRowKind::AddProject => "agent_panel_thread_tabs",
++            })
++            .overflow_x_scroll()
++            .w_full()
++            .track_scroll(&self.scroll_handle)
++            .children(row.tabs)
++            .child(filler)
++            .into_any_element()
++    }
++}
++
++pub(crate) struct RenderedTabsRow {
++    tabs: Vec<AnyElement>,
++    active_index: Option<usize>,
++}
++
++fn tab_position(index: usize, count: usize, active_index: Option<usize>) -> TabPosition {
++    if index == 0 {
++        TabPosition::First
++    } else if index + 1 == count {
++        TabPosition::Last
++    } else {
++        TabPosition::Middle(active_index.map_or(Ordering::Equal, |active| index.cmp(&active)))
++    }
++}
++
++/// The `tabs.*` settings the editor's tabs follow, copied so that rendering can keep using
++/// `cx` mutably.
++#[derive(Clone, Copy)]
++struct TabSettings {
++    close_side: TabCloseSide,
++    show_close_button: ShowCloseButton,
++    min_width: Option<Pixels>,
++    max_width: Option<Pixels>,
++}
++
++impl TabSettings {
++    fn get(cx: &App) -> Self {
++        let settings = ItemSettings::get_global(cx);
++        Self {
++            close_side: match settings.close_position {
++                ClosePosition::Left => TabCloseSide::Start,
++                ClosePosition::Right => TabCloseSide::End,
++            },
++            show_close_button: settings.show_close_button,
++            min_width: settings.min_width,
++            max_width: settings.max_width,
++        }
++    }
++}
++
++fn tab_label(title: SharedString, is_active: bool, settings: TabSettings) -> AnyElement {
++    let truncate_middle = settings.max_width.is_some();
++    div()
++        .when(truncate_middle, |this| this.flex_1().min_w_0())
++        .child(
++            Label::new(title)
++                .single_line()
++                .color(if is_active {
++                    Color::Default
++                } else {
++                    Color::Muted
++                })
++                .when(truncate_middle, |this| this.truncate_middle()),
++        )
++        .into_any_element()
++}
++
++/// Wraps a tab's icon and label the way the editor's tabs do, including the width bounds.
++fn tab_content(
++    id: impl Into<ElementId>,
++    tooltip: SharedString,
++    children: Vec<AnyElement>,
++    settings: TabSettings,
++) -> impl IntoElement {
++    h_flex()
++        .id(id)
++        .gap_1()
++        .when(
++            settings.min_width.is_some() || settings.max_width.is_some(),
++            |this| this.flex_grow(1.),
++        )
++        .when(settings.max_width.is_some(), |this| {
++            this.min_w_0().overflow_hidden()
++        })
++        .children(children)
++        .tooltip(Tooltip::text(tooltip))
++}
++
++/// The close button of a closable tab, shown as `tabs.show_close_button` asks.
++fn close_button(
++    id: impl Into<ElementId>,
++    icon: IconName,
++    tooltip: &'static str,
++    settings: TabSettings,
++) -> Option<IconButton> {
++    let button = match settings.show_close_button {
++        ShowCloseButton::Always => IconButton::new(id, icon),
++        ShowCloseButton::Hover => IconButton::new(id, icon).visible_on_hover(""),
++        ShowCloseButton::Hidden => return None,
++    };
++    Some(
++        button
++            .shape(IconButtonShape::Square)
++            .icon_color(Color::Muted)
++            .size(ButtonSize::None)
++            .icon_size(IconSize::Small)
++            .tooltip(Tooltip::text(tooltip)),
++    )
++}
++
++enum CloseTab {
++    StopThread(ThreadId),
++    RemoveDraft(ThreadId, ThreadEntryWorkspace),
++    ArchiveThread(acp::SessionId),
++    CloseTerminal(TerminalThreadMetadata, ThreadEntryWorkspace),
++}
++
++impl Sidebar {
++    pub(crate) fn render_project_tabs(
++        &mut self,
++        _window: &mut Window,
++        cx: &mut Context<Self>,
++    ) -> RenderedTabsRow {
++        let chip = TabBarSettings::get_global(cx).pinned_tab_chips;
++        let headers = self
++            .contents
++            .project_header_indices
++            .iter()
++            .filter_map(|&entry_ix| match self.contents.entries.get(entry_ix)? {
++                ListEntry::ProjectHeader {
++                    key,
++                    label,
++                    has_running_threads,
++                    waiting_thread_count,
++                    has_notifications,
++                    is_active,
++                    has_threads,
++                    ..
++                } => Some((
++                    entry_ix,
++                    key.clone(),
++                    label.clone(),
++                    *has_running_threads,
++                    *waiting_thread_count,
++                    *has_notifications,
++                    *is_active,
++                    *has_threads,
++                )),
++                ListEntry::Thread(_) | ListEntry::Terminal(_) => None,
++            })
++            .collect::<Vec<_>>();
++
++        let count = headers.len();
++        let active_index = headers.iter().position(|header| header.6);
++        let tabs = headers
++            .into_iter()
++            .enumerate()
++            .map(
++                |(
++                    index,
++                    (
++                        entry_ix,
++                        key,
++                        label,
++                        has_running_threads,
++                        waiting_thread_count,
++                        has_notifications,
++                        is_active,
++                        has_threads,
++                    ),
++                )| {
++                    let settings = TabSettings::get(cx);
++                    let indicator = if has_running_threads {
++                        Some(
++                            Icon::new(IconName::LoadCircle)
++                                .size(IconSize::XSmall)
++                                .color(Color::Muted)
++                                .with_rotate_animation(2)
++                                .into_any_element(),
++                        )
++                    } else if waiting_thread_count > 0 {
++                        Some(
++                            Icon::new(IconName::Warning)
++                                .size(IconSize::XSmall)
++                                .color(Color::Warning)
++                                .into_any_element(),
++                        )
++                    } else if has_notifications {
++                        Some(Indicator::dot().color(Color::Accent).into_any_element())
++                    } else {
++                        None
++                    };
++
++                    self.project_header_menu_handles
++                        .entry(entry_ix)
++                        .or_default();
++                    let menu_handle = self
++                        .project_header_menu_handles
++                        .get(&entry_ix)
++                        .cloned()
++                        .unwrap_or_default();
++                    let menu = self.render_project_header_ellipsis_menu(
++                        entry_ix,
++                        "tab-",
++                        &key,
++                        is_active,
++                        has_threads,
++                        &SharedString::from(""),
++                        true,
++                        cx,
++                    );
++
++                    let tooltip: SharedString = key
++                        .path_list()
++                        .paths()
++                        .iter()
++                        .map(|path| path.display().to_string())
++                        .join(", ")
++                        .into();
++                    let mut children = vec![tab_label(label, is_active, settings)];
++                    children.extend(self.render_remote_project_icon(entry_ix, key.host().as_ref()));
++
++                    Tab::new(("project-tab", index))
++                        .position(tab_position(index, count, active_index))
++                        .close_side(settings.close_side)
++                        .toggle_state(is_active)
++                        .chip(chip)
++                        .min_width(settings.min_width)
++                        .max_width(settings.max_width)
++                        .on_click(cx.listener({
++                            let key = key.clone();
++                            move |this, _: &ClickEvent, window, cx| {
++                                this.activate_project_tab(&key, window, cx);
++                            }
++                        }))
++                        .on_mouse_down(gpui::MouseButton::Right, move |_, window, cx| {
++                            cx.stop_propagation();
++                            menu_handle.toggle(window, cx);
++                        })
++                        .start_slot::<AnyElement>(indicator)
++                        .end_slot(menu)
++                        .child(tab_content(
++                            ("project-tab-content", index),
++                            tooltip,
++                            children,
++                            settings,
++                        ))
++                        .into_any_element()
++                },
++            )
++            .collect();
++
++        RenderedTabsRow { tabs, active_index }
++    }
++
++    pub(crate) fn render_thread_tabs(
++        &mut self,
++        _window: &mut Window,
++        cx: &mut Context<Self>,
++    ) -> RenderedTabsRow {
++        let chip = TabBarSettings::get_global(cx).unpinned_tab_chips;
++        let entries = &self.contents.entries;
++        let Some(active_header) = entries.iter().position(|entry| {
++            matches!(
++                entry,
++                ListEntry::ProjectHeader {
++                    is_active: true,
++                    ..
++                }
++            )
++        }) else {
++            return RenderedTabsRow {
++                tabs: Vec::new(),
++                active_index: None,
++            };
++        };
++
++        // Tabs keep the order they were opened in, like editor tabs, instead of the sidebar's
++        // most-recent-first order, which would move a tab whenever its thread is used.
++        let rows = entries
++            .iter()
++            .enumerate()
++            .skip(active_header + 1)
++            .take_while(|(_, entry)| !matches!(entry, ListEntry::ProjectHeader { .. }))
++            .map(|(entry_ix, entry)| (entry_ix, entry.clone()))
++            .sorted_by_key(|(_, entry)| match entry {
++                ListEntry::Thread(thread) if thread.draft == Some(DraftKind::Empty) => {
++                    DateTime::<Utc>::MAX_UTC
++                }
++                ListEntry::Thread(thread) => thread
++                    .metadata
++                    .created_at
++                    .unwrap_or(thread.metadata.updated_at),
++                ListEntry::Terminal(terminal) => terminal.metadata.created_at,
++                ListEntry::ProjectHeader { .. } => DateTime::<Utc>::MAX_UTC,
++            })
++            .collect::<Vec<_>>();
++
++        let count = rows.len();
++        let active_index = rows.iter().position(|(_, entry)| {
++            self.active_entry
++                .as_ref()
++                .is_some_and(|active| active.matches_entry(entry))
++        });
++        let tabs = rows
++            .into_iter()
++            .enumerate()
++            .filter_map(|(index, (entry_ix, entry))| {
++                let position = tab_position(index, count, active_index);
++                let is_active = active_index == Some(index);
++                match entry {
++                    ListEntry::Thread(thread) => Some(self.render_thread_tab(
++                        index, entry_ix, &thread, position, is_active, chip, cx,
++                    )),
++                    ListEntry::Terminal(terminal) => Some(self.render_terminal_tab(
++                        index, entry_ix, &terminal, position, is_active, chip, cx,
++                    )),
++                    ListEntry::ProjectHeader { .. } => None,
++                }
++            })
++            .collect();
++
++        RenderedTabsRow { tabs, active_index }
++    }
++
++    fn activate_project_tab(
++        &mut self,
++        key: &ProjectGroupKey,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        self.activate_or_open_workspace_for_group(key, window, cx);
++        // The rows live in the agent panel, so keep it open in the project switched to.
++        if let Some(workspace) = self.active_workspace(cx) {
++            workspace.update(cx, |workspace, cx| {
++                workspace.open_panel::<AgentPanel>(window, cx);
++            });
++        }
++    }
++
++    fn close_tab(&mut self, close: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
++        match close {
++            CloseTab::StopThread(thread_id) => self.stop_thread(thread_id, cx),
++            CloseTab::RemoveDraft(thread_id, workspace) => {
++                self.remove_draft(*thread_id, workspace, window, cx)
++            }
++            CloseTab::ArchiveThread(session_id) => self.archive_thread(session_id, window, cx),
++            CloseTab::CloseTerminal(metadata, workspace) => {
++                self.close_terminal(metadata, workspace, window, cx)
++            }
++        }
++    }
++
++    /// Leaves the history the agent panel shows in place of the thread.
++    fn leave_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        if matches!(self.view, SidebarView::Archive(_)) {
++            self.show_thread_list(window, cx);
++        }
++    }
++
++    fn render_thread_tab(
++        &mut self,
++        index: usize,
++        entry_ix: usize,
++        thread: &Arc<ThreadEntry>,
++        position: TabPosition,
++        is_active: bool,
++        chip: bool,
++        cx: &mut Context<Self>,
++    ) -> AnyElement {
++        let settings = TabSettings::get(cx);
++        let thread_id = thread.metadata.thread_id;
++        let title = thread.metadata.display_title();
++        let is_running = matches!(
++            thread.status,
++            AgentThreadStatus::Running | AgentThreadStatus::WaitingForConfirmation
++        );
++
++        let indicator = match thread.status {
++            AgentThreadStatus::Running => Some(
++                Icon::new(IconName::LoadCircle)
++                    .size(IconSize::XSmall)
++                    .color(Color::Muted)
++                    .with_rotate_animation(2)
++                    .into_any_element(),
++            ),
++            AgentThreadStatus::WaitingForConfirmation => Some(
++                Icon::new(IconName::Warning)
++                    .size(IconSize::XSmall)
++                    .color(Color::Warning)
++                    .into_any_element(),
++            ),
++            AgentThreadStatus::Error => {
++                Some(Indicator::dot().color(Color::Error).into_any_element())
++            }
++            AgentThreadStatus::Completed if self.contents.is_thread_notified(&thread_id) => {
++                Some(Indicator::dot().color(Color::Accent).into_any_element())
++            }
++            AgentThreadStatus::Completed => None,
++        };
++
++        let icon = if thread.draft.is_some() {
++            Icon::new(IconName::Circle)
++                .size(IconSize::Small)
++                .color(Color::Custom(cx.theme().colors().icon_muted.opacity(0.2)))
++        } else if let Some(svg) = thread.icon_from_external_svg.clone() {
++            Icon::from_external_svg(svg)
++                .size(IconSize::Small)
++                .color(Color::Muted)
++        } else {
++            Icon::new(thread.icon)
++                .size(IconSize::Small)
++                .color(Color::Muted)
++        };
++
++        let is_renaming = self.rename_target == Some(RenameTarget::Thread(thread_id));
++        let label = if is_renaming {
++            self.render_rename_title_editor(cx)
++        } else {
++            tab_label(title.clone(), is_active, settings)
++        };
++
++        let close = if is_running {
++            Some((
++                CloseTab::StopThread(thread_id),
++                IconName::Stop,
++                "Stop Generation",
++            ))
++        } else {
++            match (&thread.draft, thread.metadata.session_id.clone()) {
++                (Some(_), _) => Some((
++                    CloseTab::RemoveDraft(thread_id, thread.workspace.clone()),
++                    IconName::Close,
++                    "Discard Draft",
++                )),
++                (None, Some(session_id)) => Some((
++                    CloseTab::ArchiveThread(session_id),
++                    IconName::Close,
++                    "Archive Thread",
++                )),
++                (None, None) => None,
++            }
++        };
++        let close = close.map(Rc::new);
++        let close_button = close.as_ref().and_then(|close| {
++            let (_, icon, tooltip) = close.as_ref();
++            close_button(("close-thread-tab", index), *icon, tooltip, settings).map(|button| {
++                let close = close.clone();
++                button.on_click(cx.listener(move |this, _, window, cx| {
++                    this.close_tab(&close.0, window, cx);
++                }))
++            })
++        });
++
++        let metadata = thread.metadata.clone();
++        let thread_workspace = thread.workspace.clone();
++        let tab = Tab::new(("thread-tab", index))
++            .position(position)
++            .close_side(settings.close_side)
++            .toggle_state(is_active)
++            .chip(chip)
++            .min_width(settings.min_width)
++            .max_width(settings.max_width)
++            .on_click(cx.listener({
++                let title = title.clone();
++                move |this, event: &ClickEvent, window, cx| {
++                    if event.click_count() > 1 {
++                        this.start_renaming_entry(
++                            entry_ix,
++                            RenameTarget::Thread(thread_id),
++                            title.clone(),
++                            window,
++                            cx,
++                        );
++                        return;
++                    }
++                    this.leave_history(window, cx);
++                    this.selection = None;
++                    match &thread_workspace {
++                        ThreadEntryWorkspace::Open(workspace) => {
++                            this.activate_thread(metadata.clone(), workspace, false, window, cx);
++                        }
++                        ThreadEntryWorkspace::Closed {
++                            folder_paths,
++                            project_group_key,
++                        } => {
++                            this.open_workspace_and_activate_thread(
++                                metadata.clone(),
++                                folder_paths.clone(),
++                                project_group_key,
++                                window,
++                                cx,
++                            );
++                        }
++                    }
++                }
++            }))
++            .on_aux_click(cx.listener({
++                let close = close.clone();
++                move |this, event: &ClickEvent, window, cx| {
++                    if !event.is_middle_click() {
++                        return;
++                    }
++                    if let Some(close) = &close
++                        && !matches!(close.0, CloseTab::StopThread(_))
++                    {
++                        this.close_tab(&close.0, window, cx);
++                    }
++                    cx.stop_propagation();
++                }
++            }))
++            .start_slot::<AnyElement>(indicator)
++            .end_slot::<IconButton>(close_button)
++            .child(tab_content(
++                ("thread-tab-content", index),
++                title,
++                vec![icon.into_any_element(), label],
++                settings,
++            ));
++
++        match self.thread_context_menu(entry_ix, thread, cx) {
++            Some(menu) => right_click_menu(("thread-tab-menu", index))
++                .trigger(move |_, _, _| tab)
++                .menu(menu)
++                .into_any_element(),
++            None => tab.into_any_element(),
++        }
++    }
++
++    fn render_terminal_tab(
++        &mut self,
++        index: usize,
++        entry_ix: usize,
++        terminal: &TerminalEntry,
++        position: TabPosition,
++        is_active: bool,
++        chip: bool,
++        cx: &mut Context<Self>,
++    ) -> AnyElement {
++        let settings = TabSettings::get(cx);
++        let terminal_id = terminal.metadata.terminal_id;
++        let display_title = terminal.metadata.display_title();
++        let (icon, title) = match split_leading_icon_char(&display_title, &[]) {
++            Some((icon_char, title, _)) => (
++                Label::new(icon_char)
++                    .size(LabelSize::Small)
++                    .color(Color::Muted)
++                    .into_any_element(),
++                title,
++            ),
++            None => (
++                Icon::new(IconName::Terminal)
++                    .size(IconSize::Small)
++                    .color(Color::Muted)
++                    .into_any_element(),
++                display_title.clone(),
++            ),
++        };
++
++        let is_renaming = self.rename_target == Some(RenameTarget::Terminal(terminal_id));
++        let label = if is_renaming {
++            self.render_rename_title_editor(cx)
++        } else {
++            tab_label(title, is_active, settings)
++        };
++        let indicator = terminal
++            .has_notification
++            .then(|| Indicator::dot().color(Color::Accent));
++
++        let close = Rc::new(CloseTab::CloseTerminal(
++            terminal.metadata.clone(),
++            terminal.workspace.clone(),
++        ));
++        let close_button = close_button(
++            ("close-terminal-tab", index),
++            IconName::Close,
++            "Close Terminal",
++            settings,
++        )
++        .map(|button| {
++            let close = close.clone();
++            button.on_click(cx.listener(move |this, _, window, cx| {
++                this.close_tab(&close, window, cx);
++            }))
++        });
++
++        let metadata = terminal.metadata.clone();
++        let terminal_workspace = terminal.workspace.clone();
++        let rename_title = terminal.metadata.editable_title();
++        let tab = Tab::new(("terminal-tab", index))
++            .position(position)
++            .close_side(settings.close_side)
++            .toggle_state(is_active)
++            .chip(chip)
++            .min_width(settings.min_width)
++            .max_width(settings.max_width)
++            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
++                if event.click_count() > 1 {
++                    this.start_renaming_entry(
++                        entry_ix,
++                        RenameTarget::Terminal(terminal_id),
++                        rename_title.clone(),
++                        window,
++                        cx,
++                    );
++                    return;
++                }
++                this.leave_history(window, cx);
++                this.selection = None;
++                this.activate_terminal_entry(
++                    metadata.clone(),
++                    terminal_workspace.clone(),
++                    false,
++                    window,
++                    cx,
++                );
++            }))
++            .on_aux_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
++                if !event.is_middle_click() {
++                    return;
++                }
++                this.close_tab(&close, window, cx);
++                cx.stop_propagation();
++            }))
++            .start_slot::<Indicator>(indicator)
++            .end_slot::<IconButton>(close_button)
++            .child(tab_content(
++                ("terminal-tab-content", index),
++                display_title,
++                vec![icon, label],
++                settings,
++            ));
++
++        right_click_menu(("terminal-tab-menu", index))
++            .trigger(move |_, _, _| tab)
++            .menu(Self::terminal_context_menu(entry_ix, terminal, cx))
++            .into_any_element()
++    }
++}
+diff --git a/crates/workspace/src/dock.rs b/crates/workspace/src/dock.rs
+index 1a6059cbf4..e87fa0cab0 100644
+--- a/crates/workspace/src/dock.rs
++++ b/crates/workspace/src/dock.rs
+@@ -98,6 +98,11 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
+     fn is_agent_panel(&self) -> bool {
+         false
+     }
++    /// Whether the panel keeps the macOS traffic lights off its content itself, so the dock and
++    /// the zoom overlay must not add their spacer row above it.
++    fn holds_traffic_lights(&self, _window: &Window, _cx: &App) -> bool {
++        false
++    }
+     /// Returns metadata describing how to hide this panel's button from the
+     /// status bar by writing to user settings. Implementors should return
+     /// `None` if the panel button cannot be hidden through settings.
+@@ -136,6 +141,7 @@ pub trait PanelHandle: Send + Sync {
+     fn activation_priority(&self, cx: &App) -> u32;
+     fn enabled(&self, cx: &App) -> bool;
+     fn is_agent_panel(&self, cx: &App) -> bool;
++    fn holds_traffic_lights(&self, window: &Window, cx: &App) -> bool;
+     fn hide_button_setting(&self, cx: &App) -> Option<HideStatusItem>;
+     fn move_to_next_position(&self, window: &mut Window, cx: &mut App) {
+         let current_position = self.position(window, cx);
+@@ -270,6 +276,10 @@ where
+         self.read(cx).is_agent_panel()
+     }
+ 
++    fn holds_traffic_lights(&self, window: &Window, cx: &App) -> bool {
++        self.read(cx).holds_traffic_lights(window, cx)
++    }
++
+     fn hide_button_setting(&self, cx: &App) -> Option<HideStatusItem> {
+         self.read(cx).hide_button_setting(cx)
+     }
+@@ -1276,7 +1286,8 @@ impl Render for Dock {
+         if let Some(entry) = self.visible_entry() {
+             let position = self.position;
+             let top_spacer = (position == DockPosition::Left
+-                && traffic_lights_overlay_workspace(window, cx))
++                && traffic_lights_overlay_workspace(window, cx)
++                && !entry.panel.holds_traffic_lights(window, cx))
+             .then(|| traffic_light_row(window, cx));
+             let has_top_spacer = top_spacer.is_some();
+             let create_resize_handle = || {
+diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
+index 0946495883..b28c435fa3 100644
+--- a/crates/workspace/src/multi_workspace.rs
++++ b/crates/workspace/src/multi_workspace.rs
+@@ -157,6 +157,29 @@ pub trait Sidebar: Focusable + Render + EventEmitter<SidebarEvent> + Sized {
+         _cx: &mut Context<Self>,
+     ) {
+     }
++
++    /// The views the agent panel shows in its header while `agent.threads_sidebar.in_agent_panel`
++    /// is on.
++    fn agent_panel_tab_rows(&mut self, _cx: &mut Context<Self>) -> Option<AgentPanelTabRows> {
++        None
++    }
++
++    /// The thread history, for the agent panel to show in place of the thread while it is open.
++    fn agent_panel_history(&self, _cx: &App) -> Option<AnyView> {
++        None
++    }
++
++    fn toggle_thread_history(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
++}
++
++/// The sidebar's contents as the agent panel shows them in place of its title.
++pub struct AgentPanelTabRows {
++    /// The window's projects.
++    pub projects: AnyView,
++    /// The threads and terminals of the active project.
++    pub threads: AnyView,
++    /// The button that adds a project to the window.
++    pub add_project: AnyView,
+ }
+ 
+ pub trait SidebarHandle: 'static + Send + Sync {
+@@ -177,6 +200,10 @@ pub trait SidebarHandle: 'static + Send + Sync {
+     fn side(&self, cx: &App) -> SidebarSide;
+     fn serialized_state(&self, cx: &App) -> Option<String>;
+     fn restore_serialized_state(&self, state: &str, window: &mut Window, cx: &mut App);
++
++    fn agent_panel_tab_rows(&self, cx: &mut App) -> Option<AgentPanelTabRows>;
++    fn agent_panel_history(&self, cx: &App) -> Option<AnyView>;
++    fn toggle_thread_history(&self, window: &mut Window, cx: &mut App);
+ }
+ 
+ #[derive(Clone)]
+@@ -266,6 +293,28 @@ impl<T: Sidebar> SidebarHandle for Entity<T> {
+             this.restore_serialized_state(state, window, cx)
+         })
+     }
++
++    fn agent_panel_tab_rows(&self, cx: &mut App) -> Option<AgentPanelTabRows> {
++        self.update(cx, |this, cx| this.agent_panel_tab_rows(cx))
++    }
++
++    fn agent_panel_history(&self, cx: &App) -> Option<AnyView> {
++        self.read(cx).agent_panel_history(cx)
++    }
++
++    fn toggle_thread_history(&self, window: &mut Window, cx: &mut App) {
++        let entity = self.clone();
++        window.defer(cx, move |window, cx| {
++            entity.update(cx, |this, cx| {
++                this.toggle_thread_history(window, cx);
++            });
++        });
++    }
++}
++
++/// Whether the threads sidebar's contents live in the agent panel rather than in the sidebar.
++pub fn threads_sidebar_in_agent_panel(cx: &App) -> bool {
++    AgentSettings::get_global(cx).threads_sidebar.in_agent_panel
+ }
+ 
+ #[derive(Clone)]
+@@ -333,7 +382,9 @@ impl MultiWorkspace {
+ 
+     pub fn sidebar_render_state(&self, cx: &App) -> SidebarRenderState {
+         SidebarRenderState {
+-            open: self.sidebar_open() && self.multi_workspace_enabled(cx),
++            open: self.sidebar_open()
++                && self.multi_workspace_enabled(cx)
++                && !threads_sidebar_in_agent_panel(cx),
+             side: self.sidebar_side(cx),
+         }
+     }
+@@ -351,12 +402,22 @@ impl MultiWorkspace {
+             let mut previous_multi_workspace_enabled = !DisableAiSettings::get_global(cx)
+                 .disable_ai
+                 && AgentSettings::get_global(cx).enabled;
++            let mut previous_in_agent_panel = threads_sidebar_in_agent_panel(cx);
+             move |this, window, cx| {
+                 let multi_workspace_enabled = this.multi_workspace_enabled(cx);
+                 if previous_multi_workspace_enabled && !multi_workspace_enabled {
+                     this.collapse_to_single_workspace(window, cx);
+                 }
+                 previous_multi_workspace_enabled = multi_workspace_enabled;
++
++                let in_agent_panel = threads_sidebar_in_agent_panel(cx);
++                if in_agent_panel != previous_in_agent_panel
++                    && multi_workspace_enabled
++                    && (in_agent_panel || this.sidebar_open)
++                {
++                    this.apply_open_sidebar(cx);
++                }
++                previous_in_agent_panel = in_agent_panel;
+             }
+         });
+         Self::subscribe_to_workspace(&workspace, window, cx);
+@@ -431,6 +492,10 @@ impl MultiWorkspace {
+         if !self.multi_workspace_enabled(cx) {
+             return;
+         }
++        if threads_sidebar_in_agent_panel(cx) {
++            window.dispatch_action(Box::new(zed_actions::assistant::ToggleFocus), cx);
++            return;
++        }
+ 
+         if self.sidebar_open() {
+             self.close_sidebar(window, cx);
+@@ -445,7 +510,7 @@ impl MultiWorkspace {
+     }
+ 
+     pub fn close_sidebar_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+-        if !self.multi_workspace_enabled(cx) {
++        if !self.multi_workspace_enabled(cx) || threads_sidebar_in_agent_panel(cx) {
+             return;
+         }
+ 
+@@ -458,6 +523,10 @@ impl MultiWorkspace {
+         if !self.multi_workspace_enabled(cx) {
+             return;
+         }
++        if threads_sidebar_in_agent_panel(cx) {
++            window.dispatch_action(Box::new(zed_actions::assistant::ToggleFocus), cx);
++            return;
++        }
+ 
+         if self.sidebar_open() {
+             let sidebar_is_focused = self
+@@ -502,7 +571,12 @@ impl MultiWorkspace {
+     fn apply_open_sidebar(&mut self, cx: &mut Context<Self>) {
+         self.sidebar_open = true;
+         self.retain_active_workspace(cx);
+-        let sidebar_focus_handle = self.sidebar.as_ref().map(|s| s.focus_handle(cx));
++        // The list lives in the agent panel then; the unrendered sidebar must not take focus.
++        let sidebar_focus_handle = self
++            .sidebar
++            .as_ref()
++            .filter(|_| !threads_sidebar_in_agent_panel(cx))
++            .map(|s| s.focus_handle(cx));
+         for workspace in self.workspaces().cloned().collect::<Vec<_>>() {
+             workspace.update(cx, |workspace, _cx| {
+                 workspace.set_sidebar_focus_handle(sidebar_focus_handle.clone());
+@@ -1999,7 +2073,10 @@ impl Render for MultiWorkspace {
+         let sidebar_side = self.sidebar_side(cx);
+         let sidebar_on_right = sidebar_side == SidebarSide::Right;
+ 
+-        let sidebar: Option<AnyElement> = if multi_workspace_enabled && self.sidebar_open() {
++        let sidebar: Option<AnyElement> = if multi_workspace_enabled
++            && self.sidebar_open()
++            && !threads_sidebar_in_agent_panel(cx)
++        {
+             self.sidebar.as_ref().map(|sidebar_handle| {
+                 let weak = cx.weak_entity();
+ 
+diff --git a/crates/workspace/src/status_bar.rs b/crates/workspace/src/status_bar.rs
+index a3966a06a3..3d1cc2b98a 100644
+--- a/crates/workspace/src/status_bar.rs
++++ b/crates/workspace/src/status_bar.rs
+@@ -90,7 +90,7 @@ impl SidebarStatus {
+                     open: mw.sidebar_open() && enabled,
+                     side: mw.sidebar_side(cx),
+                     has_notifications: mw.sidebar_has_notifications(cx),
+-                    show_toggle: enabled,
++                    show_toggle: enabled && !crate::threads_sidebar_in_agent_panel(cx),
+                 }
+             })
+             .unwrap_or_default()
+diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
+index 2ee0e41367..97af71465a 100644
+--- a/crates/workspace/src/workspace.rs
++++ b/crates/workspace/src/workspace.rs
+@@ -31,11 +31,12 @@ mod workspace_settings;
+ 
+ pub use dock::Panel;
+ pub use multi_workspace::{
+-    CloseWorkspaceSidebar, DraggedSidebar, FocusWorkspaceSidebar, MoveProjectDown,
+-    MoveProjectToNewWindow, MoveProjectUp, MultiWorkspace, MultiWorkspaceEvent, NewThread,
+-    NextProject, NextThread, PreviousProject, PreviousThread, ProjectGroup, ProjectGroupKey,
+-    RemovalIntent, SerializedProjectGroupState, Sidebar, SidebarEvent, SidebarHandle,
+-    SidebarRenderState, SidebarSide, ToggleWorkspaceSidebar, sidebar_side_context_menu,
++    AgentPanelTabRows, CloseWorkspaceSidebar, DraggedSidebar, FocusWorkspaceSidebar,
++    MoveProjectDown, MoveProjectToNewWindow, MoveProjectUp, MultiWorkspace, MultiWorkspaceEvent,
++    NewThread, NextProject, NextThread, PreviousProject, PreviousThread, ProjectGroup,
++    ProjectGroupKey, RemovalIntent, SerializedProjectGroupState, Sidebar, SidebarEvent,
++    SidebarHandle, SidebarRenderState, SidebarSide, ToggleWorkspaceSidebar,
++    sidebar_side_context_menu, threads_sidebar_in_agent_panel,
+ };
+ pub use path_list::{PathList, SerializedPathList};
+ pub use remote::{
+@@ -340,15 +341,19 @@ pub const TRAFFIC_LIGHT_INSET: Pixels = px(9.);
+ /// then (and with the title bar in place) they keep the stock inset. The headers' reserved width
+ /// (`TRAFFIC_LIGHT_PADDING`) assumes that stock inset, so the centred lights leave up to ~2.5px
+ /// more room before the first tab (compact density): not worth reading the live size every frame.
+-#[cfg(target_os = "macos")]
+-fn update_traffic_light_position(window: &Window, cx: &App) {
+-    let inset = match window.traffic_light_size() {
++pub fn traffic_light_inset(window: &Window, cx: &App) -> Pixels {
++    match window.traffic_light_size() {
+         Some(button) if title_bar_in_status_bar(cx) => {
+             // A header shorter than the buttons (tiny UI font) would push them off the window.
+             ((ui::Tab::content_height(cx) - button.height) / 2.).max(px(0.))
+         }
+         _ => TRAFFIC_LIGHT_INSET,
+-    };
++    }
++}
++
++#[cfg(target_os = "macos")]
++fn update_traffic_light_position(window: &Window, cx: &App) {
++    let inset = traffic_light_inset(window, cx);
+     window.set_traffic_light_position(point(inset, inset));
+ }
+ 
+@@ -10171,7 +10176,15 @@ impl Render for Workspace {
+                                         })
+                                         .into_any_element(),
+                                 };
+-                                let traffic_lights = traffic_lights_overlay_workspace(window, cx);
++                                let traffic_lights = traffic_lights_overlay_workspace(window, cx)
++                                    && !self.zoomed_position.is_some_and(|position| {
++                                        self.dock_at_position(position)
++                                            .read(cx)
++                                            .active_panel()
++                                            .is_some_and(|panel| {
++                                                panel.holds_traffic_lights(window, cx)
++                                            })
++                                    });
+                                 let zoomed_element =
+                                     if traffic_lights && self.zoomed_position.is_some() {
+                                         v_flex()
+-- 
+2.55.0
+

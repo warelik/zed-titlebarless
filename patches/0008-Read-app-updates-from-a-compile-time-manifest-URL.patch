@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 11:28:27 +0300
-Subject: [PATCH 8/8] Read app updates from a compile-time manifest URL
+Subject: [PATCH 08/11] Read app updates from a compile-time manifest URL
 
 App updates are read from a manifest URL set at compile time, so fork
 builds update from the fork's own releases. Setting
