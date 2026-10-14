@@ -98,6 +98,11 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
     fn is_agent_panel(&self) -> bool {
         false
     }
+    /// Whether the panel keeps the macOS traffic lights off its content itself, so the dock and
+    /// the zoom overlay must not add their spacer row above it.
+    fn holds_traffic_lights(&self, _window: &Window, _cx: &App) -> bool {
+        false
+    }
     /// Returns metadata describing how to hide this panel's button from the
     /// status bar by writing to user settings. Implementors should return
     /// `None` if the panel button cannot be hidden through settings.
@@ -136,6 +141,7 @@ pub trait PanelHandle: Send + Sync {
     fn activation_priority(&self, cx: &App) -> u32;
     fn enabled(&self, cx: &App) -> bool;
     fn is_agent_panel(&self, cx: &App) -> bool;
+    fn holds_traffic_lights(&self, window: &Window, cx: &App) -> bool;
     fn hide_button_setting(&self, cx: &App) -> Option<HideStatusItem>;
     fn move_to_next_position(&self, window: &mut Window, cx: &mut App) {
         let current_position = self.position(window, cx);
@@ -268,6 +274,10 @@ where
 
     fn is_agent_panel(&self, cx: &App) -> bool {
         self.read(cx).is_agent_panel()
+    }
+
+    fn holds_traffic_lights(&self, window: &Window, cx: &App) -> bool {
+        self.read(cx).holds_traffic_lights(window, cx)
     }
 
     fn hide_button_setting(&self, cx: &App) -> Option<HideStatusItem> {
@@ -1276,7 +1286,8 @@ impl Render for Dock {
         if let Some(entry) = self.visible_entry() {
             let position = self.position;
             let top_spacer = (position == DockPosition::Left
-                && traffic_lights_overlay_workspace(window, cx))
+                && traffic_lights_overlay_workspace(window, cx)
+                && !entry.panel.holds_traffic_lights(window, cx))
             .then(|| traffic_light_row(window, cx));
             let has_top_spacer = top_spacer.is_some();
             let create_resize_handle = || {

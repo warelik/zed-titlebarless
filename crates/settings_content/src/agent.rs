@@ -62,6 +62,12 @@ pub struct ThreadsSidebarSettingsContent {
     ///
     /// Default: false
     pub compact: Option<bool>,
+    /// Whether to show the threads sidebar's contents as two rows of tabs at the top of the
+    /// agent panel instead of in the sidebar: the projects of the window, then the threads and
+    /// terminals of the active project.
+    ///
+    /// Default: false
+    pub in_agent_panel: Option<bool>,
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
