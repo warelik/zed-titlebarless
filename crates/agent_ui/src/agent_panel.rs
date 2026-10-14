@@ -2433,6 +2433,7 @@ impl AgentPanel {
             worktree_paths: project.worktree_paths(cx),
             remote_connection: project.remote_connection_options(cx).cloned(),
             working_directory: terminal.working_directory.clone(),
+            shpool_context: None,
         })
     }
 
@@ -7744,6 +7745,7 @@ mod tests {
             worktree_paths: project.read_with(cx, |project, cx| project.worktree_paths(cx)),
             remote_connection: None,
             working_directory: None,
+            shpool_context: None,
         };
         assert_eq!(metadata.working_directory, None);
 
@@ -7884,6 +7886,7 @@ mod tests {
             )])),
             remote_connection: None,
             working_directory: None,
+            shpool_context: None,
         };
         let terminal_id = metadata.terminal_id;
         panel
@@ -8057,6 +8060,7 @@ mod tests {
             )])),
             remote_connection: None,
             working_directory: None,
+            shpool_context: None,
         };
         panel
             .update_in(&mut cx, |panel, window, cx| {
@@ -10493,6 +10497,7 @@ mod tests {
             )])),
             remote_connection: None,
             working_directory: None,
+            shpool_context: None,
         };
 
         panel.update_in(&mut cx, |panel, window, cx| {
@@ -10544,6 +10549,7 @@ mod tests {
             )])),
             remote_connection: None,
             working_directory: None,
+            shpool_context: None,
         };
 
         panel.update_in(&mut cx, |panel, window, cx| {
