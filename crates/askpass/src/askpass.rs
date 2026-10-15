@@ -36,17 +36,58 @@ use util::{paths::PathExt, shell::ShellKind};
 /// without needing a wrapper script.
 static ASKPASS_PROGRAM: OnceLock<std::path::PathBuf> = OnceLock::new();
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+pub enum AskPassCancelReason {
+    PromptUnavailable,
+    CancelledByUser,
+}
+
+#[derive(PartialEq, Eq, Debug)]
 pub enum AskPassResult {
+    PromptUnavailable,
     CancelledByUser,
     Timedout,
 }
 
+fn askpass_result_from_cancel_reason(
+    reason: Result<AskPassCancelReason, oneshot::Canceled>,
+) -> AskPassResult {
+    match reason {
+        Ok(AskPassCancelReason::PromptUnavailable) => AskPassResult::PromptUnavailable,
+        Ok(AskPassCancelReason::CancelledByUser) | Err(_) => AskPassResult::CancelledByUser,
+    }
+}
+
 type PasswordPrompt = (
     String,
-    oneshot::Sender<EncryptedPassword>,
+    oneshot::Sender<Result<EncryptedPassword, AskPassCancelReason>>,
     oneshot::Receiver<()>,
 );
+
+async fn run_askpass(
+    askpass_opened_rx: oneshot::Receiver<()>,
+    askpass_kill_master_rx: oneshot::Receiver<AskPassCancelReason>,
+    executor: BackgroundExecutor,
+    timeout: Option<Duration>,
+) -> AskPassResult {
+    let timer = async move {
+        match timeout {
+            Some(timeout) => executor.timer(timeout).await,
+            None => std::future::pending().await,
+        }
+    };
+
+    select_biased! {
+        _ = askpass_opened_rx.fuse() => {
+            // Note: this await can only resolve after we are dropped.
+            askpass_result_from_cancel_reason(askpass_kill_master_rx.await)
+        }
+
+        _ = futures::FutureExt::fuse(timer) => {
+            AskPassResult::Timedout
+        }
+    }
+}
 
 pub struct AskPassDelegate {
     tx: mpsc::UnboundedSender<PasswordPrompt>,
@@ -78,6 +119,39 @@ impl AskPassDelegate {
         + Sync
         + 'static,
     ) -> Self {
+        Self::new_with_reason(cx, move |prompt, response_sender, cancellation, cx| {
+            let (password_sender, password_receiver) = oneshot::channel();
+            let (prompt_cancellation_sender, prompt_cancellation_receiver) = oneshot::channel();
+            cx.spawn(async move |_cx| {
+                match futures::future::select(password_receiver, cancellation).await {
+                    futures::future::Either::Left((password, cancellation)) => {
+                        response_sender
+                            .send(password.map_err(|_| AskPassCancelReason::CancelledByUser))
+                            .ok();
+                        cancellation.await.ok();
+                    }
+                    futures::future::Either::Right((_, password_receiver)) => {
+                        drop(password_receiver)
+                    }
+                }
+                drop(prompt_cancellation_sender);
+            })
+            .detach();
+            password_prompt(prompt, password_sender, prompt_cancellation_receiver, cx);
+        })
+    }
+
+    pub fn new_with_reason(
+        cx: &mut AsyncApp,
+        password_prompt: impl Fn(
+            String,
+            oneshot::Sender<Result<EncryptedPassword, AskPassCancelReason>>,
+            oneshot::Receiver<()>,
+            &mut AsyncApp,
+        ) + Send
+        + Sync
+        + 'static,
+    ) -> Self {
         let (tx, mut rx) = mpsc::unbounded::<PasswordPrompt>();
         let task = cx.spawn(async move |cx: &mut AsyncApp| {
             while let Some((prompt, response_sender, cancellation)) = rx.next().await {
@@ -101,7 +175,26 @@ impl AskPassDelegate {
                 .await
                 .ok()?;
             let _cancellation_sender = cancellation_sender;
-            response_receiver.await.ok()
+            response_receiver.await.ok()?.ok()
+        })
+    }
+
+    pub fn ask_password_with_reason(
+        &self,
+        prompt: String,
+    ) -> Task<Result<EncryptedPassword, AskPassCancelReason>> {
+        let mut this_tx = self.tx.clone();
+        self.executor.spawn(async move {
+            let (response_sender, response_receiver) = oneshot::channel();
+            let (cancellation_sender, cancellation_receiver) = oneshot::channel();
+            this_tx
+                .send((prompt, response_sender, cancellation_receiver))
+                .await
+                .map_err(|_| AskPassCancelReason::PromptUnavailable)?;
+            let _cancellation_sender = cancellation_sender;
+            response_receiver
+                .await
+                .unwrap_or(Err(AskPassCancelReason::CancelledByUser))
         })
     }
 }
@@ -111,7 +204,7 @@ pub struct AskPassSession {
     secret: std::sync::Arc<std::sync::Mutex<Option<EncryptedPassword>>>,
     askpass_task: PasswordProxy,
     askpass_opened_rx: Option<oneshot::Receiver<()>>,
-    askpass_kill_master_rx: Option<oneshot::Receiver<()>>,
+    askpass_kill_master_rx: Option<oneshot::Receiver<AskPassCancelReason>>,
     executor: BackgroundExecutor,
 }
 
@@ -133,7 +226,8 @@ impl AskPassSession {
 
         let askpass_opened_tx = Arc::new(Mutex::new(Some(askpass_opened_tx)));
 
-        let (askpass_kill_master_tx, askpass_kill_master_rx) = oneshot::channel::<()>();
+        let (askpass_kill_master_tx, askpass_kill_master_rx) =
+            oneshot::channel::<AskPassCancelReason>();
         let kill_tx = Arc::new(Mutex::new(Some(askpass_kill_master_tx)));
 
         let get_password = {
@@ -142,7 +236,7 @@ impl AskPassSession {
             #[cfg(target_os = "windows")]
             let askpass_secret = secret.clone();
             move |prompt| {
-                let prompt = delegate.ask_password(prompt);
+                let prompt = delegate.ask_password_with_reason(prompt);
                 let kill_tx = kill_tx.clone();
                 let askpass_opened_tx = askpass_opened_tx.clone();
                 #[cfg(target_os = "windows")]
@@ -151,17 +245,20 @@ impl AskPassSession {
                     if let Some(askpass_opened_tx) = askpass_opened_tx.lock().await.take() {
                         askpass_opened_tx.send(()).ok();
                     }
-                    if let Some(password) = prompt.await {
-                        #[cfg(target_os = "windows")]
-                        {
-                            askpass_secret.lock().unwrap().replace(password.clone());
+                    match prompt.await {
+                        Ok(password) => {
+                            #[cfg(target_os = "windows")]
+                            {
+                                askpass_secret.lock().unwrap().replace(password.clone());
+                            }
+                            ControlFlow::Continue(Ok(password))
                         }
-                        ControlFlow::Continue(Ok(password))
-                    } else {
-                        if let Some(kill_tx) = kill_tx.lock().await.take() {
-                            kill_tx.send(()).ok();
+                        Err(reason) => {
+                            if let Some(kill_tx) = kill_tx.lock().await.take() {
+                                kill_tx.send(reason).ok();
+                            }
+                            ControlFlow::Break(())
                         }
-                        ControlFlow::Break(())
                     }
                 })
             }
@@ -195,25 +292,13 @@ impl AskPassSession {
             .askpass_kill_master_rx
             .take()
             .expect("Only call run once");
-        let executor = self.executor.clone();
-        let timer = async move {
-            match timeout {
-                Some(timeout) => executor.timer(timeout).await,
-                None => std::future::pending().await,
-            }
-        };
-
-        select_biased! {
-            _ = askpass_opened_rx.fuse() => {
-                // Note: this await can only resolve after we are dropped.
-                askpass_kill_master_rx.await.ok();
-                AskPassResult::CancelledByUser
-            }
-
-            _ = futures::FutureExt::fuse(timer) => {
-                AskPassResult::Timedout
-            }
-        }
+        run_askpass(
+            askpass_opened_rx,
+            askpass_kill_master_rx,
+            self.executor.clone(),
+            timeout,
+        )
+        .await
     }
 
     /// This will return the password that was last set by the askpass script.
@@ -620,6 +705,25 @@ mod tests {
     use super::*;
     use gpui::TestAppContext;
 
+    async fn run_askpass_with_injected_cancel_reason(
+        cx: &mut TestAppContext,
+        reason: AskPassCancelReason,
+    ) -> AskPassResult {
+        let (opened_sender, opened_receiver) = oneshot::channel();
+        let (cancel_sender, cancel_receiver) = oneshot::channel();
+        let executor = cx.background_executor.clone();
+        let run_task = cx.executor().spawn(async move {
+            run_askpass(opened_receiver, cancel_receiver, executor, None).await
+        });
+        opened_sender
+            .send(())
+            .expect("askpass run should await the opened channel");
+        cancel_sender
+            .send(reason)
+            .expect("askpass run should await the cancellation channel");
+        run_task.await
+    }
+
     #[gpui::test]
     async fn dropping_password_request_cancels_prompt(cx: &mut TestAppContext) {
         let (prompt_sender, mut prompt_receiver) = mpsc::unbounded();
@@ -641,6 +745,72 @@ mod tests {
         drop(password_request);
 
         assert!(cancellation.await.is_err());
-        drop(response_sender);
+        assert!(
+            response_sender
+                .send(
+                    EncryptedPassword::try_from("secret")
+                        .expect("test password should be encryptable")
+                )
+                .is_err()
+        );
+    }
+
+    #[gpui::test]
+    async fn ask_password_preserves_prompt_unavailable(cx: &mut TestAppContext) {
+        let delegate =
+            AskPassDelegate::new_with_reason(&mut cx.to_async(), |_, response_sender, _, _| {
+                response_sender
+                    .send(Err(AskPassCancelReason::PromptUnavailable))
+                    .ok();
+            });
+
+        assert!(matches!(
+            delegate
+                .ask_password_with_reason("Password:".to_string())
+                .await,
+            Err(AskPassCancelReason::PromptUnavailable)
+        ));
+    }
+
+    #[gpui::test]
+    async fn ask_password_preserves_cancelled_by_user(cx: &mut TestAppContext) {
+        let delegate =
+            AskPassDelegate::new_with_reason(&mut cx.to_async(), |_, response_sender, _, _| {
+                response_sender
+                    .send(Err(AskPassCancelReason::CancelledByUser))
+                    .ok();
+            });
+
+        assert!(matches!(
+            delegate
+                .ask_password_with_reason("Password:".to_string())
+                .await,
+            Err(AskPassCancelReason::CancelledByUser)
+        ));
+    }
+
+    #[test]
+    fn askpass_result_preserves_prompt_failure_reason() {
+        assert_eq!(
+            askpass_result_from_cancel_reason(Ok(AskPassCancelReason::PromptUnavailable)),
+            AskPassResult::PromptUnavailable
+        );
+        assert_eq!(
+            askpass_result_from_cancel_reason(Ok(AskPassCancelReason::CancelledByUser)),
+            AskPassResult::CancelledByUser
+        );
+    }
+
+    #[gpui::test]
+    async fn askpass_run_propagates_injected_reason_at_channel_boundary(cx: &mut TestAppContext) {
+        assert_eq!(
+            run_askpass_with_injected_cancel_reason(cx, AskPassCancelReason::PromptUnavailable)
+                .await,
+            AskPassResult::PromptUnavailable
+        );
+        assert_eq!(
+            run_askpass_with_injected_cancel_reason(cx, AskPassCancelReason::CancelledByUser).await,
+            AskPassResult::CancelledByUser
+        );
     }
 }

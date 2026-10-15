@@ -1738,6 +1738,8 @@ impl Project {
                 last_worktree_paths: WorktreePaths::default(),
             };
 
+            cx.observe(&remote, |_, _, cx| cx.notify()).detach();
+
             // remote server -> local machine handlers
             remote_proto.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &cx.entity());
             remote_proto.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &this.buffer_store);

@@ -4104,6 +4104,9 @@ async fn run_askpass_command(
         // hooks), so completion is determined by the process itself.
         result = ask_pass.run(None).fuse() => {
             match result {
+                AskPassResult::PromptUnavailable => {
+                    Err(anyhow!("Password prompt unavailable"))?
+                }
                 AskPassResult::CancelledByUser => {
                     Err(anyhow!(REMOTE_CANCELLED_BY_USER))?
                 }

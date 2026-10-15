@@ -33,6 +33,7 @@ use std::{
 use tempfile::TempDir;
 use util::command::{Child, Command, Stdio};
 use util::{
+    ResultExt as _,
     paths::{PathStyle, RemotePathBuf},
     rel_path::RelPath,
     shell::ShellKind,
@@ -40,6 +41,61 @@ use util::{
 
 /// How long to wait for SSH to connect when no askpass prompt has opened.
 const SSH_CONNECTION_PROMPT_TIMEOUT: Duration = Duration::from_secs(17);
+
+pub(crate) fn parse_ssh_connect_error(output: &[u8]) -> Result<()> {
+    let error_message = String::from_utf8_lossy(output).trim().to_string();
+    let login_unavailable = error_message.contains("pam_nologin")
+        || error_message.contains("System is booting up")
+        || error_message.contains("This account is currently not available");
+    let authentication_denied = error_message.lines().any(|line| {
+        let Some((prefix, suffix)) = line.trim().rsplit_once("Permission denied (") else {
+            return false;
+        };
+        if !prefix.is_empty() && !prefix.ends_with(": ") {
+            return false;
+        }
+        let Some(methods) = suffix
+            .strip_suffix(").")
+            .or_else(|| suffix.strip_suffix(')'))
+        else {
+            return false;
+        };
+        !methods.is_empty()
+            && methods.split(',').all(|method| {
+                matches!(
+                    method,
+                    "publickey"
+                        | "password"
+                        | "keyboard-interactive"
+                        | "hostbased"
+                        | "gssapi-with-mic"
+                        | "gssapi-keyex"
+                        | "none"
+                )
+            })
+    });
+    if !login_unavailable
+        && (authentication_denied || error_message.contains("Too many authentication failures"))
+    {
+        anyhow::bail!(crate::NonRetryableReconnectError::AuthenticationFailed(
+            error_message
+        ));
+    }
+
+    anyhow::bail!("failed to connect: {error_message}");
+}
+
+fn askpass_result_error(result: askpass::AskPassResult) -> anyhow::Error {
+    match result {
+        askpass::AskPassResult::PromptUnavailable => {
+            anyhow::Error::new(crate::NonRetryableReconnectError::PromptUnavailable)
+        }
+        askpass::AskPassResult::CancelledByUser => {
+            anyhow::Error::new(crate::NonRetryableReconnectError::CanceledByUser)
+        }
+        askpass::AskPassResult::Timedout => anyhow!("connecting to host timed out"),
+    }
+}
 
 pub(crate) struct SshRemoteConnection {
     socket: SshSocket,
@@ -821,7 +877,7 @@ impl SshRemoteConnection {
             let socket = SshSocket::new(connection_options, reused_path).await?;
             (socket, None)
         } else {
-            let askpass_delegate = askpass::AskPassDelegate::new_with_cancellation(cx, {
+            let askpass_delegate = askpass::AskPassDelegate::new_with_reason(cx, {
                 let delegate = delegate.clone();
                 move |prompt, tx, cancellation, cx| {
                     delegate.ask_password(prompt, tx, cancellation, cx)
@@ -847,15 +903,13 @@ impl SshRemoteConnection {
 
             let result = select_biased! {
                 result = askpass.run(Some(SSH_CONNECTION_PROMPT_TIMEOUT)).fuse() => {
-                    match result {
-                        AskPassResult::CancelledByUser => {
-                            master_process.as_mut().kill().ok();
-                            anyhow::bail!("SSH connection canceled")
-                        }
-                        AskPassResult::Timedout => {
-                            anyhow::bail!("connecting to host timed out")
-                        }
+                    if matches!(
+                        &result,
+                        AskPassResult::PromptUnavailable | AskPassResult::CancelledByUser
+                    ) {
+                        master_process.as_mut().kill().log_err();
                     }
+                    Err(askpass_result_error(result))
                 }
                 _ = master_process.wait_connected().fuse() => {
                     anyhow::Ok(())
@@ -871,11 +925,7 @@ impl SshRemoteConnection {
                 let mut stderr = master_process.as_mut().stderr.take().unwrap();
                 stderr.read_to_end(&mut output).await?;
 
-                let error_message = format!(
-                    "failed to connect: {}",
-                    String::from_utf8_lossy(&output).trim()
-                );
-                anyhow::bail!(error_message);
+                parse_ssh_connect_error(&output)?;
             }
 
             let socket = SshSocket::new(connection_options, socket_path).await?;
@@ -885,7 +935,7 @@ impl SshRemoteConnection {
 
         #[cfg(windows)]
         let (socket, master_process_option) = {
-            let askpass_delegate = askpass::AskPassDelegate::new_with_cancellation(cx, {
+            let askpass_delegate = askpass::AskPassDelegate::new_with_reason(cx, {
                 let delegate = delegate.clone();
                 move |prompt, tx, cancellation, cx| {
                     delegate.ask_password(prompt, tx, cancellation, cx)
@@ -907,15 +957,13 @@ impl SshRemoteConnection {
 
             let result = select_biased! {
                 result = askpass.run(Some(SSH_CONNECTION_PROMPT_TIMEOUT)).fuse() => {
-                    match result {
-                        AskPassResult::CancelledByUser => {
-                            master_process.as_mut().kill().ok();
-                            anyhow::bail!("SSH connection canceled")
-                        }
-                        AskPassResult::Timedout => {
-                            anyhow::bail!("connecting to host timed out")
-                        }
+                    if matches!(
+                        &result,
+                        AskPassResult::PromptUnavailable | AskPassResult::CancelledByUser
+                    ) {
+                        master_process.as_mut().kill().log_err();
                     }
+                    Err(askpass_result_error(result))
                 }
                 _ = master_process.wait_connected().fuse() => {
                     anyhow::Ok(())
@@ -931,11 +979,7 @@ impl SshRemoteConnection {
                 let mut stderr = master_process.as_mut().stderr.take().unwrap();
                 stderr.read_to_end(&mut output).await?;
 
-                let error_message = format!(
-                    "failed to connect: {}",
-                    String::from_utf8_lossy(&output).trim()
-                );
-                anyhow::bail!(error_message);
+                parse_ssh_connect_error(&output)?;
             }
 
             let socket = SshSocket::new(
@@ -3086,5 +3130,76 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn test_ssh_authentication_failures_are_non_retryable() {
+        for output in [
+            b"user@host: Permission denied (publickey).\n".as_slice(),
+            b"Permission denied (password).\n",
+            b"user@host: Permission denied (keyboard-interactive,publickey).\n",
+            b"Permission denied (gssapi-keyex,gssapi-with-mic).\n",
+            b"Received disconnect from host port 22: Too many authentication failures\n",
+        ] {
+            let error =
+                parse_ssh_connect_error(output).expect_err("SSH failure should be an error");
+            assert!(
+                error
+                    .root_cause()
+                    .downcast_ref::<crate::NonRetryableReconnectError>()
+                    .is_some(),
+                "expected a non-retryable authentication error for {output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ssh_non_authentication_errors_remain_retryable() {
+        for output in [
+            b"connect to host proxy port 22: Permission denied\n".as_slice(),
+            b"ProxyCommand: exec /usr/local/bin/proxy: Permission denied\n",
+            b"bash: /home/user/.zed/zed-remote-server: Permission denied\n",
+            b"ProxyCommand: exec /opt/proxy: Permission denied (os error 13)\n",
+            b"bash: /opt/tool: Permission denied (credential helper)\n",
+            b"Permission denied ()\n",
+            b"Permission denied (unknown-method)\n",
+            b"Permission denied (publickey\n",
+            b"Permission denied (publickey,password). trailing\n",
+            b"pam_nologin: System is booting up. Unprivileged users are not permitted to log in yet.\n",
+            b"pam_nologin: System is booting up. Permission denied (publickey,password).\n",
+            b"Authentication failed\n",
+        ] {
+            let error = parse_ssh_connect_error(output).expect_err("SSH failure should be an error");
+            assert!(
+                error
+                    .root_cause()
+                    .downcast_ref::<crate::NonRetryableReconnectError>()
+                    .is_none(),
+                "expected a retryable error for {output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_askpass_result_maps_to_reconnect_error() {
+        let prompt_unavailable = askpass_result_error(askpass::AskPassResult::PromptUnavailable);
+        assert_eq!(
+            prompt_unavailable.downcast_ref::<crate::NonRetryableReconnectError>(),
+            Some(&crate::NonRetryableReconnectError::PromptUnavailable)
+        );
+
+        let cancelled_by_user = askpass_result_error(askpass::AskPassResult::CancelledByUser);
+        assert_eq!(
+            cancelled_by_user.downcast_ref::<crate::NonRetryableReconnectError>(),
+            Some(&crate::NonRetryableReconnectError::CanceledByUser)
+        );
+
+        let timed_out = askpass_result_error(askpass::AskPassResult::Timedout);
+        assert!(
+            timed_out
+                .downcast_ref::<crate::NonRetryableReconnectError>()
+                .is_none()
+        );
+        assert_eq!(timed_out.to_string(), "connecting to host timed out");
     }
 }
