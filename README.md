@@ -94,5 +94,19 @@ Other changes will come later, if upstream rejects them.
 ## How it's built
 
 - [`patches/`](patches) holds the changes on top of upstream stable: one patch per commit of the fork, eleven in total, written against `v1.23.3` and applied in file name order.
-- [`.github/workflows/release.yml`](.github/workflows/release.yml) checks for a new upstream stable release every 6 hours, applies the patches, builds the DMG on a GitHub macOS runner and publishes a release with `latest.json` for auto-update.
+- [`.github/workflows/release.yml`](.github/workflows/release.yml) checks for a new upstream stable release every 6 hours, applies the patches, builds the DMG on a GitHub macOS runner and publishes a release with `latest.json` for auto-update and `zed-<version>-titlebarless-debug-symbols-macos-aarch64.tar.gz` containing debug symbols.
 - If a patch stops applying, the workflow fails. Regenerate the patches against the new tag and push.
+
+### Debug symbols
+
+Each release attaches `zed-<version>-titlebarless-debug-symbols-macos-aarch64.tar.gz` containing flat DWARF symbols (`zed.dwarf`, `remote_server.dwarf`) and `UUIDS.txt` for matching crash minidumps. To symbolicate addresses from a crash report:
+
+```sh
+# Match binary UUID from crash report against UUIDS.txt:
+grep <uuid-from-crash> UUIDS.txt
+
+# Symbolicate address using atos:
+atos -o zed.dwarf -l <load-address> <crash-address>
+```
+
+Symbols can also be loaded into LLDB: `lldb -o "add-dsym zed.dwarf" /Applications/Zed.app`.

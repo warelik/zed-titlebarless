@@ -21,6 +21,14 @@ Without any setting this build also:
 
 Later versions arrive through Zed's auto-update from this repository's releases. The version number matches upstream, so SSH remoting keeps downloading the official remote server. A rebuild of the same upstream version is not offered as an update.
 
+## Debug symbols
+
+Release assets attach `zed-<version>-titlebarless-debug-symbols-macos-aarch64.tar.gz` containing `zed.dwarf`, `remote_server.dwarf`, and `UUIDS.txt`. To symbolicate addresses from a crash minidump:
+
+```sh
+atos -o zed.dwarf -l <load-address> <crash-address>
+```
+
 ## Known limitations
 
 - Not notarized, so universal links (`zed://` from a browser) may not work.

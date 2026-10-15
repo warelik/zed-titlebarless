@@ -74,7 +74,7 @@ jobs:
         working-directory: zed
         env:
           CARGO_INCREMENTAL: 0
-          CARGO_PROFILE_RELEASE_DEBUG: "false"
+          CARGO_PROFILE_RELEASE_DEBUG: "line-tables-only"
           ZED_UPDATE_MANIFEST_URL: https://github.com/${{ github.repository }}/releases/latest/download/latest.json
         run: ./script/bundle-mac aarch64-apple-darwin
 
@@ -84,11 +84,48 @@ jobs:
           path: zed/target/aarch64-apple-darwin/release/Zed-aarch64.dmg
           if-no-files-found: error
 
+      - name: Package debug symbols
+        run: |
+          version="${TAG#v}"
+          target_dir="zed/target/aarch64-apple-darwin/release"
+          symbols_archive="zed-${version}-titlebarless-debug-symbols-macos-aarch64.tar.gz"
+
+          for dwarf in "$target_dir/zed.dwarf" "$target_dir/remote_server.dwarf"; do
+            if [ ! -f "$dwarf" ]; then
+              echo "Error: missing expected debug symbols file: $dwarf" >&2
+              exit 1
+            fi
+            if [ ! -s "$dwarf" ]; then
+              echo "Error: debug symbols file is empty: $dwarf" >&2
+              exit 1
+            fi
+            has_dwarf=false
+            while IFS= read -r line; do
+              if [[ "$line" == *"DW_TAG_compile_unit"* ]]; then
+                has_dwarf=true
+                break
+              fi
+            done < <(dwarfdump --debug-info "$dwarf" 2>/dev/null || true)
+
+            if [ "$has_dwarf" != true ]; then
+              echo "Error: $dwarf contains no DWARF debug info" >&2
+              exit 1
+            fi
+          done
+
+          (
+            cd "$target_dir"
+            dwarfdump -u zed.dwarf remote_server.dwarf > UUIDS.txt
+            cat UUIDS.txt
+            tar -czf "$symbols_archive" zed.dwarf remote_server.dwarf UUIDS.txt
+          )
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="${TAG#v}"
+          symbols_archive="zed-${version}-titlebarless-debug-symbols-macos-aarch64.tar.gz"
           url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE/Zed-aarch64.dmg"
           printf '{"version":"%s","url":"%s"}\n' "$version" "$url" > latest.json
           {
@@ -100,5 +137,6 @@ jobs:
             gh release delete "$RELEASE" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
           fi
           gh release create "$RELEASE" zed/target/aarch64-apple-darwin/release/Zed-aarch64.dmg latest.json \
+            "zed/target/aarch64-apple-darwin/release/$symbols_archive" \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "Zed $version titlebarless (macOS arm64)" --notes-file notes.md
