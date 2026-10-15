@@ -23,11 +23,21 @@ Later versions arrive through Zed's auto-update from this repository's releases.
 
 ## Debug symbols
 
-Release assets attach `zed-<version>-titlebarless-debug-symbols-macos-aarch64.tar.gz` containing `zed.dwarf`, `remote_server.dwarf`, and `UUIDS.txt`. To symbolicate addresses from a crash minidump:
+Release assets attach `zed-<version>-titlebarless-debug-symbols-macos-aarch64.tar.gz` containing `zed.dwarf`, `remote_server.dwarf`, and `UUIDS.txt`. Builds are compiled with `line-tables-only` debug info, restoring source file and line number resolution for crash reports.
+
+`zed.dwarf` corresponds to the shipped `Zed.app` binary (`remote_server.dwarf` is built during packaging but not shipped in the DMG; SSH remoting downloads the official upstream server).
+
+To symbolicate addresses from a crash report:
 
 ```sh
-atos -o zed.dwarf -l <load-address> <crash-address>
+# Match UUID case-insensitively (.ips reports use lowercase, minidumps drop dashes):
+grep -i <uuid-from-crash> UUIDS.txt
+
+# Symbolicate address using atos (in .ips reports, convert decimal base with printf '0x%x'):
+atos -o zed.dwarf -l <load-address> <crash-address> | rustfilt
 ```
+
+Or inspect in LLDB: `lldb -o "add-dsym zed.dwarf" /Applications/Zed.app`.
 
 ## Known limitations
 

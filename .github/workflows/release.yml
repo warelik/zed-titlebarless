@@ -89,6 +89,7 @@ jobs:
           version="${TAG#v}"
           target_dir="zed/target/aarch64-apple-darwin/release"
           symbols_archive="zed-${version}-titlebarless-debug-symbols-macos-aarch64.tar.gz"
+          echo "SYMBOLS_ARCHIVE=$target_dir/$symbols_archive" >> "${GITHUB_ENV:-/dev/null}"
 
           for dwarf in "$target_dir/zed.dwarf" "$target_dir/remote_server.dwarf"; do
             if [ ! -f "$dwarf" ]; then
@@ -118,14 +119,23 @@ jobs:
             dwarfdump -u zed.dwarf remote_server.dwarf > UUIDS.txt
             cat UUIDS.txt
             tar -czf "$symbols_archive" zed.dwarf remote_server.dwarf UUIDS.txt
+            ls -l zed.dwarf remote_server.dwarf "$symbols_archive"
           )
+
+          archive_size=$(wc -c < "$target_dir/$symbols_archive")
+          max_bytes=$((2 * 1024 * 1024 * 1024))
+          if [ "$archive_size" -gt "$max_bytes" ]; then
+            echo "Error: symbols archive $symbols_archive ($archive_size bytes) exceeds GitHub 2 GiB per-asset limit" >&2
+            exit 1
+          fi
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="${TAG#v}"
-          symbols_archive="zed-${version}-titlebarless-debug-symbols-macos-aarch64.tar.gz"
+          dmg="zed/target/aarch64-apple-darwin/release/Zed-aarch64.dmg"
+          symbols_archive="${SYMBOLS_ARCHIVE:-zed/target/aarch64-apple-darwin/release/zed-${version}-titlebarless-debug-symbols-macos-aarch64.tar.gz}"
           url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE/Zed-aarch64.dmg"
           printf '{"version":"%s","url":"%s"}\n' "$version" "$url" > latest.json
           {
@@ -133,10 +143,21 @@ jobs:
             echo
             cat fork/RELEASE_NOTES.md
           } > notes.md
+
+          ls -l "$dmg" latest.json "$symbols_archive"
+
+          max_bytes=$((2 * 1024 * 1024 * 1024))
+          for asset in "$dmg" "$symbols_archive"; do
+            size=$(wc -c < "$asset")
+            if [ "$size" -gt "$max_bytes" ]; then
+              echo "Error: asset $asset ($size bytes) exceeds GitHub 2 GiB per-asset limit" >&2
+              exit 1
+            fi
+          done
+
           if gh release view "$RELEASE" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release delete "$RELEASE" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
           fi
-          gh release create "$RELEASE" zed/target/aarch64-apple-darwin/release/Zed-aarch64.dmg latest.json \
-            "zed/target/aarch64-apple-darwin/release/$symbols_archive" \
+          gh release create "$RELEASE" "$dmg" latest.json "$symbols_archive" \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "Zed $version titlebarless (macOS arm64)" --notes-file notes.md

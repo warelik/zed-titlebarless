@@ -93,20 +93,33 @@ Other changes will come later, if upstream rejects them.
 
 ## How it's built
 
-- [`patches/`](patches) holds the changes on top of upstream stable: one patch per commit of the fork, eleven in total, written against `v1.23.3` and applied in file name order.
+- [`patches/`](patches) holds the changes on top of upstream stable: one patch per commit of the fork, eleven in total, written against `v1.24.2` and applied in file name order.
 - [`.github/workflows/release.yml`](.github/workflows/release.yml) checks for a new upstream stable release every 6 hours, applies the patches, builds the DMG on a GitHub macOS runner and publishes a release with `latest.json` for auto-update and `zed-<version>-titlebarless-debug-symbols-macos-aarch64.tar.gz` containing debug symbols.
 - If a patch stops applying, the workflow fails. Regenerate the patches against the new tag and push.
 
 ### Debug symbols
 
-Each release attaches `zed-<version>-titlebarless-debug-symbols-macos-aarch64.tar.gz` containing flat DWARF symbols (`zed.dwarf`, `remote_server.dwarf`) and `UUIDS.txt` for matching crash minidumps. To symbolicate addresses from a crash report:
+Each release attaches `zed-<version>-titlebarless-debug-symbols-macos-aarch64.tar.gz` containing flat DWARF symbols (`zed.dwarf`, `remote_server.dwarf`) and `UUIDS.txt`. Builds are compiled with `CARGO_PROFILE_RELEASE_DEBUG: "line-tables-only"`, providing line tables and inlined frame scopes (without debug symbols, atos only resolves function names via the symbol table without source file and line numbers).
+
+Only `zed.dwarf` corresponds to the shipped `Zed.app` binary. `remote_server.dwarf` is produced during packaging for the macOS remote server, but `remote_server` is not distributed in the DMG (and SSH remoting downloads upstream's official remote server), so it does not match deployed remote binaries.
+
+To symbolicate addresses from a crash report:
 
 ```sh
 # Match binary UUID from crash report against UUIDS.txt:
-grep <uuid-from-crash> UUIDS.txt
+# (.ips reports use lowercase UUIDs with dashes; minidump IDs drop dashes.
+# UUIDS.txt uses uppercase with dashes, so match case-insensitively.)
+grep -i <uuid-from-crash> UUIDS.txt
 
 # Symbolicate address using atos:
-atos -o zed.dwarf -l <load-address> <crash-address>
+# <load-address> is the hex base address of the zed image from the crash report.
+# In macOS .ips reports, "base" is decimal; convert to hex with printf '0x%x\n' <base>.
+# <crash-address> is the hex instruction pointer address (base + imageOffset).
+# atos outputs v0-mangled Rust names; pipe through rustfilt to demangle:
+atos -o zed.dwarf -l <load-address> <crash-address> | rustfilt
 ```
 
-Symbols can also be loaded into LLDB: `lldb -o "add-dsym zed.dwarf" /Applications/Zed.app`.
+Symbols can also be loaded into LLDB, which demangles names automatically:
+```sh
+lldb -o "add-dsym zed.dwarf" /Applications/Zed.app
+```
