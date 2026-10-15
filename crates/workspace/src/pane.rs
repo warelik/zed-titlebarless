@@ -5,7 +5,8 @@ use crate::{
     focus_follows_mouse::FocusFollowsMouse as _,
     invalid_item_view::InvalidItemView,
     item::{
-        ActivateOnClose, ClosePosition, Item, ItemBufferKind, ItemHandle, ItemSettings,
+        ActivateOnClose, ClosePosition, Item, ItemBufferKind, ItemCloseGuard, ItemHandle,
+        ItemSettings,
         PreviewTabsSettings, ProjectItemKind, SaveOptions, ShowCloseButton, ShowDiagnostics,
         TabContentParams, TabTooltipContent, WeakItemHandle,
     },
@@ -36,6 +37,7 @@ use serde::Deserialize;
 use settings::{Settings, SettingsStore};
 use std::{
     any::Any,
+    cell::Cell,
     cmp, fmt, mem,
     num::NonZeroUsize,
     path::PathBuf,
@@ -102,6 +104,11 @@ pub enum SaveIntent {
     Overwrite,
     /// skip all save-related behavior
     Skip,
+}
+
+pub struct DeletedTabClose {
+    pub pane_id: EntityId,
+    pub item_id: EntityId,
 }
 
 /// Activates a specific item in the pane by its index.
@@ -2274,6 +2281,17 @@ impl Pane {
         save_intent: SaveIntent,
         cx: &mut AsyncWindowContext,
     ) -> Result<bool> {
+        Self::save_item_with_deleted_close_receipt(project, pane, item, save_intent, None, cx).await
+    }
+
+    pub async fn save_item_with_deleted_close_receipt(
+        project: Entity<Project>,
+        pane: Entity<Pane>,
+        item: &dyn ItemHandle,
+        save_intent: SaveIntent,
+        receipts: Option<&mut Vec<DeletedTabClose>>,
+        cx: &mut AsyncWindowContext,
+    ) -> Result<bool> {
         const CONFLICT_MESSAGE: &str = "This file has changed on disk since you started editing it. Do you want to overwrite it?";
 
         const DELETED_MESSAGE: &str = "This file has been deleted on disk since you started editing it. Do you want to recreate it?";
@@ -2343,15 +2361,30 @@ impl Pane {
 
         if has_conflict && can_save {
             if has_deleted_file && is_singleton {
-                let answer = pane.update_in(cx, |pane, window, cx| {
+                let item_id = item.item_id();
+                let (answer, watch) = pane.update_in(cx, |pane, window, cx| {
+                    let watch = receipts.is_some().then(|| {
+                        let changed = Rc::new(Cell::new(false));
+                        let membership_changed = changed.clone();
+                        let membership = cx.subscribe_self(move |_, event: &Event, _| {
+                            if matches!(event, Event::AddItem { item } | Event::RemovedItem { item }
+                                if item.item_id() == item_id)
+                            {
+                                membership_changed.set(true);
+                            }
+                        });
+                        let edits = ItemCloseGuard::new(vec![item.boxed_clone()], window, cx);
+                        (changed, membership, edits)
+                    });
                     pane.activate_item(item_ix, true, true, window, cx);
-                    window.prompt(
+                    let answer = window.prompt(
                         PromptLevel::Warning,
                         DELETED_MESSAGE,
                         None,
                         &["Save", "Close", "Cancel"],
                         cx,
-                    )
+                    );
+                    (answer, watch)
                 })?;
                 match answer.await {
                     Ok(0) => {
@@ -2370,9 +2403,27 @@ impl Pane {
                         .await?
                     }
                     Ok(1) => {
-                        pane.update_in(cx, |pane, window, cx| {
-                            pane.remove_item(item.item_id(), false, true, window, cx)
+                        let removed = pane.update_in(cx, |pane, window, cx| {
+                            // A stale answer must not close a tab moved, replaced, or edited during the prompt.
+                            if let Some((changed, _, edits)) = &watch
+                                && (changed.get()
+                                    || edits.changed(cx)
+                                    || pane.index_for_item_id(item_id).is_none())
+                            {
+                                return false;
+                            }
+                            pane.remove_item(item_id, false, true, window, cx);
+                            true
                         })?;
+                        if !removed {
+                            return Ok(false);
+                        }
+                        if let Some(receipts) = receipts {
+                            receipts.push(DeletedTabClose {
+                                pane_id: pane.entity_id(),
+                                item_id,
+                            });
+                        }
                     }
                     _ => return Ok(false),
                 }

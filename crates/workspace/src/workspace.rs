@@ -70,8 +70,8 @@ use gpui::{
 pub use history_manager::*;
 use invalid_item_view::InvalidItemView;
 pub use item::{
-    FollowableItem, FollowableItemHandle, Item, ItemHandle, ItemSettings, PreviewTabsSettings,
-    ProjectItem, SerializableItem, SerializableItemHandle, WeakItemHandle,
+    FollowableItem, FollowableItemHandle, Item, ItemCloseGuard, ItemHandle, ItemSettings,
+    PreviewTabsSettings, ProjectItem, SerializableItem, SerializableItemHandle, WeakItemHandle,
 };
 use itertools::Itertools;
 use language::{Buffer, LanguageRegistry, Rope, language_settings::all_language_settings};
@@ -1893,6 +1893,9 @@ pub enum OpenMode {
     Activate,
 }
 
+type LocalWorkspaceOpenCondition =
+    Box<dyn FnOnce(&mut MultiWorkspace, &mut Window, &mut Context<MultiWorkspace>) -> bool>;
+
 impl Workspace {
     pub fn new(
         workspace_id: Option<WorkspaceId>,
@@ -2381,6 +2384,52 @@ impl Workspace {
         open_mode: OpenMode,
         cx: &mut App,
     ) -> Task<anyhow::Result<OpenResult>> {
+        let open = Self::prepare_local_open(
+            abs_paths,
+            app_state,
+            requesting_window,
+            env,
+            init,
+            open_mode,
+            None,
+            cx,
+        );
+        cx.spawn(async move |cx| Ok(open(cx).await?.expect("unconditional local open")))
+    }
+
+    /// Checks whether to open and activate a local workspace in the same
+    /// update that would create it, after preparing its project.
+    pub(crate) fn activate_local_if(
+        abs_paths: Vec<PathBuf>,
+        app_state: Arc<AppState>,
+        window: WindowHandle<MultiWorkspace>,
+        should_open: impl FnOnce(&mut MultiWorkspace, &mut Window, &mut Context<MultiWorkspace>) -> bool
+        + 'static,
+        cx: &mut App,
+    ) -> Task<Result<()>> {
+        let open = Self::prepare_local_open(
+            abs_paths,
+            app_state,
+            Some(window),
+            None,
+            None,
+            OpenMode::Activate,
+            Some(Box::new(should_open)),
+            cx,
+        );
+        cx.spawn(async move |cx| open(cx).await.map(|_| ()))
+    }
+
+    fn prepare_local_open(
+        abs_paths: Vec<PathBuf>,
+        app_state: Arc<AppState>,
+        requesting_window: Option<WindowHandle<MultiWorkspace>>,
+        env: Option<HashMap<String, String>>,
+        init: Option<Box<dyn FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) + Send>>,
+        open_mode: OpenMode,
+        should_open: Option<LocalWorkspaceOpenCondition>,
+        cx: &mut App,
+    ) -> impl AsyncFnOnce(&mut AsyncApp) -> Result<Option<OpenResult>> + 'static {
         #[cfg(target_os = "windows")]
         let wsl_path = abs_paths
             .iter()
@@ -2398,7 +2447,7 @@ impl Workspace {
 
         let db = WorkspaceDb::global(cx);
         let kvp = db::kvp::KeyValueStore::global(cx);
-        cx.spawn(async move |cx| {
+        async move |cx| {
             let mut paths_to_open = Vec::with_capacity(abs_paths.len());
             for path in abs_paths.into_iter() {
                 if let Some(canonical) = app_state.fs.canonicalize(&path).await.ok() {
@@ -2488,6 +2537,11 @@ impl Workspace {
                         .unwrap_or(false);
 
                     let workspace = window.update(cx, |multi_workspace, window, cx| {
+                        if should_open
+                            .is_some_and(|should_open| !should_open(multi_workspace, window, cx))
+                        {
+                            return None;
+                        }
                         let workspace = cx.new(|cx| {
                             let mut workspace = Workspace::new(
                                 Some(workspace_id),
@@ -2517,8 +2571,11 @@ impl Workspace {
                                 unreachable!()
                             }
                         }
-                        workspace
+                        Some(workspace)
                     })?;
+                    let Some(workspace) = workspace else {
+                        return Ok(None);
+                    };
                     (window, workspace)
                 } else {
                     let window_bounds_override = window_bounds_env_override();
@@ -2667,12 +2724,12 @@ impl Workspace {
                 })
                 .log_err();
 
-            Ok(OpenResult {
+            Ok(Some(OpenResult {
                 window,
                 workspace,
                 opened_items,
-            })
-        })
+            }))
+        }
     }
 
     pub fn project_group_key(&self, cx: &App) -> ProjectGroupKey {
@@ -3992,7 +4049,32 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<bool>> {
+        self.prepare_to_close_internal(close_intent, None, window, cx)
+    }
+
+    pub(crate) fn prepare_to_remove(
+        &mut self,
+        deleted_tab_closes: Rc<RefCell<Vec<DeletedTabClose>>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<bool>> {
+        self.prepare_to_close_internal(
+            CloseIntent::ReplaceWindow,
+            Some(deleted_tab_closes),
+            window,
+            cx,
+        )
+    }
+
+    fn prepare_to_close_internal(
+        &mut self,
+        close_intent: CloseIntent,
+        deleted_tab_closes: Option<Rc<RefCell<Vec<DeletedTabClose>>>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<bool>> {
         let active_call = self.active_global_call();
+        let is_workspace_removal = deleted_tab_closes.is_some();
 
         cx.spawn_in(window, async move |this, cx| {
             this.update(cx, |this, _| {
@@ -4056,7 +4138,7 @@ impl Workspace {
                         }
                     }
                 }
-                if close_intent == CloseIntent::ReplaceWindow {
+                if close_intent == CloseIntent::ReplaceWindow && !is_workspace_removal {
                     _ = cx.update(|_window, cx| {
                         let multi_workspace = cx
                             .windows()
@@ -4099,15 +4181,16 @@ impl Workspace {
                     this.save_all_internal(
                         SaveIntent::Close,
                         allow_hot_exit_serialization,
+                        deleted_tab_closes,
                         window,
                         cx,
                     )
                 })?
                 .await;
 
-            // If we're not quitting, but closing, we remove the workspace from
-            // the current session.
-            if close_intent != CloseIntent::Quit
+            // Multi-workspace removal saves the detached layout after all consent checks.
+            if !is_workspace_removal
+                && close_intent != CloseIntent::Quit
                 && !save_last_workspace
                 && save_result.as_ref().is_ok_and(|&res| res)
             {
@@ -4123,6 +4206,7 @@ impl Workspace {
         self.save_all_internal(
             action.save_intent.unwrap_or(SaveIntent::SaveAll),
             true,
+            None,
             window,
             cx,
         )
@@ -4220,13 +4304,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<bool>> {
-        self.save_all_internal(SaveIntent::Close, true, window, cx)
+        self.save_all_internal(SaveIntent::Close, true, None, window, cx)
     }
 
     fn save_all_internal(
         &mut self,
         mut save_intent: SaveIntent,
         allow_hot_exit_serialization: bool,
+        deleted_tab_closes: Option<Rc<RefCell<Vec<DeletedTabClose>>>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<bool>> {
@@ -4308,6 +4393,7 @@ impl Workspace {
                 dirty_items
             };
 
+            let mut receipts = Vec::new();
             for (pane, item) in dirty_items {
                 let (singleton, project_entry_ids) = cx.update(|_, cx| {
                     (
@@ -4316,10 +4402,21 @@ impl Workspace {
                     )
                 })?;
                 if (singleton || !project_entry_ids.is_empty())
-                    && !Pane::save_item(project.clone(), pane, &*item, save_intent, cx).await?
+                    && !Pane::save_item_with_deleted_close_receipt(
+                        project.clone(),
+                        pane,
+                        &*item,
+                        save_intent,
+                        deleted_tab_closes.as_ref().map(|_| &mut receipts),
+                        cx,
+                    )
+                    .await?
                 {
                     return Ok(false);
                 }
+            }
+            if let Some(deleted_tab_closes) = deleted_tab_closes {
+                deleted_tab_closes.borrow_mut().extend(receipts);
             }
             Ok(true)
         })
@@ -8188,6 +8285,27 @@ impl Workspace {
     }
 
     fn serialize_workspace_internal(&self, window: &mut Window, cx: &mut App) -> Task<()> {
+        let window_id = Some(window.window_handle().window_id().as_u64());
+        self.serialize_workspace_snapshot(window_id, window, cx)
+    }
+
+    fn clear_serialization_for_detach(&mut self) {
+        self.session_id.take();
+        self._schedule_serialize_workspace.take();
+        self._serialize_workspace_task.take();
+    }
+
+    fn serialize_detached_workspace(&mut self, window: &mut Window, cx: &mut App) -> Task<()> {
+        self.clear_serialization_for_detach();
+        self.serialize_workspace_snapshot(None, window, cx)
+    }
+
+    fn serialize_workspace_snapshot(
+        &self,
+        window_id: Option<u64>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Task<()> {
         let Some(database_id) = self.database_id() else {
             return Task::ready(());
         };
@@ -8282,7 +8400,7 @@ impl Workspace {
                     session_id: self.session_id.clone(),
                     bookmarks,
                     breakpoints,
-                    window_id: Some(window.window_handle().window_id().as_u64()),
+                    window_id,
                     user_toolchains,
                     recent_navigation_history,
                     path_style,
@@ -8302,8 +8420,14 @@ impl Workspace {
             WorkspaceLocation::None => {
                 // Save dock state for empty non-local workspaces
                 let docks = build_serialized_docks(self, window, cx);
+                let db = WorkspaceDb::global(cx);
                 let kvp = db::kvp::KeyValueStore::global(cx);
                 cx.background_spawn(async move {
+                    if window_id.is_none() {
+                        db.set_session_binding(database_id, None, None)
+                            .await
+                            .log_err();
+                    }
                     persistence::write_default_dock_state(&kvp, docks)
                         .await
                         .log_err();
@@ -11141,7 +11265,7 @@ pub async fn apply_restored_multiworkspace_state(
         let mut resolved_groups: Vec<SerializedProjectGroupState> = Vec::new();
         for serialized in project_groups.iter().cloned() {
             let SerializedProjectGroupState { key, expanded } = serialized.into_restored_state();
-            if key.path_list().paths().is_empty() {
+            if key.is_empty() {
                 continue;
             }
             let mut resolved_paths = Vec::new();
@@ -11159,7 +11283,10 @@ pub async fn apply_restored_multiworkspace_state(
             }
             let resolved =
                 ProjectGroupKey::new(key.host().cloned(), PathList::new(&resolved_paths));
-            if !resolved_groups.iter().any(|g| g.key == resolved) {
+            if !resolved_groups
+                .iter()
+                .any(|g| multi_workspace::matches_restored_project_group(&g.key, &resolved))
+            {
                 resolved_groups.push(SerializedProjectGroupState {
                     key: resolved,
                     expanded,
@@ -13410,6 +13537,187 @@ mod tests {
     use settings::{SettingsStore, SplicingVec};
     use util::path;
     use util::rel_path::rel_path;
+
+    #[gpui::test]
+    async fn test_restore_preserves_rootless_remote_project_groups(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs.clone(), [], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let remote_key = |host: &str| {
+            ProjectGroupKey::new(
+                Some(remote::RemoteConnectionOptions::Ssh(
+                    remote::SshConnectionOptions {
+                        host: host.into(),
+                        ..Default::default()
+                    },
+                )),
+                PathList::default(),
+            )
+        };
+        let first = remote_key("first-host");
+        let second = remote_key("second-host");
+        let docker_key = |name: &str| {
+            ProjectGroupKey::new(
+                Some(remote::RemoteConnectionOptions::Docker(
+                    remote::DockerConnectionOptions {
+                        name: name.into(),
+                        remote_user: "user".into(),
+                        container_id: "container-id".into(),
+                        upload_binary_over_docker_exec: false,
+                        use_podman: false,
+                        remote_env: Default::default(),
+                    },
+                )),
+                PathList::default(),
+            )
+        };
+        let first_container = docker_key("first-container");
+        let second_container = docker_key("second-container");
+        assert!(first_container.matches_identity(&second_container));
+        let state = MultiWorkspaceState {
+            project_groups: vec![
+                SerializedProjectGroup::from_group(&first, false),
+                SerializedProjectGroup::from_group(&ProjectGroupKey::default(), true),
+                SerializedProjectGroup::from_group(&second, true),
+                SerializedProjectGroup::from_group(&first, true),
+                SerializedProjectGroup::from_group(&first_container, true),
+                SerializedProjectGroup::from_group(&second_container, false),
+            ],
+            ..MultiWorkspaceState::default()
+        };
+        apply_restored_multiworkspace_state(window, &state, fs, &mut cx.to_async()).await;
+        window
+            .read_with(cx, |multi_workspace, cx| {
+                let groups = multi_workspace.project_groups(cx);
+                assert_eq!(
+                    groups.iter().map(|group| &group.key).collect::<Vec<_>>(),
+                    vec![&first, &second, &first_container, &second_container]
+                );
+                assert!(!groups[0].expanded);
+                assert!(groups[1].expanded);
+                assert!(groups[2].expanded);
+                assert!(!groups[3].expanded);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_project_group_serialization_excludes_connection_secrets() {
+        let ssh = remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+            host: "host".into(),
+            username: Some("user".into()),
+            port: Some(2222),
+            connection_timeout: Some(17),
+            password: Some("fixture_ssh_credential".into()),
+            args: Some(vec!["fixture_proxy_credential".into()]),
+            nickname: Some("label".into()),
+            ..Default::default()
+        });
+        let docker = remote::RemoteConnectionOptions::Docker(remote::DockerConnectionOptions {
+            name: "container".into(),
+            container_id: "container-id".into(),
+            remote_user: "user".into(),
+            use_podman: true,
+            upload_binary_over_docker_exec: true,
+            remote_env: std::collections::BTreeMap::from([(
+                "ACCESS_TOKEN".into(),
+                "fixture_docker_credential".into(),
+            )]),
+        });
+        for host in [ssh, docker] {
+            let key = ProjectGroupKey::new(Some(host.clone()), PathList::default());
+            let regular = SerializedProjectGroup::from_group(&key, false);
+            let legacy = SerializedProjectGroup {
+                path_list: PathList::default().serialize(),
+                location: SerializedWorkspaceLocation::Remote(host),
+                expanded: false,
+            };
+            for group in [regular, legacy] {
+                let encoded = serde_json::to_string(&group).unwrap();
+                for value in [
+                    "fixture_ssh_credential",
+                    "fixture_proxy_credential",
+                    "fixture_docker_credential",
+                ] {
+                    assert!(!encoded.contains(value));
+                }
+                let restored = serde_json::from_str::<SerializedProjectGroup>(&encoded)
+                    .unwrap()
+                    .into_restored_state();
+                assert_eq!(restored.key, group.into_restored_state().key);
+                assert!(!restored.expanded);
+                assert!(restored.key.matches_identity(&key));
+                match restored.key.host().unwrap() {
+                    remote::RemoteConnectionOptions::Ssh(options) => {
+                        assert!(options.password.is_none());
+                        assert!(options.args.is_none());
+                        assert_eq!(options.username.as_deref(), Some("user"));
+                        assert_eq!(options.port, Some(2222));
+                        assert_eq!(options.connection_timeout, Some(17));
+                    }
+                    remote::RemoteConnectionOptions::Docker(options) => {
+                        assert!(options.remote_env.is_empty());
+                        assert!(options.use_podman);
+                        assert_eq!(options.container_id, "container-id");
+                    }
+                    _ => panic!("fixture must remain the same connection kind"),
+                }
+            }
+            assert_eq!(key.host().is_some(), true);
+        }
+    }
+
+    #[gpui::test]
+    async fn test_restored_remote_groups_keep_live_identity_options(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs.clone(), [], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let key = |nickname: &str, argument: &str, upload| {
+            ProjectGroupKey::new(
+                Some(remote::RemoteConnectionOptions::Ssh(
+                    remote::SshConnectionOptions {
+                        host: "host".into(),
+                        username: Some("user".into()),
+                        port: Some(22),
+                        nickname: Some(nickname.into()),
+                        args: Some(vec![argument.into()]),
+                        upload_binary_over_ssh: upload,
+                        ..Default::default()
+                    },
+                )),
+                PathList::default(),
+            )
+        };
+        let previous = key("old-label", "old-routing", false);
+        let current = key("current-label", "current-routing", true);
+        assert!(previous.matches_identity(&current));
+        window
+            .update(cx, |multi_workspace, _, cx| {
+                multi_workspace.restore_project_groups(
+                    vec![SerializedProjectGroupState {
+                        key: current.clone(),
+                        expanded: true,
+                    }],
+                    cx,
+                )
+            })
+            .unwrap();
+        let state = MultiWorkspaceState {
+            project_groups: vec![SerializedProjectGroup::from_group(&previous, false)],
+            ..MultiWorkspaceState::default()
+        };
+        apply_restored_multiworkspace_state(window, &state, fs, &mut cx.to_async()).await;
+        window
+            .read_with(cx, |multi_workspace, cx| {
+                let groups = multi_workspace.project_groups(cx);
+                assert_eq!(groups.len(), 1);
+                assert_eq!(groups[0].key, current);
+                assert!(!groups[0].expanded);
+            })
+            .unwrap();
+    }
 
     #[test]
     fn test_render_window_title_format_omits_empty_segments() {

@@ -6936,6 +6936,10 @@ impl ProjectGroupKey {
         &self.paths
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty() && self.host.is_none()
+    }
+
     pub fn display_name(
         &self,
         path_detail_map: &std::collections::HashMap<PathBuf, usize>,
@@ -6956,7 +6960,18 @@ impl ProjectGroupKey {
             }
         }
         if names.is_empty() {
-            "Empty Workspace".into()
+            self.host.as_ref()
+                .map(|host| {
+                    let identity = host.identity();
+                    match &identity {
+                        remote::RemoteConnectionIdentity::Ssh { username: None, port: None, .. }
+                        | remote::RemoteConnectionIdentity::Wsl { user: None, .. } => {
+                            host.display_name().into()
+                        }
+                        _ => format!("{} ({})", host.display_name(), host.host_key()).into(),
+                    }
+                })
+                .unwrap_or_else(|| "Empty Workspace".into())
         } else {
             names.join(", ").into()
         }
