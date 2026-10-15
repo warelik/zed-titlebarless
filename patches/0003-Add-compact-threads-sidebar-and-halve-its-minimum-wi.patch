@@ -17,16 +17,20 @@ for every user. One-line rows stay readable that narrow, so the sidebar
 can be dragged narrower and leave more room for the editor. The clamp
 also applies to agent.threads_sidebar.default_width, so its schema
 range and documentation now start at 100.
+
+AgentSettings::from_settings deserializes threads_sidebar.compact with
+unwrap_or(false), accompanied by regression test coverage ensuring safe
+fallback to stock defaults when the compact setting is omitted.
 ---
  assets/settings/default.json                |  2 +
  crates/agent/src/tool_permissions.rs        |  1 +
- crates/agent_settings/src/agent_settings.rs |  4 +-
+ crates/agent_settings/src/agent_settings.rs | 20 ++++-
  crates/agent_ui/src/agent_ui.rs             |  1 +
  crates/settings_content/src/agent.rs        |  9 +-
  crates/sidebar/src/sidebar.rs               | 40 ++++++---
  crates/ui/src/components/ai/thread_item.rs  | 94 ++++++++++++++-------
  docs/src/reference/all-settings.md          |  2 +-
- 8 files changed, 107 insertions(+), 46 deletions(-)
+ 8 files changed, 123 insertions(+), 46 deletions(-)
 
 diff --git a/assets/settings/default.json b/assets/settings/default.json
 index bbc8f654c9..470efc3d33 100644
@@ -54,7 +58,7 @@ index fa38a0b0bb..750154a1fe 100644
              thinking_display: Default::default(),
          }
 diff --git a/crates/agent_settings/src/agent_settings.rs b/crates/agent_settings/src/agent_settings.rs
-index 331480c2e6..e88b9a9e33 100644
+index 331480c2e6..0cecde9362 100644
 --- a/crates/agent_settings/src/agent_settings.rs
 +++ b/crates/agent_settings/src/agent_settings.rs
 @@ -34,7 +34,7 @@ pub const COMPACTION_PROMPT: &str = include_str!("prompts/compaction_prompt.txt"
@@ -78,10 +82,33 @@ index 331480c2e6..e88b9a9e33 100644
                      .unwrap()
                      .into_gpui()
                      .clamp(THREADS_LIST_MIN_WIDTH, THREADS_LIST_MAX_WIDTH),
-+                compact: threads_sidebar.compact.unwrap(),
++                compact: threads_sidebar.compact.unwrap_or(false),
              },
              default_width: agent.default_width.unwrap().into_gpui(),
              default_height: agent.default_height.unwrap().into_gpui(),
+@@ -1203,6 +1205,22 @@ mod tests {
+         }
+     }
+ 
++    #[gpui::test]
++    fn test_threads_sidebar_compact_defaults_to_false_when_none(cx: &mut gpui::App) {
++        let store = SettingsStore::test(cx);
++        let mut content = store.raw_default_settings().clone();
++        content
++            .agent
++            .as_mut()
++            .unwrap()
++            .threads_sidebar
++            .as_mut()
++            .unwrap()
++            .compact = None;
++        let agent_settings = AgentSettings::from_settings(&content);
++        assert!(!agent_settings.threads_sidebar.compact);
++    }
++
+     #[gpui::test]
+     fn test_threads_sidebar_settings_edit_and_reset_clears_legacy_keys(cx: &mut gpui::App) {
+         let store = SettingsStore::test(cx);
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
 index 7d28603d46..d9bcdf1811 100644
 --- a/crates/agent_ui/src/agent_ui.rs

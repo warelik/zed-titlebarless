@@ -8,6 +8,10 @@ shadows that read as visual noise in flat themes. These toggles turn
 each of them off. Only the shadow is skipped; the sticky rows
 themselves are unchanged. Both settings default to true, which keeps
 the stock shadows.
+
+ThemeSettings::from_settings deserializes shadows.project_panel and
+shadows.minimap via shadows.as_ref().and_then(...).unwrap_or(true),
+gracefully handling missing parent shadows objects and missing child fields.
 ---
  assets/settings/default.json                |  7 +++++++
  crates/editor/src/element.rs                |  6 ++++--
@@ -129,7 +133,7 @@ index 157d138455..2124b535a5 100644
  #[derive(
      Clone,
 diff --git a/crates/theme_settings/src/settings.rs b/crates/theme_settings/src/settings.rs
-index e72179bdc5..0fbe306ef0 100644
+index e72179bdc5..3605ac9bcc 100644
 --- a/crates/theme_settings/src/settings.rs
 +++ b/crates/theme_settings/src/settings.rs
 @@ -94,10 +94,21 @@ pub struct ThemeSettings {
@@ -158,7 +162,7 @@ index e72179bdc5..0fbe306ef0 100644
          let markdown_preview = settings_content.markdown_preview.as_ref();
          let theme_selection: ThemeSelection = content.theme.clone().unwrap().into();
          let icon_theme_selection: IconThemeSelection = content.icon_theme.clone().unwrap().into();
-+        let shadows = content.shadows.as_ref().unwrap();
++        let shadows = content.shadows.as_ref();
          Self {
              ui_font_size: clamp_font_size(content.ui_font_size.unwrap().into_gpui()),
              ui_font: Font {
@@ -167,8 +171,8 @@ index e72179bdc5..0fbe306ef0 100644
              icon_theme: icon_theme_selection,
              ui_density: ui_density_from_settings(content.ui_density.unwrap_or_default()),
 +            shadows: ShadowSettings {
-+                project_panel: shadows.project_panel.unwrap(),
-+                minimap: shadows.minimap.unwrap(),
++                project_panel: shadows.and_then(|s| s.project_panel).unwrap_or(true),
++                minimap: shadows.and_then(|s| s.minimap).unwrap_or(true),
 +            },
              unnecessary_code_fade: content.unnecessary_code_fade.unwrap().0.clamp(0.0, 0.9),
          }

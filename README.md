@@ -93,6 +93,6 @@ Other changes will come later, if upstream rejects them.
 
 ## How it's built
 
-- [`patches/`](patches) holds the changes on top of upstream stable: one patch per commit of the fork, eleven in total, written against `v1.23.2` and applied in file name order.
+- [`patches/`](patches) holds the changes on top of upstream stable: one patch per commit of the fork, eleven in total, written against `v1.23.3` and applied in file name order.
 - [`.github/workflows/release.yml`](.github/workflows/release.yml) checks for a new upstream stable release every 6 hours, applies the patches, builds the DMG on a GitHub macOS runner and publishes a release with `latest.json` for auto-update.
 - If a patch stops applying, the workflow fails. Regenerate the patches against the new tag and push.

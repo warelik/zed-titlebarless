@@ -37,6 +37,10 @@ with it. panel_rows_tab_height gives every row in these panels the tab
 bar height.
 
 Both settings default to off and leave the stock layout untouched.
+
+Deserialization uses and_then(|t| t.compact).unwrap_or(false) and
+panel_rows_tab_height.unwrap_or(false), accompanied by regression unit
+tests ensuring safe defaults when configuration keys are omitted.
 ---
  assets/settings/default.json               |  5 +++
  crates/agent_ui/src/agent_panel.rs         |  6 ++-
@@ -52,10 +56,10 @@ Both settings default to off and leave the stock layout untouched.
  crates/settings/src/vscode_import.rs       |  1 +
  crates/settings_content/src/editor.rs      |  4 ++
  crates/settings_content/src/theme.rs       |  4 ++
- crates/theme_settings/src/settings.rs      |  3 ++
+ crates/theme_settings/src/settings.rs      | 16 ++++++++
  crates/workspace/src/toolbar.rs            | 48 ++++++++++++++++++----
- crates/workspace/src/workspace_settings.rs |  2 +
- 17 files changed, 167 insertions(+), 71 deletions(-)
+ crates/workspace/src/workspace_settings.rs | 31 ++++++++++++++
+ 17 files changed, 209 insertions(+), 71 deletions(-)
 
 diff --git a/assets/settings/default.json b/assets/settings/default.json
 index 0695356169..4ef8ff4d83 100644
@@ -594,7 +598,7 @@ index 2124b535a5..5c98f52416 100644
      /// UNSTABLE: Expect many elements to be broken.
      ///
 diff --git a/crates/theme_settings/src/settings.rs b/crates/theme_settings/src/settings.rs
-index 0fbe306ef0..9d5f98a39d 100644
+index 3605ac9bcc..fcdfc4cc36 100644
 --- a/crates/theme_settings/src/settings.rs
 +++ b/crates/theme_settings/src/settings.rs
 @@ -91,6 +91,8 @@ pub struct ThemeSettings {
@@ -610,10 +614,30 @@ index 0fbe306ef0..9d5f98a39d 100644
              experimental_theme_overrides: content.experimental_theme_overrides.clone(),
              theme_overrides: content.theme_overrides.clone(),
              icon_theme: icon_theme_selection,
-+            panel_rows_tab_height: content.panel_rows_tab_height.unwrap(),
++            panel_rows_tab_height: content.panel_rows_tab_height.unwrap_or(false),
              ui_density: ui_density_from_settings(content.ui_density.unwrap_or_default()),
              shadows: ShadowSettings {
-                 project_panel: shadows.project_panel.unwrap(),
+                 project_panel: shadows.and_then(|s| s.project_panel).unwrap_or(true),
+@@ -786,6 +789,19 @@ impl settings::Settings for ThemeSettings {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn test_theme_settings_defaults_when_fields_none() {
++        let mut raw: ::settings::SettingsContent =
++            ::settings::parse_json_with_comments(&::settings::default_settings()).unwrap();
++        raw.theme.shadows = None;
++        raw.theme.panel_rows_tab_height = None;
++
++        let settings = ThemeSettings::from_settings(&raw);
++        assert!(!settings.panel_rows_tab_height);
++        assert!(settings.shadows.project_panel);
++        assert!(settings.shadows.minimap);
++    }
++
+     fn theme_with_colors(colors: ::settings::ThemeColorsContent) -> Theme {
+         crate::refine_theme(&crate::ThemeContent {
+             name: "Test".into(),
 diff --git a/crates/workspace/src/toolbar.rs b/crates/workspace/src/toolbar.rs
 index b14775f289..64984cd969 100644
 --- a/crates/workspace/src/toolbar.rs
@@ -716,7 +740,7 @@ index b14775f289..64984cd969 100644
  }
  
 diff --git a/crates/workspace/src/workspace_settings.rs b/crates/workspace/src/workspace_settings.rs
-index 4e2bb061f5..0e3f781204 100644
+index 89b1bab941..37e5d7b0e9 100644
 --- a/crates/workspace/src/workspace_settings.rs
 +++ b/crates/workspace/src/workspace_settings.rs
 @@ -47,6 +47,7 @@ pub struct WorkspaceSettings {
@@ -727,14 +751,47 @@ index 4e2bb061f5..0e3f781204 100644
  }
  
  #[cfg(target_os = "macos")]
-@@ -168,6 +169,7 @@ impl Settings for WorkspaceSettings {
+@@ -168,6 +169,12 @@ impl Settings for WorkspaceSettings {
                          .unwrap_or(250),
                  ),
              },
-+            compact_toolbar: content.editor.toolbar.as_ref().unwrap().compact.unwrap(),
++            compact_toolbar: content
++                .editor
++                .toolbar
++                .as_ref()
++                .and_then(|toolbar| toolbar.compact)
++                .unwrap_or(false),
          }
      }
  }
+@@ -244,3 +251,27 @@ impl Settings for StatusBarSettings {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn test_workspace_settings_defaults_when_fields_none() {
++        let mut raw: settings::SettingsContent =
++            settings::parse_json_with_comments(&settings::default_settings()).unwrap();
++        raw.workspace.title_bar_to_status_bar = None;
++        raw.editor.toolbar = None;
++        if let Some(tab_bar) = raw.tab_bar.as_mut() {
++            tab_bar.pinned_tab_chips = None;
++            tab_bar.unpinned_tab_chips = None;
++        }
++
++        let settings = WorkspaceSettings::from_settings(&raw);
++        assert!(!settings.title_bar_to_status_bar);
++        assert!(!settings.compact_toolbar);
++        let tab_settings = TabBarSettings::from_settings(&raw);
++        assert!(!tab_settings.pinned_tab_chips);
++        assert!(!tab_settings.unpinned_tab_chips);
++    }
++}
 -- 
 2.55.0
 

@@ -8,17 +8,63 @@ Subject: [PATCH 10/11] Keep logs in --user-data-dir on macOS
 as a development build run next to the installed Zed, then wrote into the
 installed instance's Zed.log and truncated its telemetry.log. Without the flag
 the logs stay where they were.
+
+The logs directory path is resolved through an explicit OnceLock (LOGS_DIR)
+that enforces initialization order: calling set_custom_data_dir after
+logs_dir() has already been initialized panics, preventing split log
+destinations.
+
+Caveat (out-of-process crash server minidumps):
+The out-of-process crash handler subprocess is started without
+--user-data-dir, so its minidumps still go to ~/Library/Logs/Zed per
+crashes.rs:424-426. Plumbing --user-data-dir into the crash server CLI
+invocation requires touching bootstrap logic in crates/zed and crates/crashes,
+which was deliberately avoided in this commit to keep its scope strictly
+confined to crates/paths.
 ---
- crates/paths/src/paths.rs | 4 +++-
- 1 file changed, 3 insertions(+), 1 deletion(-)
+ crates/paths/src/paths.rs | 30 ++++++++++++++++++++++++------
+ 1 file changed, 24 insertions(+), 6 deletions(-)
 
 diff --git a/crates/paths/src/paths.rs b/crates/paths/src/paths.rs
-index 9c16f1db28..801688a8f4 100644
+index 9c16f1db28..a73618d3e4 100644
 --- a/crates/paths/src/paths.rs
 +++ b/crates/paths/src/paths.rs
-@@ -228,7 +228,9 @@ pub fn hang_traces_dir() -> &'static PathBuf {
+@@ -65,6 +65,9 @@ static CURRENT_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+ /// On Windows, this is `%APPDATA%\Zed`.
+ static CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
+ 
++/// The resolved logs directory, combining custom override or platform defaults.
++static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
++
+ /// Returns the relative path to the zed_server directory on the ssh host.
+ pub fn remote_server_dir_relative() -> &'static RelPath {
+     static CACHED: LazyLock<&'static RelPath> =
+@@ -101,8 +104,10 @@ pub fn remote_wsl_server_dir_relative() -> &'static RelPath {
+ /// * The directory's path cannot be canonicalized to an absolute path
+ /// * The directory cannot be created
+ pub fn set_custom_data_dir(dir: &str) -> &'static PathBuf {
+-    if CURRENT_DATA_DIR.get().is_some() || CONFIG_DIR.get().is_some() {
+-        panic!("set_custom_data_dir called after data_dir or config_dir was initialized");
++    if CURRENT_DATA_DIR.get().is_some() || CONFIG_DIR.get().is_some() || LOGS_DIR.get().is_some() {
++        panic!(
++            "set_custom_data_dir called after data_dir, config_dir, or logs_dir was initialized"
++        );
+     }
+     CUSTOM_DATA_DIR.get_or_init(|| {
+         let path = PathBuf::from(dir);
+@@ -220,15 +225,16 @@ pub fn temp_dir() -> &'static PathBuf {
+ 
+ /// Returns the path to the hang traces directory.
+ pub fn hang_traces_dir() -> &'static PathBuf {
+-    static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
+-    LOGS_DIR.get_or_init(|| data_dir().join("hang_traces"))
++    static HANG_TRACES_DIR: OnceLock<PathBuf> = OnceLock::new();
++    HANG_TRACES_DIR.get_or_init(|| data_dir().join("hang_traces"))
+ }
+ 
+ /// Returns the path to the logs directory.
  pub fn logs_dir() -> &'static PathBuf {
-     static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
+-    static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
      LOGS_DIR.get_or_init(|| {
 -        if cfg!(target_os = "macos") {
 +        // `--user-data-dir` keeps the logs too, so that a second instance does not write into
@@ -27,6 +73,22 @@ index 9c16f1db28..801688a8f4 100644
              home_dir().join("Library/Logs").join(APP_NAME)
          } else {
              data_dir().join("logs")
+@@ -635,3 +641,15 @@ pub fn global_gitignore_path() -> Option<PathBuf> {
+         .get_or_init(::ignore::gitignore::gitconfig_excludes_path)
+         .clone()
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    #[should_panic(expected = "set_custom_data_dir called after")]
++    fn test_set_custom_data_dir_panics_if_logs_dir_initialized() {
++        let _ = logs_dir();
++        set_custom_data_dir("/tmp/test-zed-custom-data-dir");
++    }
++}
 -- 
 2.55.0
 

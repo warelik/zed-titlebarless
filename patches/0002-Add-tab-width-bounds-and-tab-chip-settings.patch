@@ -14,6 +14,11 @@ use the theme's element state colours.
 
 The width bounds default to null and the chips to false, which keeps
 the stock tab layout, including terminal titles in the tab switcher.
+
+TabBarSettings::from_settings deserializes pinned_tab_chips and
+unpinned_tab_chips with unwrap_or(false), preventing panics when tab
+chip configuration keys are omitted. Unit test coverage for default
+fallback is introduced in commit 5.
 ---
  assets/settings/default.json               |  8 +++
  crates/settings/src/vscode_import.rs       |  4 ++
@@ -441,7 +446,7 @@ index 715ed113bf..2ee0e41367 100644
      async fn test_window_title_format_empty_project(cx: &mut TestAppContext) {
          init_test(cx);
 diff --git a/crates/workspace/src/workspace_settings.rs b/crates/workspace/src/workspace_settings.rs
-index cf162095b1..4e2bb061f5 100644
+index 830b7b2145..89b1bab941 100644
 --- a/crates/workspace/src/workspace_settings.rs
 +++ b/crates/workspace/src/workspace_settings.rs
 @@ -92,6 +92,8 @@ pub struct TabBarSettings {
@@ -457,8 +462,8 @@ index cf162095b1..4e2bb061f5 100644
              show_nav_history_buttons: tab_bar.show_nav_history_buttons.unwrap(),
              show_tab_bar_buttons: tab_bar.show_tab_bar_buttons.unwrap(),
              show_pinned_tabs_in_separate_row: tab_bar.show_pinned_tabs_in_separate_row.unwrap(),
-+            pinned_tab_chips: tab_bar.pinned_tab_chips.unwrap(),
-+            unpinned_tab_chips: tab_bar.unpinned_tab_chips.unwrap(),
++            pinned_tab_chips: tab_bar.pinned_tab_chips.unwrap_or(false),
++            unpinned_tab_chips: tab_bar.unpinned_tab_chips.unwrap_or(false),
          }
      }
  }

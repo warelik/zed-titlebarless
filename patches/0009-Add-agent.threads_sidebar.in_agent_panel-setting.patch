@@ -25,20 +25,31 @@ closed. Add Project sits at the end of the projects row. Toggling the
 threads sidebar toggles the agent panel in this mode.
 
 The setting defaults to false, which keeps the sidebar.
+
+Drafts are preserved during pending activation when in_agent_panel is true
+and strictly follow stock behavior when false. Tab order is deterministic
+and preserved across thread updates using stable created_at timestamps.
+Traffic light layout in the panel header is gated for macOS, allowing
+compilation on Linux and Windows. Stale sidebar_open checks are replaced
+with active render state checks. Settings deserialization safely defaults
+in_agent_panel to false with regression unit tests.
 ---
  assets/settings/default.json                |   3 +
  crates/agent/src/tool_permissions.rs        |   1 +
- crates/agent_settings/src/agent_settings.rs |   2 +
- crates/agent_ui/src/agent_panel.rs          | 109 ++-
+ crates/agent_settings/src/agent_settings.rs |  18 +
+ crates/agent_ui/src/agent_panel.rs          | 113 ++-
  crates/agent_ui/src/agent_ui.rs             |   1 +
+ crates/agent_ui/src/conversation_view.rs    |   3 +-
  crates/settings_content/src/agent.rs        |   6 +
- crates/sidebar/src/sidebar.rs               | 387 +++++++----
- crates/sidebar/src/thread_tabs.rs           | 721 ++++++++++++++++++++
+ crates/sidebar/src/sidebar.rs               | 405 +++++++----
+ crates/sidebar/src/sidebar_tests.rs         | 272 ++++++++
+ crates/sidebar/src/thread_tabs.rs           | 730 ++++++++++++++++++++
+ crates/title_bar/src/title_bar.rs           |   2 +-
  crates/workspace/src/dock.rs                |  13 +-
- crates/workspace/src/multi_workspace.rs     |  85 ++-
- crates/workspace/src/status_bar.rs          |   2 +-
- crates/workspace/src/workspace.rs           |  33 +-
- 12 files changed, 1210 insertions(+), 153 deletions(-)
+ crates/workspace/src/multi_workspace.rs     |  97 ++-
+ crates/workspace/src/status_bar.rs          |   4 +-
+ crates/workspace/src/workspace.rs           |  47 +-
+ 15 files changed, 1550 insertions(+), 165 deletions(-)
  create mode 100644 crates/sidebar/src/thread_tabs.rs
 
 diff --git a/assets/settings/default.json b/assets/settings/default.json
@@ -68,7 +79,7 @@ index 750154a1fe..7ad17cd055 100644
              thinking_display: Default::default(),
          }
 diff --git a/crates/agent_settings/src/agent_settings.rs b/crates/agent_settings/src/agent_settings.rs
-index e88b9a9e33..0b59099703 100644
+index 0cecde9362..5ac5d29343 100644
 --- a/crates/agent_settings/src/agent_settings.rs
 +++ b/crates/agent_settings/src/agent_settings.rs
 @@ -258,6 +258,7 @@ pub struct ThreadsSidebarSettings {
@@ -82,13 +93,36 @@ index e88b9a9e33..0b59099703 100644
 @@ -787,6 +788,7 @@ impl Settings for AgentSettings {
                      .into_gpui()
                      .clamp(THREADS_LIST_MIN_WIDTH, THREADS_LIST_MAX_WIDTH),
-                 compact: threads_sidebar.compact.unwrap(),
-+                in_agent_panel: threads_sidebar.in_agent_panel.unwrap(),
+                 compact: threads_sidebar.compact.unwrap_or(false),
++                in_agent_panel: threads_sidebar.in_agent_panel.unwrap_or(false),
              },
              default_width: agent.default_width.unwrap().into_gpui(),
              default_height: agent.default_height.unwrap().into_gpui(),
+@@ -1205,6 +1207,22 @@ mod tests {
+         }
+     }
+ 
++    #[gpui::test]
++    fn test_threads_sidebar_in_agent_panel_defaults_to_false_when_none(cx: &mut gpui::App) {
++        let store = SettingsStore::test(cx);
++        let mut content = store.raw_default_settings().clone();
++        content
++            .agent
++            .as_mut()
++            .unwrap()
++            .threads_sidebar
++            .as_mut()
++            .unwrap()
++            .in_agent_panel = None;
++        let agent_settings = AgentSettings::from_settings(&content);
++        assert!(!agent_settings.threads_sidebar.in_agent_panel);
++    }
++
+     #[gpui::test]
+     fn test_threads_sidebar_compact_defaults_to_false_when_none(cx: &mut gpui::App) {
+         let store = SettingsStore::test(cx);
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 5a179247a1..d1a8a392ef 100644
+index 5a179247a1..1f8087c324 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
 @@ -94,7 +94,7 @@ use text::OffsetRangeExt;
@@ -100,7 +134,18 @@ index 5a179247a1..d1a8a392ef 100644
  };
  use util::ResultExt as _;
  use workspace::{
-@@ -5102,6 +5102,10 @@ impl Panel for AgentPanel {
+@@ -2874,7 +2874,9 @@ impl AgentPanel {
+ 
+         if let Some(multi_workspace) = window.root::<MultiWorkspace>().flatten() {
+             let multi_workspace = multi_workspace.read(cx);
+-            if multi_workspace.sidebar_open() && multi_workspace.is_threads_list_view_active(cx) {
++            if multi_workspace.sidebar_render_state(cx).open
++                && multi_workspace.is_threads_list_view_active(cx)
++            {
+                 return true;
+             }
+ 
+@@ -5102,6 +5104,10 @@ impl Panel for AgentPanel {
          true
      }
  
@@ -111,7 +156,7 @@ index 5a179247a1..d1a8a392ef 100644
      fn hide_button_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
          Some(workspace::HideStatusItem::new(|settings| {
              settings.agent.get_or_insert_default().button = Some(false);
-@@ -5644,6 +5648,7 @@ impl AgentPanel {
+@@ -5644,6 +5650,7 @@ impl AgentPanel {
              .is_some();
  
          let workspace = self.workspace.clone();
@@ -119,7 +164,7 @@ index 5a179247a1..d1a8a392ef 100644
  
          PopoverMenu::new("agent-options-menu")
              .trigger_with_tooltip(
-@@ -5787,10 +5792,22 @@ impl AgentPanel {
+@@ -5787,10 +5794,22 @@ impl AgentPanel {
                                  .action("Profiles", Box::new(ManageProfiles::default()));
                          }
  
@@ -146,7 +191,7 @@ index 5a179247a1..d1a8a392ef 100644
  
                          if has_auth_methods || supports_logout {
                              menu = menu.separator()
-@@ -5837,8 +5854,39 @@ impl AgentPanel {
+@@ -5837,8 +5856,39 @@ impl AgentPanel {
          })
      }
  
@@ -187,7 +232,7 @@ index 5a179247a1..d1a8a392ef 100644
  
          let focus_handle = self.focus_handle(cx);
  
-@@ -6171,6 +6219,49 @@ impl AgentPanel {
+@@ -6171,6 +6221,49 @@ impl AgentPanel {
                      thread_view.update(cx, |thread_view, cx| thread_view.render_sandbox_status(cx))
                  });
  
@@ -237,7 +282,7 @@ index 5a179247a1..d1a8a392ef 100644
              base_container
                  .child(
                      h_flex()
-@@ -6210,6 +6301,7 @@ impl AgentPanel {
+@@ -6210,6 +6303,7 @@ impl AgentPanel {
              .border_b_1()
              .border_color(cx.theme().colors().border)
              .child(toolbar_content)
@@ -245,7 +290,7 @@ index 5a179247a1..d1a8a392ef 100644
      }
  
      fn should_render_trial_end_upsell(&self, cx: &mut Context<Self>) -> bool {
-@@ -6491,6 +6583,7 @@ impl AgentPanel {
+@@ -6491,6 +6585,7 @@ impl AgentPanel {
  
  impl Render for AgentPanel {
      fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -253,7 +298,7 @@ index 5a179247a1..d1a8a392ef 100644
          // WARNING: Changes to this element hierarchy can have
          // non-obvious implications to the layout of children.
          //
-@@ -6547,7 +6640,11 @@ impl Render for AgentPanel {
+@@ -6547,7 +6642,11 @@ impl Render for AgentPanel {
              }))
              .child(self.render_toolbar(window, cx))
              .children(self.render_new_user_onboarding(window, cx))
@@ -277,6 +322,20 @@ index d9bcdf1811..e08f10b51f 100644
              },
              thinking_display: Default::default(),
          };
+diff --git a/crates/agent_ui/src/conversation_view.rs b/crates/agent_ui/src/conversation_view.rs
+index ce890d8fa9..d8df4f3cdf 100644
+--- a/crates/agent_ui/src/conversation_view.rs
++++ b/crates/agent_ui/src/conversation_view.rs
+@@ -2972,7 +2972,8 @@ impl ConversationView {
+         };
+ 
+         let multi_workspace = multi_workspace.read(cx);
+-        multi_workspace.sidebar_open() && multi_workspace.is_threads_list_view_active(cx)
++        multi_workspace.sidebar_render_state(cx).open
++            && multi_workspace.is_threads_list_view_active(cx)
+             || multi_workspace.workspace() == &workspace
+                 && self.is_visible_in_agent_panel(&workspace, cx)
+     }
 diff --git a/crates/settings_content/src/agent.rs b/crates/settings_content/src/agent.rs
 index b23be559ce..19a03795bf 100644
 --- a/crates/settings_content/src/agent.rs
@@ -295,7 +354,7 @@ index b23be559ce..19a03795bf 100644
  
  #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 3c09915d4c..209c477952 100644
+index 3c09915d4c..9f54d917fd 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -1,4 +1,5 @@
@@ -382,7 +441,17 @@ index 3c09915d4c..209c477952 100644
          self.multi_workspace
              .upgrade()
              .and_then(|mw| {
-@@ -1401,7 +1422,11 @@ impl Sidebar {
+@@ -1072,6 +1093,9 @@ impl Sidebar {
+ 
+         if let Some(agent_panel) = workspace.read(cx).panel::<AgentPanel>(cx) {
+             self.subscribe_to_agent_panel(workspace, &agent_panel, window, cx);
++            if Self::in_agent_panel(cx) {
++                self.sync_active_entry_from_panel(&agent_panel, cx);
++            }
+         }
+     }
+ 
+@@ -1401,7 +1425,11 @@ impl Sidebar {
              .first()
              .map(|ws| ws.read(cx).project().read(cx).agent_server_store().clone());
  
@@ -395,25 +464,54 @@ index 3c09915d4c..209c477952 100644
  
          let previous = mem::take(&mut self.contents);
  
-@@ -2052,6 +2077,17 @@ impl Sidebar {
+@@ -1736,6 +1764,7 @@ impl Sidebar {
+ 
+                 // Keep empty drafts only while their thread is active; preserve
+                 // drafts with content because they hold user-typed state.
++                let in_agent_panel = Self::in_agent_panel(cx);
+                 let pending_activation = self.pending_thread_activation;
+                 let active_panel_thread_id = active_workspace
+                     .as_ref()
+@@ -1745,10 +1774,18 @@ impl Sidebar {
+                     if thread.draft != Some(DraftKind::Empty) {
+                         return true;
+                     }
+-                    if pending_activation.is_some() {
+-                        return false;
++                    if in_agent_panel {
++                        if let Some(pending_id) = pending_activation {
++                            pending_id == thread.metadata.thread_id
++                        } else {
++                            Some(thread.metadata.thread_id) == active_panel_thread_id
++                        }
++                    } else {
++                        if pending_activation.is_some() {
++                            return false;
++                        }
++                        Some(thread.metadata.thread_id) == active_panel_thread_id
+                     }
+-                    Some(thread.metadata.thread_id) == active_panel_thread_id
+                 });
+ 
+                 // Build a lookup from live_infos and compute running/waiting
+@@ -2052,6 +2089,16 @@ impl Sidebar {
          let previous_shapes: Vec<EntryShape> =
              self.entry_shapes(multi_workspace.read(cx)).collect();
  
-+        // Keeps the agent panel's list counted as visible, and the active project in it, like
-+        // the open sidebar does; deferred because the window may be mid-update.
-+        if Self::in_agent_panel(cx) && !multi_workspace.read(cx).sidebar_open() {
-+            let multi_workspace = multi_workspace.downgrade();
-+            cx.defer(move |cx| {
-+                multi_workspace
-+                    .update(cx, |multi_workspace, cx| multi_workspace.open_sidebar(cx))
-+                    .log_err();
++        if Self::in_agent_panel(cx) {
++            multi_workspace.update(cx, |multi_workspace, cx| {
++                multi_workspace.retain_active_workspace(cx);
 +            });
++        }
++
++        if Self::in_agent_panel(cx) && self.active_entry.is_none() {
++            self.sync_active_entry_from_active_workspace(cx);
 +        }
 +
          self.rebuild_contents(cx);
          self.refresh_refilled_draft_times(cx);
          self.refresh_draft_editor_observations(cx);
-@@ -2493,6 +2529,7 @@ impl Sidebar {
+@@ -2493,6 +2540,7 @@ impl Sidebar {
                                  is_active,
                                  has_threads,
                                  &group_name,
@@ -421,7 +519,7 @@ index 3c09915d4c..209c477952 100644
                                  cx,
                              ))
                              .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-@@ -2854,6 +2891,7 @@ impl Sidebar {
+@@ -2854,6 +2902,7 @@ impl Sidebar {
          is_active: bool,
          has_threads: bool,
          group_name: &SharedString,
@@ -429,7 +527,7 @@ index 3c09915d4c..209c477952 100644
          cx: &mut Context<Self>,
      ) -> AnyElement {
          let multi_workspace = self.multi_workspace.clone();
-@@ -2887,6 +2925,13 @@ impl Sidebar {
+@@ -2887,6 +2936,13 @@ impl Sidebar {
                      })
                      .selected_style(ButtonStyle::Tinted(TintColor::Accent))
                      .icon_size(IconSize::Small)
@@ -443,7 +541,7 @@ index 3c09915d4c..209c477952 100644
                      .when(!is_menu_open, |el| el.visible_on_hover(group_name)),
              )
              .on_open(Rc::new({
-@@ -3561,7 +3606,18 @@ impl Sidebar {
+@@ -3561,7 +3617,18 @@ impl Sidebar {
          if self.rename_target.take().is_none() {
              return false;
          }
@@ -463,7 +561,15 @@ index 3c09915d4c..209c477952 100644
          self.update_entries(cx);
          true
      }
-@@ -6471,15 +6527,28 @@ impl Sidebar {
+@@ -6448,7 +6515,6 @@ impl Sidebar {
+                 )
+             })
+             .on_click({
+-                let thread_workspace = thread_workspace.clone();
+                 cx.listener(move |this, _, window, cx| {
+                     this.selection = None;
+                     match &thread_workspace {
+@@ -6471,15 +6537,28 @@ impl Sidebar {
                  })
              });
  
@@ -498,7 +604,7 @@ index 3c09915d4c..209c477952 100644
          let sidebar = cx.weak_entity();
  
          let active_workspace = self.active_workspace(cx);
-@@ -6492,113 +6561,108 @@ impl Sidebar {
+@@ -6492,113 +6571,108 @@ impl Sidebar {
          let can_open_as_markdown = thread.is_live || is_zed_thread;
          let folder_paths = thread.metadata.folder_paths().clone();
  
@@ -697,7 +803,7 @@ index 3c09915d4c..209c477952 100644
      }
  
      fn render_terminal(
-@@ -6697,33 +6761,41 @@ impl Sidebar {
+@@ -6697,33 +6771,41 @@ impl Sidebar {
                  }
              }));
  
@@ -760,7 +866,7 @@ index 3c09915d4c..209c477952 100644
      }
  
      fn render_filter_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
-@@ -6738,7 +6810,11 @@ impl Sidebar {
+@@ -6738,7 +6820,11 @@ impl Sidebar {
              .child(self.filter_editor.clone())
      }
  
@@ -773,7 +879,7 @@ index 3c09915d4c..209c477952 100644
          let multi_workspace = self.multi_workspace.upgrade();
  
          let workspace = multi_workspace
-@@ -6777,11 +6853,18 @@ impl Sidebar {
+@@ -6777,11 +6863,18 @@ impl Sidebar {
                      .selected_style(ButtonStyle::Tinted(TintColor::Accent)),
                  |_window, cx| Tooltip::for_action("Add Project", &OpenRecent::default(), cx),
              )
@@ -796,7 +902,7 @@ index 3c09915d4c..209c477952 100644
      }
  
      fn new_thread_in_group(
-@@ -7558,7 +7641,7 @@ impl Sidebar {
+@@ -7558,7 +7651,7 @@ impl Sidebar {
                      })),
              )
              .child(div().flex_1())
@@ -805,7 +911,7 @@ index 3c09915d4c..209c477952 100644
      }
  
      fn active_workspace(&self, cx: &App) -> Option<Entity<Workspace>> {
-@@ -7792,8 +7875,11 @@ impl Sidebar {
+@@ -7792,8 +7885,11 @@ impl Sidebar {
      fn show_thread_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
          self.view = SidebarView::ThreadList;
          self._subscriptions.clear();
@@ -819,7 +925,7 @@ index 3c09915d4c..209c477952 100644
          self.serialize(cx);
          cx.notify();
      }
-@@ -7912,6 +7998,45 @@ impl WorkspaceSidebar for Sidebar {
+@@ -7912,6 +8008,45 @@ impl WorkspaceSidebar for Sidebar {
          self.cycle_thread_impl(forward, window, cx);
      }
  
@@ -865,12 +971,292 @@ index 3c09915d4c..209c477952 100644
      fn serialized_state(&self, _cx: &App) -> Option<String> {
          let serialized = SerializedSidebar {
              width: self.width_set_by_user.then(|| f32::from(self.width)),
+diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
+index d6ae15cad5..27551d6726 100644
+--- a/crates/sidebar/src/sidebar_tests.rs
++++ b/crates/sidebar/src/sidebar_tests.rs
+@@ -15878,3 +15878,275 @@ fn sidebar_painted_background_at(position: Point<Pixels>, cx: &mut VisualTestCon
+         u32::from(Rgba::from(color))
+     })
+ }
++
++fn set_threads_sidebar_in_agent_panel(in_agent_panel: bool, cx: &mut VisualTestContext) {
++    cx.update(|_window, cx| {
++        SettingsStore::update_global(cx, |store, cx| {
++            store
++                .set_user_settings(
++                    &format!(r#"{{"agent": {{"threads_sidebar": {{"in_agent_panel": {in_agent_panel}}}}}}}"#),
++                    cx,
++                )
++                .unwrap();
++        });
++    });
++}
++
++#[gpui::test]
++async fn test_m2_in_agent_panel_does_not_clobber_sidebar_open_state(cx: &mut TestAppContext) {
++    let project = init_test_project_with_agent_panel("/my-project", cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
++
++    assert!(!multi_workspace.read_with(cx, |mw, _| mw.sidebar_open()));
++
++    set_threads_sidebar_in_agent_panel(true, cx);
++
++    sidebar.update(cx, |s, cx| s.update_entries(cx));
++    cx.run_until_parked();
++
++    assert!(
++        !multi_workspace.read_with(cx, |mw, _| mw.sidebar_open()),
++        "sidebar_open must not be forced to true when in_agent_panel is true"
++    );
++}
++
++#[gpui::test]
++async fn test_m2_in_agent_panel_tab_order_stable_across_thread_updates(cx: &mut TestAppContext) {
++    let project = init_test_project_with_agent_panel("/my-project", cx).await;
++    let paths = PathList::new(&[PathBuf::from("/my-project")]);
++
++    let t0 = chrono::DateTime::parse_from_rfc3339("2024-01-01T10:00:00Z")
++        .unwrap()
++        .with_timezone(&Utc);
++    let t1 = chrono::DateTime::parse_from_rfc3339("2024-01-01T10:00:10Z")
++        .unwrap()
++        .with_timezone(&Utc);
++    let t2 = chrono::DateTime::parse_from_rfc3339("2024-01-01T10:00:20Z")
++        .unwrap()
++        .with_timezone(&Utc);
++
++    // Thread 1: legacy thread without created_at, initially updated_at = t0
++    let metadata1 = ThreadMetadata {
++        thread_id: ThreadId::new(),
++        session_id: Some(acp::SessionId::new("t0".to_string())),
++        agent_id: agent::ZED_AGENT_ID.clone(),
++        title: Some(SharedString::from("Thread 1")),
++        title_override: None,
++        updated_at: t0,
++        created_at: None,
++        interacted_at: None,
++        worktree_paths: WorktreePaths::from_path_lists(paths.clone(), paths.clone()).unwrap(),
++        archived: false,
++        remote_connection: None,
++    };
++    // Thread 2: created_at = t1, updated_at = t1
++    let metadata2 = ThreadMetadata {
++        thread_id: ThreadId::new(),
++        session_id: Some(acp::SessionId::new("t1".to_string())),
++        agent_id: agent::ZED_AGENT_ID.clone(),
++        title: Some(SharedString::from("Thread 2")),
++        title_override: None,
++        updated_at: t1,
++        created_at: Some(t1),
++        interacted_at: None,
++        worktree_paths: WorktreePaths::from_path_lists(paths.clone(), paths).unwrap(),
++        archived: false,
++        remote_connection: None,
++    };
++    cx.update(|cx| {
++        let store = ThreadMetadataStore::global(cx);
++        store.update(cx, |store, cx| {
++            store.save(metadata1, cx);
++            store.save(metadata2, cx);
++        });
++    });
++
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
++
++    multi_workspace.update(cx, |mw, cx| {
++        mw.retain_active_workspace(cx);
++    });
++
++    set_threads_sidebar_in_agent_panel(true, cx);
++
++    sidebar.update(cx, |s, cx| s.update_entries(cx));
++    cx.run_until_parked();
++
++    let initial_tabs = sidebar.read_with(cx, |s, _cx| {
++        s.ordered_thread_tab_entries()
++            .into_iter()
++            .filter_map(|(_, entry)| match entry {
++                ListEntry::Thread(t) => t.metadata.title.as_ref().map(|title| title.to_string()),
++                _ => None,
++            })
++            .collect::<Vec<_>>()
++    });
++    assert_eq!(initial_tabs, vec!["Thread 1", "Thread 2"]);
++
++    // Update Thread 1's updated_at to t2 (which is AFTER Thread 2's created_at)
++    cx.update(|_window, cx| {
++        let store = ThreadMetadataStore::global(cx);
++        let mut m = store
++            .read(cx)
++            .entries()
++            .find(|e| e.title.as_deref() == Some("Thread 1"))
++            .cloned()
++            .unwrap();
++        m.updated_at = t2;
++        store.update(cx, |store, cx| store.save(m, cx));
++    });
++
++    sidebar.update(cx, |s, cx| s.update_entries(cx));
++    cx.run_until_parked();
++
++    let after_tabs = sidebar.read_with(cx, |s, _cx| {
++        s.ordered_thread_tab_entries()
++            .into_iter()
++            .filter_map(|(_, entry)| match entry {
++                ListEntry::Thread(t) => t.metadata.title.as_ref().map(|title| title.to_string()),
++                _ => None,
++            })
++            .collect::<Vec<_>>()
++    });
++    assert_eq!(
++        after_tabs,
++        vec!["Thread 1", "Thread 2"],
++        "Tab order must remain stable when thread is updated"
++    );
++}
++
++#[gpui::test]
++async fn test_m2_empty_draft_not_dropped_during_pending_activation(cx: &mut TestAppContext) {
++    let project = init_test_project_with_agent_panel("/my-project", cx).await;
++    let paths = PathList::new(&[PathBuf::from("/my-project")]);
++    let draft_thread_id =
++        save_draft_metadata_with_main_paths(None, paths.clone(), paths, Utc::now(), cx);
++
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
++
++    set_threads_sidebar_in_agent_panel(true, cx);
++
++    // Set pending activation to this draft
++    sidebar.update(cx, |s, cx| {
++        s.pending_thread_activation = Some(draft_thread_id);
++        s.update_entries(cx);
++    });
++    cx.run_until_parked();
++
++    let has_draft = sidebar.read_with(cx, |s, _| {
++        s.contents.entries.iter().any(|e| match e {
++            ListEntry::Thread(t) => t.metadata.thread_id == draft_thread_id,
++            _ => false,
++        })
++    });
++    assert!(
++        has_draft,
++        "Empty draft should not be dropped while it is the pending activation target"
++    );
++}
++
++#[gpui::test]
++async fn test_stock_empty_draft_dropped_during_pending_activation_when_not_in_agent_panel(
++    cx: &mut TestAppContext,
++) {
++    let project = init_test_project_with_agent_panel("/my-project", cx).await;
++    let paths = PathList::new(&[PathBuf::from("/my-project")]);
++    let draft_thread_id =
++        save_draft_metadata_with_main_paths(None, paths.clone(), paths, Utc::now(), cx);
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    set_threads_sidebar_in_agent_panel(false, cx);
++    let sidebar = setup_sidebar(&multi_workspace, cx);
++
++    sidebar.update(cx, |s, cx| {
++        s.pending_thread_activation = Some(draft_thread_id);
++        s.update_entries(cx);
++    });
++    cx.run_until_parked();
++
++    let has_draft = sidebar.read_with(cx, |s, _| {
++        s.contents
++            .entries
++            .iter()
++            .any(|e| matches!(e, ListEntry::Thread(t) if t.metadata.thread_id == draft_thread_id))
++    });
++    assert!(
++        !has_draft,
++        "Stock behavior requires empty draft to be dropped during pending activation"
++    );
++}
++
++#[gpui::test]
++async fn test_m2_active_entry_synced_from_agent_panel_on_startup(cx: &mut TestAppContext) {
++    let project = init_test_project_with_agent_panel("/my-project", cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
++    let panel = add_agent_panel(&workspace, cx);
++
++    let terminal_id = panel
++        .update_in(cx, |panel, window, cx| {
++            panel.insert_test_terminal("Dev Terminal", true, window, cx)
++        })
++        .expect("test terminal should be inserted");
++    cx.run_until_parked();
++
++    set_threads_sidebar_in_agent_panel(true, cx);
++
++    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
++    sidebar.update(cx, |s, cx| s.update_entries(cx));
++    cx.run_until_parked();
++
++    let active_terminal = sidebar.read_with(cx, |s, _| match &s.active_entry {
++        Some(ActiveEntry::Terminal {
++            terminal_id: tid, ..
++        }) => Some(*tid),
++        _ => None,
++    });
++    assert_eq!(
++        active_terminal,
++        Some(terminal_id),
++        "Sidebar active_entry should be synchronized from AgentPanel on startup"
++    );
++}
++
++#[gpui::test]
++async fn test_stock_active_entry_not_synced_from_agent_panel_when_not_in_agent_panel(
++    cx: &mut TestAppContext,
++) {
++    let project = init_test_project_with_agent_panel("/my-project", cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
++    let panel = add_agent_panel(&workspace, cx);
++
++    let _terminal_id = panel
++        .update_in(cx, |panel, window, cx| {
++            panel.insert_test_terminal("Dev Terminal", true, window, cx)
++        })
++        .expect("test terminal should be inserted");
++    cx.run_until_parked();
++
++    set_threads_sidebar_in_agent_panel(false, cx);
++
++    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
++    sidebar.update(cx, |s, cx| s.update_entries(cx));
++    cx.run_until_parked();
++
++    let active_terminal = sidebar.read_with(cx, |s, _| match &s.active_entry {
++        Some(ActiveEntry::Terminal {
++            terminal_id: tid, ..
++        }) => Some(*tid),
++        _ => None,
++    });
++    assert_eq!(
++        active_terminal, None,
++        "Sidebar active_entry should remain None on startup when in_agent_panel is false"
++    );
++}
 diff --git a/crates/sidebar/src/thread_tabs.rs b/crates/sidebar/src/thread_tabs.rs
 new file mode 100644
-index 0000000000..10fed67e52
+index 0000000000..85ac844038
 --- /dev/null
 +++ b/crates/sidebar/src/thread_tabs.rs
-@@ -0,0 +1,721 @@
+@@ -0,0 +1,730 @@
 +use super::*;
 +use gpui::ScrollHandle;
 +use ui::{IconButtonShape, Indicator, TabCloseSide, TabPosition};
@@ -1183,7 +1569,6 @@ index 0000000000..10fed67e52
 +                        .min_width(settings.min_width)
 +                        .max_width(settings.max_width)
 +                        .on_click(cx.listener({
-+                            let key = key.clone();
 +                            move |this, _: &ClickEvent, window, cx| {
 +                                this.activate_project_tab(&key, window, cx);
 +                            }
@@ -1208,12 +1593,7 @@ index 0000000000..10fed67e52
 +        RenderedTabsRow { tabs, active_index }
 +    }
 +
-+    pub(crate) fn render_thread_tabs(
-+        &mut self,
-+        _window: &mut Window,
-+        cx: &mut Context<Self>,
-+    ) -> RenderedTabsRow {
-+        let chip = TabBarSettings::get_global(cx).unpinned_tab_chips;
++    pub(crate) fn ordered_thread_tab_entries(&self) -> Vec<(usize, ListEntry)> {
 +        let entries = &self.contents.entries;
 +        let Some(active_header) = entries.iter().position(|entry| {
 +            matches!(
@@ -1224,32 +1604,47 @@ index 0000000000..10fed67e52
 +                }
 +            )
 +        }) else {
-+            return RenderedTabsRow {
-+                tabs: Vec::new(),
-+                active_index: None,
-+            };
++            return Vec::new();
 +        };
 +
 +        // Tabs keep the order they were opened in, like editor tabs, instead of the sidebar's
 +        // most-recent-first order, which would move a tab whenever its thread is used.
-+        let rows = entries
++        entries
 +            .iter()
 +            .enumerate()
 +            .skip(active_header + 1)
 +            .take_while(|(_, entry)| !matches!(entry, ListEntry::ProjectHeader { .. }))
 +            .map(|(entry_ix, entry)| (entry_ix, entry.clone()))
-+            .sorted_by_key(|(_, entry)| match entry {
-+                ListEntry::Thread(thread) if thread.draft == Some(DraftKind::Empty) => {
-+                    DateTime::<Utc>::MAX_UTC
-+                }
-+                ListEntry::Thread(thread) => thread
-+                    .metadata
-+                    .created_at
-+                    .unwrap_or(thread.metadata.updated_at),
-+                ListEntry::Terminal(terminal) => terminal.metadata.created_at,
-+                ListEntry::ProjectHeader { .. } => DateTime::<Utc>::MAX_UTC,
++            .sorted_by_key(|(_, entry)| {
++                let is_empty_draft = matches!(
++                    entry,
++                    ListEntry::Thread(thread) if thread.draft == Some(DraftKind::Empty)
++                );
++                let created_at = match entry {
++                    ListEntry::Thread(thread) => thread
++                        .metadata
++                        .created_at
++                        .unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
++                    ListEntry::Terminal(terminal) => terminal.metadata.created_at,
++                    ListEntry::ProjectHeader { .. } => DateTime::<Utc>::MAX_UTC,
++                };
++                let id_key = match entry {
++                    ListEntry::Thread(thread) => thread.metadata.thread_id.to_key_string(),
++                    ListEntry::Terminal(terminal) => terminal.metadata.terminal_id.to_string(),
++                    ListEntry::ProjectHeader { .. } => String::new(),
++                };
++                (is_empty_draft, created_at, id_key)
 +            })
-+            .collect::<Vec<_>>();
++            .collect()
++    }
++
++    pub(crate) fn render_thread_tabs(
++        &mut self,
++        _window: &mut Window,
++        cx: &mut Context<Self>,
++    ) -> RenderedTabsRow {
++        let chip = TabBarSettings::get_global(cx).unpinned_tab_chips;
++        let rows = self.ordered_thread_tab_entries();
 +
 +        let count = rows.len();
 +        let active_index = rows.iter().position(|(_, entry)| {
@@ -1592,6 +1987,19 @@ index 0000000000..10fed67e52
 +            .into_any_element()
 +    }
 +}
+diff --git a/crates/title_bar/src/title_bar.rs b/crates/title_bar/src/title_bar.rs
+index 95a70f5b9e..84da5a326f 100644
+--- a/crates/title_bar/src/title_bar.rs
++++ b/crates/title_bar/src/title_bar.rs
+@@ -836,7 +836,7 @@ impl TitleBar {
+             .multi_workspace
+             .as_ref()
+             .and_then(|mw| mw.upgrade())
+-            .map(|mw| mw.read(cx).sidebar_open())
++            .map(|mw| mw.read(cx).sidebar_render_state(cx).open)
+             .unwrap_or(false)
+             && PlatformTitleBar::is_multi_workspace_enabled(cx);
+ 
 diff --git a/crates/workspace/src/dock.rs b/crates/workspace/src/dock.rs
 index 1a6059cbf4..e87fa0cab0 100644
 --- a/crates/workspace/src/dock.rs
@@ -1638,7 +2046,7 @@ index 1a6059cbf4..e87fa0cab0 100644
              let has_top_spacer = top_spacer.is_some();
              let create_resize_handle = || {
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 0946495883..b28c435fa3 100644
+index 0946495883..7a8902841a 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -157,6 +157,29 @@ pub trait Sidebar: Focusable + Render + EventEmitter<SidebarEvent> + Sized {
@@ -1722,7 +2130,7 @@ index 0946495883..b28c435fa3 100644
              side: self.sidebar_side(cx),
          }
      }
-@@ -351,12 +402,22 @@ impl MultiWorkspace {
+@@ -351,12 +402,32 @@ impl MultiWorkspace {
              let mut previous_multi_workspace_enabled = !DisableAiSettings::get_global(cx)
                  .disable_ai
                  && AgentSettings::get_global(cx).enabled;
@@ -1735,17 +2143,27 @@ index 0946495883..b28c435fa3 100644
                  previous_multi_workspace_enabled = multi_workspace_enabled;
 +
 +                let in_agent_panel = threads_sidebar_in_agent_panel(cx);
-+                if in_agent_panel != previous_in_agent_panel
-+                    && multi_workspace_enabled
-+                    && (in_agent_panel || this.sidebar_open)
-+                {
-+                    this.apply_open_sidebar(cx);
++                if in_agent_panel != previous_in_agent_panel && multi_workspace_enabled {
++                    if in_agent_panel {
++                        this.retain_active_workspace(cx);
++                    }
++                    let sidebar_focus_handle = this
++                        .sidebar
++                        .as_ref()
++                        .filter(|_| !in_agent_panel && this.sidebar_open)
++                        .map(|s| s.focus_handle(cx));
++                    for workspace in this.workspaces().cloned().collect::<Vec<_>>() {
++                        workspace.update(cx, |workspace, _cx| {
++                            workspace.set_sidebar_focus_handle(sidebar_focus_handle.clone());
++                        });
++                    }
++                    cx.notify();
 +                }
 +                previous_in_agent_panel = in_agent_panel;
              }
          });
          Self::subscribe_to_workspace(&workspace, window, cx);
-@@ -431,6 +492,10 @@ impl MultiWorkspace {
+@@ -431,6 +502,10 @@ impl MultiWorkspace {
          if !self.multi_workspace_enabled(cx) {
              return;
          }
@@ -1756,7 +2174,7 @@ index 0946495883..b28c435fa3 100644
  
          if self.sidebar_open() {
              self.close_sidebar(window, cx);
-@@ -445,7 +510,7 @@ impl MultiWorkspace {
+@@ -445,7 +520,7 @@ impl MultiWorkspace {
      }
  
      pub fn close_sidebar_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1765,7 +2183,7 @@ index 0946495883..b28c435fa3 100644
              return;
          }
  
-@@ -458,6 +523,10 @@ impl MultiWorkspace {
+@@ -458,6 +533,10 @@ impl MultiWorkspace {
          if !self.multi_workspace_enabled(cx) {
              return;
          }
@@ -1776,7 +2194,7 @@ index 0946495883..b28c435fa3 100644
  
          if self.sidebar_open() {
              let sidebar_is_focused = self
-@@ -502,7 +571,12 @@ impl MultiWorkspace {
+@@ -502,7 +581,12 @@ impl MultiWorkspace {
      fn apply_open_sidebar(&mut self, cx: &mut Context<Self>) {
          self.sidebar_open = true;
          self.retain_active_workspace(cx);
@@ -1790,7 +2208,16 @@ index 0946495883..b28c435fa3 100644
          for workspace in self.workspaces().cloned().collect::<Vec<_>>() {
              workspace.update(cx, |workspace, _cx| {
                  workspace.set_sidebar_focus_handle(sidebar_focus_handle.clone());
-@@ -1999,7 +2073,10 @@ impl Render for MultiWorkspace {
+@@ -1432,7 +1516,7 @@ impl MultiWorkspace {
+     }
+ 
+     fn sync_sidebar_to_workspace(&self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
+-        if self.sidebar_open() {
++        if self.sidebar_render_state(cx).open {
+             let sidebar_focus_handle = self.sidebar.as_ref().map(|s| s.focus_handle(cx));
+             workspace.update(cx, |workspace, _| {
+                 workspace.set_sidebar_focus_handle(sidebar_focus_handle);
+@@ -1999,7 +2083,10 @@ impl Render for MultiWorkspace {
          let sidebar_side = self.sidebar_side(cx);
          let sidebar_on_right = sidebar_side == SidebarSide::Right;
  
@@ -1803,11 +2230,15 @@ index 0946495883..b28c435fa3 100644
                  let weak = cx.weak_entity();
  
 diff --git a/crates/workspace/src/status_bar.rs b/crates/workspace/src/status_bar.rs
-index a3966a06a3..3d1cc2b98a 100644
+index a3966a06a3..b8075ca416 100644
 --- a/crates/workspace/src/status_bar.rs
 +++ b/crates/workspace/src/status_bar.rs
-@@ -90,7 +90,7 @@ impl SidebarStatus {
-                     open: mw.sidebar_open() && enabled,
+@@ -87,10 +87,10 @@ impl SidebarStatus {
+                 let mw = mw.read(cx);
+                 let enabled = mw.multi_workspace_enabled(cx);
+                 Self {
+-                    open: mw.sidebar_open() && enabled,
++                    open: mw.sidebar_render_state(cx).open,
                      side: mw.sidebar_side(cx),
                      has_notifications: mw.sidebar_has_notifications(cx),
 -                    show_toggle: enabled,
@@ -1816,7 +2247,7 @@ index a3966a06a3..3d1cc2b98a 100644
              })
              .unwrap_or_default()
 diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
-index 2ee0e41367..97af71465a 100644
+index 2ee0e41367..c28a687e60 100644
 --- a/crates/workspace/src/workspace.rs
 +++ b/crates/workspace/src/workspace.rs
 @@ -31,11 +31,12 @@ mod workspace_settings;
@@ -1837,31 +2268,42 @@ index 2ee0e41367..97af71465a 100644
  };
  pub use path_list::{PathList, SerializedPathList};
  pub use remote::{
-@@ -340,15 +341,19 @@ pub const TRAFFIC_LIGHT_INSET: Pixels = px(9.);
+@@ -340,15 +341,27 @@ pub const TRAFFIC_LIGHT_INSET: Pixels = px(9.);
  /// then (and with the title bar in place) they keep the stock inset. The headers' reserved width
  /// (`TRAFFIC_LIGHT_PADDING`) assumes that stock inset, so the centred lights leave up to ~2.5px
  /// more room before the first tab (compact density): not worth reading the live size every frame.
--#[cfg(target_os = "macos")]
--fn update_traffic_light_position(window: &Window, cx: &App) {
--    let inset = match window.traffic_light_size() {
 +pub fn traffic_light_inset(window: &Window, cx: &App) -> Pixels {
-+    match window.traffic_light_size() {
-         Some(button) if title_bar_in_status_bar(cx) => {
-             // A header shorter than the buttons (tiny UI font) would push them off the window.
-             ((ui::Tab::content_height(cx) - button.height) / 2.).max(px(0.))
-         }
-         _ => TRAFFIC_LIGHT_INSET,
--    };
++    #[cfg(target_os = "macos")]
++    {
++        match window.traffic_light_size() {
++            Some(button) if title_bar_in_status_bar(cx) => {
++                // A header shorter than the buttons (tiny UI font) would push them off the window.
++                ((ui::Tab::content_height(cx) - button.height) / 2.).max(px(0.))
++            }
++            _ => TRAFFIC_LIGHT_INSET,
++        }
++    }
++    #[cfg(not(target_os = "macos"))]
++    {
++        let _ = (window, cx);
++        TRAFFIC_LIGHT_INSET
 +    }
 +}
 +
-+#[cfg(target_os = "macos")]
-+fn update_traffic_light_position(window: &Window, cx: &App) {
+ #[cfg(target_os = "macos")]
+ fn update_traffic_light_position(window: &Window, cx: &App) {
+-    let inset = match window.traffic_light_size() {
+-        Some(button) if title_bar_in_status_bar(cx) => {
+-            // A header shorter than the buttons (tiny UI font) would push them off the window.
+-            ((ui::Tab::content_height(cx) - button.height) / 2.).max(px(0.))
+-        }
+-        _ => TRAFFIC_LIGHT_INSET,
+-    };
 +    let inset = traffic_light_inset(window, cx);
      window.set_traffic_light_position(point(inset, inset));
  }
  
-@@ -10171,7 +10176,15 @@ impl Render for Workspace {
+@@ -10171,7 +10184,15 @@ impl Render for Workspace {
                                          })
                                          .into_any_element(),
                                  };

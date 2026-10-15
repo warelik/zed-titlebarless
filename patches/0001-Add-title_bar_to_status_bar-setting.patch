@@ -29,6 +29,10 @@ The strips beside the traffic lights keep the title bar's drag and
 double-click-to-zoom behaviour. The empty space of the tab bar only
 drags the window: a double-click there keeps opening a new file
 instead of zooming.
+
+Deserialization in WorkspaceSettings::from_settings uses unwrap_or(false)
+for title_bar_to_status_bar, ensuring that omitting the key or parsing
+partial settings falls back cleanly to stock behavior without panicking.
 ---
  assets/settings/default.json                  |   3 +
  crates/agent_ui/src/threads_archive_view.rs   |  12 +-
@@ -1014,7 +1018,7 @@ index 7d50ce7297..715ed113bf 100644
      async fn test_window_title_format_empty_project(cx: &mut TestAppContext) {
          init_test(cx);
 diff --git a/crates/workspace/src/workspace_settings.rs b/crates/workspace/src/workspace_settings.rs
-index eff3a0a93c..cf162095b1 100644
+index eff3a0a93c..830b7b2145 100644
 --- a/crates/workspace/src/workspace_settings.rs
 +++ b/crates/workspace/src/workspace_settings.rs
 @@ -45,6 +45,7 @@ pub struct WorkspaceSettings {
@@ -1029,7 +1033,7 @@ index eff3a0a93c..cf162095b1 100644
              fullscreen_mode: workspace.fullscreen_mode.unwrap(),
              zoomed_padding: workspace.zoomed_padding.unwrap(),
              window_decorations: workspace.window_decorations.unwrap(),
-+            title_bar_to_status_bar: workspace.title_bar_to_status_bar.unwrap(),
++            title_bar_to_status_bar: workspace.title_bar_to_status_bar.unwrap_or(false),
              focus_follows_mouse: FocusFollowsMouse {
                  enabled: workspace
                      .focus_follows_mouse
