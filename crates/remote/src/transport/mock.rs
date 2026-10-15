@@ -453,7 +453,9 @@ impl RemoteClientDelegate for MockDelegate {
     fn ask_password(
         &self,
         _prompt: String,
-        _sender: futures::channel::oneshot::Sender<askpass::EncryptedPassword>,
+        _sender: futures::channel::oneshot::Sender<
+            Result<askpass::EncryptedPassword, askpass::AskPassCancelReason>,
+        >,
         _cancellation: futures::channel::oneshot::Receiver<()>,
         _cx: &mut AsyncApp,
     ) {
