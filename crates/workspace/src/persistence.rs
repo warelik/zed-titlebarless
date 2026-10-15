@@ -5958,11 +5958,12 @@ mod tests {
     #[gpui::test]
     async fn test_remove_workspace_clears_session_binding(cx: &mut gpui::TestAppContext) {
         crate::tests::init_test(cx);
+        cx.update(crate::register_serializable_item::<TestItem>);
 
         let fs = fs::FakeFs::new(cx.executor());
         let dir = unique_test_dir(&fs, "remove").await;
         let project1 = Project::test(fs.clone(), [], cx).await;
-        let project2 = Project::test(fs.clone(), [], cx).await;
+        let project2 = Project::test(fs.clone(), [dir.as_path()], cx).await;
 
         let (multi_workspace, cx) =
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project1.clone(), window, cx));
@@ -5980,12 +5981,13 @@ mod tests {
         // Get a real DB id for workspace2 so the row actually exists.
         let workspace2_db_id = db.next_id().await.unwrap();
 
-        multi_workspace.update_in(cx, |mw, window, cx| {
+        let workspace2 = multi_workspace.update_in(cx, |mw, window, cx| {
             let workspace = cx.new(|cx| crate::Workspace::test_new(project2.clone(), window, cx));
             workspace.update(cx, |ws: &mut crate::Workspace, _cx| {
                 ws.set_database_id(workspace2_db_id)
             });
             mw.add(workspace.clone(), window, cx);
+            workspace
         });
 
         // Save a full workspace row to the DB directly.
@@ -6015,25 +6017,51 @@ mod tests {
             "Workspace2 should exist in DB before removal"
         );
 
-        // Remove workspace at index 1 (the second workspace).
-        multi_workspace.update_in(cx, |mw, window, cx| {
-            let ws = mw.workspaces().nth(1).unwrap().clone();
-            mw.remove([ws], RemovalIntent::CloseProject, window, cx)
-                .detach_and_log_err(cx);
+        let item_ids = workspace2.update_in(cx, |workspace, window, cx| {
+            let first = workspace.active_pane().clone();
+            let second =
+                workspace.split_pane(first.clone(), crate::SplitDirection::Right, window, cx);
+            let mut item_ids = Vec::new();
+            for pane in [first, second] {
+                let item = cx.new(TestItem::new);
+                item_ids.push(item.entity_id().as_u64());
+                pane.update(cx, |pane, cx| {
+                    pane.add_item(Box::new(item), false, false, None, window, cx);
+                });
+            }
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.set_open(true, window, cx);
+            });
+            item_ids
         });
 
-        cx.run_until_parked();
-
-        // The row should still exist so it continues to appear in recent
-        // projects, but the session binding should be cleared so it is not
-        // restored as part of any future session.
         assert!(
-            db.workspace_for_id(workspace2_db_id).is_some(),
-            "Removed workspace's DB row should be preserved for recent projects"
+            multi_workspace
+                .update_in(cx, |mw, window, cx| {
+                    mw.remove([workspace2], RemovalIntent::CloseProject, window, cx)
+                })
+                .await
+                .unwrap()
         );
 
+        let saved = db.workspace_for_id(workspace2_db_id).unwrap();
+        assert_eq!(saved.paths.paths(), std::slice::from_ref(&dir));
+        assert_eq!(saved.window_id, None);
+        assert!(saved.docks.left.visible);
+        let SerializedPaneGroup::Group { children, .. } = saved.center_group else {
+            panic!("the workspace's final split layout should have been saved");
+        };
+        let saved_item_ids = children
+            .iter()
+            .map(|pane| match pane {
+                SerializedPaneGroup::Pane(pane) => pane.children[0].item_id,
+                _ => panic!("expected a pane, got {pane:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(saved_item_ids, item_ids);
+
         let session_workspaces = db
-            .last_session_workspace_locations("remove-test-session", None, fs.as_ref())
+            .last_session_workspace_locations(&session_id, None, fs.as_ref())
             .await
             .unwrap();
         let restored_ids: Vec<WorkspaceId> = session_workspaces
