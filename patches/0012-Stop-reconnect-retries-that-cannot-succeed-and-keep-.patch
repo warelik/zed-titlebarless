@@ -1,0 +1,1975 @@
+From 9f29d1ecd207ed44f17af631780c0031563af557 Mon Sep 17 00:00:00 2001
+From: warelik <warelik@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 23:49:19 +0300
+Subject: [PATCH 12/12] Stop reconnect retries that cannot succeed and keep
+ reconnect available
+
+An automatic reconnect can reuse a delegate whose password prompt has
+already been dismissed. Treating its dropped response like an ordinary
+transport failure repeats attempts that cannot succeed without user
+interaction and leaves the workspace without a useful reconnect action.
+
+Carry explicit prompt-unavailable and user-cancelled outcomes through
+askpass, SSH and the shared connection pool. Stop the reconnect loop for
+those outcomes and verified OpenSSH authentication failures, while keeping
+the existing retry schedule for transient transport and proxy failures.
+Match the complete authentication-method list so a parenthesized OS
+permission error is not mistaken for failed SSH authentication.
+
+Notify the project when remote state changes and retain the actual
+disconnect reason. Restore the existing disconnected overlay after a
+cancelled or failed manual attempt only if its original workspace is still
+displayed and disconnected. A successful workspace replacement must not
+reopen an overlay on the obsolete workspace or steal focus.
+
+Keep legacy askpass cancellation ordered after its response channel is
+closed, so ending a remote Git operation rejects late replies without
+leaving a detached adapter waiting for input. Preserve normal successful
+password handoff and cancellation notification ordering as well.
+---
+ crates/askpass/src/askpass.rs                 | 240 ++++++--
+ crates/git/src/repository.rs                  |   3 +
+ crates/project/src/project.rs                 |   2 +
+ crates/project_benchmarks/src/main.rs         |   4 +-
+ .../src/disconnected_overlay.rs               | 531 ++++++++++++++++--
+ .../recent_projects/src/remote_connections.rs |  53 ++
+ crates/remote/src/remote.rs                   |   7 +-
+ crates/remote/src/remote_client.rs            | 318 ++++++++++-
+ crates/remote/src/transport/mock.rs           |   4 +-
+ crates/remote/src/transport/ssh.rs            | 171 +++++-
+ .../src/remote_connection.rs                  | 102 +++-
+ 11 files changed, 1287 insertions(+), 148 deletions(-)
+
+diff --git a/crates/askpass/src/askpass.rs b/crates/askpass/src/askpass.rs
+index 6579538a2650bf3eb48cacbe3bd3458c8630fccd..d8235082f295d55bd4591d603dadcf2373bf1927 100644
+--- a/crates/askpass/src/askpass.rs
++++ b/crates/askpass/src/askpass.rs
+@@ -36,18 +36,59 @@ use util::{paths::PathExt, shell::ShellKind};
+ /// without needing a wrapper script.
+ static ASKPASS_PROGRAM: OnceLock<std::path::PathBuf> = OnceLock::new();
+ 
+-#[derive(PartialEq, Eq)]
++#[derive(PartialEq, Eq, Debug, Clone, Copy)]
++pub enum AskPassCancelReason {
++    PromptUnavailable,
++    CancelledByUser,
++}
++
++#[derive(PartialEq, Eq, Debug)]
+ pub enum AskPassResult {
++    PromptUnavailable,
+     CancelledByUser,
+     Timedout,
+ }
+ 
++fn askpass_result_from_cancel_reason(
++    reason: Result<AskPassCancelReason, oneshot::Canceled>,
++) -> AskPassResult {
++    match reason {
++        Ok(AskPassCancelReason::PromptUnavailable) => AskPassResult::PromptUnavailable,
++        Ok(AskPassCancelReason::CancelledByUser) | Err(_) => AskPassResult::CancelledByUser,
++    }
++}
++
+ type PasswordPrompt = (
+     String,
+-    oneshot::Sender<EncryptedPassword>,
++    oneshot::Sender<Result<EncryptedPassword, AskPassCancelReason>>,
+     oneshot::Receiver<()>,
+ );
+ 
++async fn run_askpass(
++    askpass_opened_rx: oneshot::Receiver<()>,
++    askpass_kill_master_rx: oneshot::Receiver<AskPassCancelReason>,
++    executor: BackgroundExecutor,
++    timeout: Option<Duration>,
++) -> AskPassResult {
++    let timer = async move {
++        match timeout {
++            Some(timeout) => executor.timer(timeout).await,
++            None => std::future::pending().await,
++        }
++    };
++
++    select_biased! {
++        _ = askpass_opened_rx.fuse() => {
++            // Note: this await can only resolve after we are dropped.
++            askpass_result_from_cancel_reason(askpass_kill_master_rx.await)
++        }
++
++        _ = futures::FutureExt::fuse(timer) => {
++            AskPassResult::Timedout
++        }
++    }
++}
++
+ pub struct AskPassDelegate {
+     tx: mpsc::UnboundedSender<PasswordPrompt>,
+     executor: BackgroundExecutor,
+@@ -77,6 +118,39 @@ impl AskPassDelegate {
+         ) + Send
+         + Sync
+         + 'static,
++    ) -> Self {
++        Self::new_with_reason(cx, move |prompt, response_sender, cancellation, cx| {
++            let (password_sender, password_receiver) = oneshot::channel();
++            let (prompt_cancellation_sender, prompt_cancellation_receiver) = oneshot::channel();
++            cx.spawn(async move |_cx| {
++                match futures::future::select(password_receiver, cancellation).await {
++                    futures::future::Either::Left((password, cancellation)) => {
++                        response_sender
++                            .send(password.map_err(|_| AskPassCancelReason::CancelledByUser))
++                            .ok();
++                        cancellation.await.ok();
++                    }
++                    futures::future::Either::Right((_, password_receiver)) => {
++                        drop(password_receiver)
++                    }
++                }
++                drop(prompt_cancellation_sender);
++            })
++            .detach();
++            password_prompt(prompt, password_sender, prompt_cancellation_receiver, cx);
++        })
++    }
++
++    pub fn new_with_reason(
++        cx: &mut AsyncApp,
++        password_prompt: impl Fn(
++            String,
++            oneshot::Sender<Result<EncryptedPassword, AskPassCancelReason>>,
++            oneshot::Receiver<()>,
++            &mut AsyncApp,
++        ) + Send
++        + Sync
++        + 'static,
+     ) -> Self {
+         let (tx, mut rx) = mpsc::unbounded::<PasswordPrompt>();
+         let task = cx.spawn(async move |cx: &mut AsyncApp| {
+@@ -101,7 +175,26 @@ impl AskPassDelegate {
+                 .await
+                 .ok()?;
+             let _cancellation_sender = cancellation_sender;
+-            response_receiver.await.ok()
++            response_receiver.await.ok()?.ok()
++        })
++    }
++
++    pub fn ask_password_with_reason(
++        &self,
++        prompt: String,
++    ) -> Task<Result<EncryptedPassword, AskPassCancelReason>> {
++        let mut this_tx = self.tx.clone();
++        self.executor.spawn(async move {
++            let (response_sender, response_receiver) = oneshot::channel();
++            let (cancellation_sender, cancellation_receiver) = oneshot::channel();
++            this_tx
++                .send((prompt, response_sender, cancellation_receiver))
++                .await
++                .map_err(|_| AskPassCancelReason::PromptUnavailable)?;
++            let _cancellation_sender = cancellation_sender;
++            response_receiver
++                .await
++                .unwrap_or(Err(AskPassCancelReason::CancelledByUser))
+         })
+     }
+ }
+@@ -111,7 +204,7 @@ pub struct AskPassSession {
+     secret: std::sync::Arc<std::sync::Mutex<Option<EncryptedPassword>>>,
+     askpass_task: PasswordProxy,
+     askpass_opened_rx: Option<oneshot::Receiver<()>>,
+-    askpass_kill_master_rx: Option<oneshot::Receiver<()>>,
++    askpass_kill_master_rx: Option<oneshot::Receiver<AskPassCancelReason>>,
+     executor: BackgroundExecutor,
+ }
+ 
+@@ -133,7 +226,8 @@ impl AskPassSession {
+ 
+         let askpass_opened_tx = Arc::new(Mutex::new(Some(askpass_opened_tx)));
+ 
+-        let (askpass_kill_master_tx, askpass_kill_master_rx) = oneshot::channel::<()>();
++        let (askpass_kill_master_tx, askpass_kill_master_rx) =
++            oneshot::channel::<AskPassCancelReason>();
+         let kill_tx = Arc::new(Mutex::new(Some(askpass_kill_master_tx)));
+ 
+         let get_password = {
+@@ -142,7 +236,7 @@ impl AskPassSession {
+             #[cfg(target_os = "windows")]
+             let askpass_secret = secret.clone();
+             move |prompt| {
+-                let prompt = delegate.ask_password(prompt);
++                let prompt = delegate.ask_password_with_reason(prompt);
+                 let kill_tx = kill_tx.clone();
+                 let askpass_opened_tx = askpass_opened_tx.clone();
+                 #[cfg(target_os = "windows")]
+@@ -151,17 +245,20 @@ impl AskPassSession {
+                     if let Some(askpass_opened_tx) = askpass_opened_tx.lock().await.take() {
+                         askpass_opened_tx.send(()).ok();
+                     }
+-                    if let Some(password) = prompt.await {
+-                        #[cfg(target_os = "windows")]
+-                        {
+-                            askpass_secret.lock().unwrap().replace(password.clone());
++                    match prompt.await {
++                        Ok(password) => {
++                            #[cfg(target_os = "windows")]
++                            {
++                                askpass_secret.lock().unwrap().replace(password.clone());
++                            }
++                            ControlFlow::Continue(Ok(password))
+                         }
+-                        ControlFlow::Continue(Ok(password))
+-                    } else {
+-                        if let Some(kill_tx) = kill_tx.lock().await.take() {
+-                            kill_tx.send(()).ok();
++                        Err(reason) => {
++                            if let Some(kill_tx) = kill_tx.lock().await.take() {
++                                kill_tx.send(reason).ok();
++                            }
++                            ControlFlow::Break(())
+                         }
+-                        ControlFlow::Break(())
+                     }
+                 })
+             }
+@@ -195,25 +292,13 @@ impl AskPassSession {
+             .askpass_kill_master_rx
+             .take()
+             .expect("Only call run once");
+-        let executor = self.executor.clone();
+-        let timer = async move {
+-            match timeout {
+-                Some(timeout) => executor.timer(timeout).await,
+-                None => std::future::pending().await,
+-            }
+-        };
+-
+-        select_biased! {
+-            _ = askpass_opened_rx.fuse() => {
+-                // Note: this await can only resolve after we are dropped.
+-                askpass_kill_master_rx.await.ok();
+-                AskPassResult::CancelledByUser
+-            }
+-
+-            _ = futures::FutureExt::fuse(timer) => {
+-                AskPassResult::Timedout
+-            }
+-        }
++        run_askpass(
++            askpass_opened_rx,
++            askpass_kill_master_rx,
++            self.executor.clone(),
++            timeout,
++        )
++        .await
+     }
+ 
+     /// This will return the password that was last set by the askpass script.
+@@ -620,6 +705,25 @@ mod tests {
+     use super::*;
+     use gpui::TestAppContext;
+ 
++    async fn run_askpass_with_injected_cancel_reason(
++        cx: &mut TestAppContext,
++        reason: AskPassCancelReason,
++    ) -> AskPassResult {
++        let (opened_sender, opened_receiver) = oneshot::channel();
++        let (cancel_sender, cancel_receiver) = oneshot::channel();
++        let executor = cx.background_executor.clone();
++        let run_task = cx.executor().spawn(async move {
++            run_askpass(opened_receiver, cancel_receiver, executor, None).await
++        });
++        opened_sender
++            .send(())
++            .expect("askpass run should await the opened channel");
++        cancel_sender
++            .send(reason)
++            .expect("askpass run should await the cancellation channel");
++        run_task.await
++    }
++
+     #[gpui::test]
+     async fn dropping_password_request_cancels_prompt(cx: &mut TestAppContext) {
+         let (prompt_sender, mut prompt_receiver) = mpsc::unbounded();
+@@ -641,6 +745,72 @@ mod tests {
+         drop(password_request);
+ 
+         assert!(cancellation.await.is_err());
+-        drop(response_sender);
++        assert!(
++            response_sender
++                .send(
++                    EncryptedPassword::try_from("secret")
++                        .expect("test password should be encryptable")
++                )
++                .is_err()
++        );
++    }
++
++    #[gpui::test]
++    async fn ask_password_preserves_prompt_unavailable(cx: &mut TestAppContext) {
++        let delegate =
++            AskPassDelegate::new_with_reason(&mut cx.to_async(), |_, response_sender, _, _| {
++                response_sender
++                    .send(Err(AskPassCancelReason::PromptUnavailable))
++                    .ok();
++            });
++
++        assert!(matches!(
++            delegate
++                .ask_password_with_reason("Password:".to_string())
++                .await,
++            Err(AskPassCancelReason::PromptUnavailable)
++        ));
++    }
++
++    #[gpui::test]
++    async fn ask_password_preserves_cancelled_by_user(cx: &mut TestAppContext) {
++        let delegate =
++            AskPassDelegate::new_with_reason(&mut cx.to_async(), |_, response_sender, _, _| {
++                response_sender
++                    .send(Err(AskPassCancelReason::CancelledByUser))
++                    .ok();
++            });
++
++        assert!(matches!(
++            delegate
++                .ask_password_with_reason("Password:".to_string())
++                .await,
++            Err(AskPassCancelReason::CancelledByUser)
++        ));
++    }
++
++    #[test]
++    fn askpass_result_preserves_prompt_failure_reason() {
++        assert_eq!(
++            askpass_result_from_cancel_reason(Ok(AskPassCancelReason::PromptUnavailable)),
++            AskPassResult::PromptUnavailable
++        );
++        assert_eq!(
++            askpass_result_from_cancel_reason(Ok(AskPassCancelReason::CancelledByUser)),
++            AskPassResult::CancelledByUser
++        );
++    }
++
++    #[gpui::test]
++    async fn askpass_run_propagates_injected_reason_at_channel_boundary(cx: &mut TestAppContext) {
++        assert_eq!(
++            run_askpass_with_injected_cancel_reason(cx, AskPassCancelReason::PromptUnavailable)
++                .await,
++            AskPassResult::PromptUnavailable
++        );
++        assert_eq!(
++            run_askpass_with_injected_cancel_reason(cx, AskPassCancelReason::CancelledByUser).await,
++            AskPassResult::CancelledByUser
++        );
+     }
+ }
+diff --git a/crates/git/src/repository.rs b/crates/git/src/repository.rs
+index de42e3ec1e9de529884ba5e15ac6bdae0ed3af49..351ea6bfac8d7cf1736bc3a6c1ee8c963f057d45 100644
+--- a/crates/git/src/repository.rs
++++ b/crates/git/src/repository.rs
+@@ -4095,6 +4095,9 @@ async fn run_askpass_command(
+         // hooks), so completion is determined by the process itself.
+         result = ask_pass.run(None).fuse() => {
+             match result {
++                AskPassResult::PromptUnavailable => {
++                    Err(anyhow!("Password prompt unavailable"))?
++                }
+                 AskPassResult::CancelledByUser => {
+                     Err(anyhow!(REMOTE_CANCELLED_BY_USER))?
+                 }
+diff --git a/crates/project/src/project.rs b/crates/project/src/project.rs
+index 197db63dcf651193a11ede3a8090cc063ecc66a7..1cfe0d15bfed657c7642dc52459ffa400ae8a916 100644
+--- a/crates/project/src/project.rs
++++ b/crates/project/src/project.rs
+@@ -1671,6 +1671,8 @@ impl Project {
+                 last_worktree_paths: WorktreePaths::default(),
+             };
+ 
++            cx.observe(&remote, |_, _, cx| cx.notify()).detach();
++
+             // remote server -> local machine handlers
+             remote_proto.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &cx.entity());
+             remote_proto.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &this.buffer_store);
+diff --git a/crates/project_benchmarks/src/main.rs b/crates/project_benchmarks/src/main.rs
+index 60afe8065900788eeae512399fd22a5912d47f16..dc9ff100dc911902b29c1c9ebb23680796f05723 100644
+--- a/crates/project_benchmarks/src/main.rs
++++ b/crates/project_benchmarks/src/main.rs
+@@ -48,7 +48,7 @@ impl RemoteClientDelegate for BenchmarkRemoteClient {
+     fn ask_password(
+         &self,
+         prompt: String,
+-        tx: oneshot::Sender<EncryptedPassword>,
++        tx: oneshot::Sender<Result<EncryptedPassword, askpass::AskPassCancelReason>>,
+         _cancellation: oneshot::Receiver<()>,
+         _cx: &mut gpui::AsyncApp,
+     ) {
+@@ -56,7 +56,7 @@ impl RemoteClientDelegate for BenchmarkRemoteClient {
+         match rpassword::prompt_password(&prompt) {
+             Ok(password) => match EncryptedPassword::try_from(password.as_ref()) {
+                 Ok(encrypted) => {
+-                    if tx.send(encrypted).is_err() {
++                    if tx.send(Ok(encrypted)).is_err() {
+                         eprintln!("Failed to send password");
+                     }
+                 }
+diff --git a/crates/recent_projects/src/disconnected_overlay.rs b/crates/recent_projects/src/disconnected_overlay.rs
+index e78762eb283160f84b163771b9835188d2ffce4a..719f30047e151cf141ccf0848715ff29af29cf49 100644
+--- a/crates/recent_projects/src/disconnected_overlay.rs
++++ b/crates/recent_projects/src/disconnected_overlay.rs
+@@ -1,8 +1,12 @@
+-use gpui::{ClickEvent, DismissEvent, EventEmitter, FocusHandle, Focusable, Render, WeakEntity};
++use gpui::{
++    AsyncWindowContext, ClickEvent, DismissEvent, EntityId, EventEmitter, FocusHandle, Focusable,
++    Render, SharedString, WeakEntity, WindowHandle,
++};
+ use project::project_settings::ProjectSettings;
+ use remote::RemoteConnectionOptions;
+ use settings::Settings;
+ use ui::{ElevationIndex, Modal, ModalFooter, ModalHeader, Section, prelude::*};
++use util::ResultExt as _;
+ use workspace::{
+     ModalView, MultiWorkspace, OpenOptions, Workspace, notifications::DetachAndPromptErr,
+ };
+@@ -11,7 +15,7 @@ use crate::open_remote_project;
+ 
+ enum Host {
+     CollabGuestProject,
+-    RemoteServerProject(RemoteConnectionOptions, bool),
++    RemoteServerProject(RemoteConnectionOptions, bool, Option<SharedString>),
+ }
+ 
+ pub struct DisconnectedOverlay {
+@@ -52,7 +56,7 @@ impl DisconnectedOverlay {
+         cx.subscribe_in(
+             workspace.project(),
+             window,
+-            |workspace, project, event, window, cx| {
++            |workspace, _project, event, window, cx| {
+                 if !matches!(
+                     event,
+                     project::Event::DisconnectedFromHost
+@@ -60,50 +64,73 @@ impl DisconnectedOverlay {
+                 ) {
+                     return;
+                 }
+-                let handle = cx.entity().downgrade();
+-
+-                let remote_connection_options = project.read(cx).remote_connection_options(cx);
+-                let host = if let Some(remote_connection_options) = remote_connection_options {
+-                    Host::RemoteServerProject(
+-                        remote_connection_options,
+-                        matches!(
+-                            event,
+-                            project::Event::DisconnectedFromRemote {
+-                                server_not_running: true
+-                            }
+-                        ),
+-                    )
+-                } else {
+-                    Host::CollabGuestProject
+-                };
+-
+-                workspace.toggle_modal(window, cx, |_, cx| DisconnectedOverlay {
+-                    finished: false,
+-                    workspace: handle,
+-                    host,
+-                    focus_handle: cx.focus_handle(),
+-                });
++                let server_not_running = matches!(
++                    event,
++                    project::Event::DisconnectedFromRemote {
++                        server_not_running: true
++                    }
++                );
++                Self::show_for_workspace(workspace, server_not_running, window, cx);
+             },
+         )
+         .detach();
+     }
+ 
++    fn show_for_workspace(
++        workspace: &mut Workspace,
++        server_not_running: bool,
++        window: &mut Window,
++        cx: &mut Context<Workspace>,
++    ) {
++        if workspace.active_modal::<Self>(cx).is_some() {
++            return;
++        }
++
++        let handle = cx.entity().downgrade();
++        let project = workspace.project();
++        let remote_connection_options = project.read(cx).remote_connection_options(cx);
++        let host = if let Some(remote_connection_options) = remote_connection_options {
++            let reason = project
++                .read(cx)
++                .remote_client()
++                .and_then(|remote_client| remote_client.read(cx).disconnect_reason());
++            Host::RemoteServerProject(remote_connection_options, server_not_running, reason)
++        } else {
++            Host::CollabGuestProject
++        };
++
++        workspace.toggle_modal(window, cx, |_, cx| DisconnectedOverlay {
++            finished: false,
++            workspace: handle,
++            host,
++            focus_handle: cx.focus_handle(),
++        });
++    }
++
+     fn handle_reconnect(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+         self.finished = true;
+         cx.emit(DismissEvent);
+ 
+-        if let Host::RemoteServerProject(remote_connection_options, _) = &self.host {
+-            self.reconnect_to_remote_project(remote_connection_options.clone(), window, cx);
++        if let Host::RemoteServerProject(remote_connection_options, server_not_running, _) =
++            &self.host
++        {
++            self.reconnect_to_remote_project(
++                remote_connection_options.clone(),
++                *server_not_running,
++                window,
++                cx,
++            );
+         }
+     }
+ 
+     fn reconnect_to_remote_project(
+         &self,
+         connection_options: RemoteConnectionOptions,
++        server_not_running: bool,
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
+-        let Some(workspace) = self.workspace.upgrade() else {
++        let Some(workspace_entity) = self.workspace.upgrade() else {
+             return;
+         };
+ 
+@@ -111,16 +138,19 @@ impl DisconnectedOverlay {
+             return;
+         };
+ 
+-        let app_state = workspace.read(cx).app_state().clone();
+-        let paths = workspace
++        let app_state = workspace_entity.read(cx).app_state().clone();
++        let paths = workspace_entity
+             .read(cx)
+             .root_paths(cx)
+             .iter()
+             .map(|path| path.to_path_buf())
+             .collect();
++        let workspace_id = workspace_entity.entity_id();
++        let workspace = workspace_entity.downgrade();
++        drop(workspace_entity);
+ 
+         cx.spawn_in(window, async move |_, cx| {
+-            open_remote_project(
++            let result = open_remote_project(
+                 connection_options,
+                 paths,
+                 app_state,
+@@ -130,27 +160,64 @@ impl DisconnectedOverlay {
+                 },
+                 cx,
+             )
+-            .await?;
+-            Ok(())
++            .await;
++
++            Self::finish_reconnect_attempt(
++                result,
++                window_handle,
++                workspace,
++                workspace_id,
++                server_not_running,
++                cx,
++            )
+         })
+         .detach_and_prompt_err("Failed to reconnect", window, cx, |_, _, _| None);
+     }
+ 
+-    fn cancel(&mut self, _: &menu::Cancel, _: &mut Window, cx: &mut Context<Self>) {
+-        self.finished = true;
+-        cx.emit(DismissEvent)
+-    }
+-}
++    fn finish_reconnect_attempt(
++        result: anyhow::Result<WindowHandle<MultiWorkspace>>,
++        window_handle: WindowHandle<MultiWorkspace>,
++        workspace: WeakEntity<Workspace>,
++        workspace_id: EntityId,
++        server_not_running: bool,
++        cx: &mut AsyncWindowContext,
++    ) -> anyhow::Result<()> {
++        let is_old_workspace_displayed = window_handle
++            .read_with(cx, |multi_workspace, _| {
++                multi_workspace.workspace().entity_id() == workspace_id
++            })
++            .log_err()
++            .unwrap_or(false);
++        if is_old_workspace_displayed {
++            let is_still_disconnected = workspace
++                .read_with(cx, |workspace, cx| {
++                    workspace
++                        .project()
++                        .read(cx)
++                        .remote_client()
++                        .is_some_and(|remote_client| remote_client.read(cx).is_disconnected())
++                })
++                .log_err()
++                .unwrap_or(false);
++            if is_still_disconnected {
++                workspace
++                    .update_in(cx, |workspace, window, cx| {
++                        Self::show_for_workspace(workspace, server_not_running, window, cx);
++                    })
++                    .log_err();
++            }
++        }
+ 
+-impl Render for DisconnectedOverlay {
+-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+-        let can_reconnect = matches!(self.host, Host::RemoteServerProject(..));
++        result?;
++        Ok(())
++    }
+ 
+-        let message = match &self.host {
++    fn message_for_host(host: &Host, cx: &App) -> String {
++        match host {
+             Host::CollabGuestProject => {
+                 "Your connection to the remote project has been lost.".to_string()
+             }
+-            Host::RemoteServerProject(options, server_not_running) => {
++            Host::RemoteServerProject(options, server_not_running, reason) => {
+                 let autosave = if ProjectSettings::get_global(cx)
+                     .session
+                     .restore_unsaved_buffers
+@@ -159,17 +226,36 @@ impl Render for DisconnectedOverlay {
+                 } else {
+                     ""
+                 };
+-                let reason = if *server_not_running {
+-                    "process exiting unexpectedly"
++                if let Some(reason) = reason {
++                    format!(
++                        "Your connection to {} has been lost: {reason}.{autosave}",
++                        options.display_name(),
++                    )
+                 } else {
+-                    "not responding"
+-                };
+-                format!(
+-                    "Your connection to {} has been lost due to the server {reason}.{autosave}",
+-                    options.display_name(),
+-                )
++                    let reason = if *server_not_running {
++                        "process exiting unexpectedly"
++                    } else {
++                        "not responding"
++                    };
++                    format!(
++                        "Your connection to {} has been lost due to the server {reason}.{autosave}",
++                        options.display_name(),
++                    )
++                }
+             }
+-        };
++        }
++    }
++
++    fn cancel(&mut self, _: &menu::Cancel, _: &mut Window, cx: &mut Context<Self>) {
++        self.finished = true;
++        cx.emit(DismissEvent)
++    }
++}
++
++impl Render for DisconnectedOverlay {
++    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
++        let can_reconnect = matches!(self.host, Host::RemoteServerProject(..));
++        let message = Self::message_for_host(&self.host, cx);
+ 
+         div()
+             .track_focus(&self.focus_handle(cx))
+@@ -212,3 +298,342 @@ impl Render for DisconnectedOverlay {
+             )
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use gpui::{Entity, TestAppContext, VisualTestContext};
++    use project::Project;
++    use remote::RemoteClient;
++    use rpc::proto;
++    use std::sync::Arc;
++    use workspace::AppState;
++
++    #[gpui::test]
++    fn test_overlay_message_includes_retained_disconnect_reason(cx: &mut TestAppContext) {
++        cx.update(|cx| {
++            AppState::test(cx);
++            crate::init(cx);
++            editor::init(cx);
++        });
++        let reason = "authentication failed: Permission denied (publickey,password)".to_string();
++        let host = Host::RemoteServerProject(
++            RemoteConnectionOptions::Ssh(remote::SshConnectionOptions::default()),
++            false,
++            Some(reason.clone().into()),
++        );
++
++        let message = cx.update(|cx| DisconnectedOverlay::message_for_host(&host, cx));
++        assert!(message.contains(&reason));
++    }
++
++    async fn disconnected_remote_workspace(
++        cx: &mut TestAppContext,
++        server_cx: &mut TestAppContext,
++    ) -> (
++        WindowHandle<MultiWorkspace>,
++        Entity<Workspace>,
++        Entity<RemoteClient>,
++        Arc<AppState>,
++    ) {
++        let app_state = cx.update(|cx| {
++            let app_state = AppState::test(cx);
++            crate::init(cx);
++            editor::init(cx);
++            app_state
++        });
++        cx.update(|cx| {
++            release_channel::init(semver::Version::new(0, 0, 0), cx);
++        });
++        server_cx.update(|cx| {
++            release_channel::init(semver::Version::new(0, 0, 0), cx);
++        });
++
++        let (options, server_session, connection_guard) = RemoteClient::fake_server(cx, server_cx);
++        let ping_handler = server_cx.new(|_| ());
++        server_session.add_request_handler::<proto::Ping, _, _, _>(
++            ping_handler.downgrade(),
++            |_, _, _| async { Ok(proto::Ack {}) },
++        );
++        drop(connection_guard);
++        let remote_client = RemoteClient::connect_mock(options, cx).await;
++        let project = cx.update(|cx| {
++            Project::remote(
++                remote_client.clone(),
++                app_state.client.clone(),
++                app_state.node_runtime.clone(),
++                app_state.user_store.clone(),
++                app_state.languages.clone(),
++                app_state.fs.clone(),
++                false,
++                cx,
++            )
++        });
++
++        let window = cx.add_window({
++            let app_state = app_state.clone();
++            move |window, cx| {
++                let workspace = cx
++                    .new(|cx| Workspace::new(None, project.clone(), app_state.clone(), window, cx));
++                MultiWorkspace::new(workspace, window, cx)
++            }
++        });
++        let workspace = window
++            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
++            .expect("workspace should be present");
++        remote_client.update(cx, |remote_client, cx| {
++            remote_client.force_server_not_running(cx);
++        });
++        cx.run_until_parked();
++        window
++            .update(cx, |multi_workspace, _, cx| {
++                let workspace = multi_workspace.workspace().clone();
++                if let Some(overlay) = workspace.read(cx).active_modal::<DisconnectedOverlay>(cx) {
++                    overlay.update(cx, |overlay, cx| {
++                        overlay.finished = true;
++                        cx.emit(DismissEvent);
++                    });
++                }
++            })
++            .expect("test window should remain open");
++        cx.run_until_parked();
++        assert!(workspace.read_with(cx, |workspace, cx| {
++            workspace.active_modal::<DisconnectedOverlay>(cx).is_none()
++        }));
++
++        (window, workspace, remote_client, app_state)
++    }
++
++    #[gpui::test]
++    async fn test_unchanged_window_completion_reshows_overlay_for_disconnected_workspace(
++        cx: &mut TestAppContext,
++        server_cx: &mut TestAppContext,
++    ) {
++        let (window, workspace, remote_client, _) =
++            disconnected_remote_workspace(cx, server_cx).await;
++        assert!(
++            remote_client.read_with(cx, |remote_client, _| { remote_client.is_disconnected() })
++        );
++        let project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
++        project.update(cx, |project, cx| {
++            project.disconnected_from_remote(false, cx);
++        });
++        cx.run_until_parked();
++        let event_overlay = workspace
++            .read_with(cx, |workspace, cx| {
++                workspace.active_modal::<DisconnectedOverlay>(cx)
++            })
++            .expect("project disconnect event should show the overlay");
++        let event_message = event_overlay.read_with(cx, |overlay, cx| {
++            DisconnectedOverlay::message_for_host(&overlay.host, cx)
++        });
++        assert!(event_message.contains("remote server process exited unexpectedly"));
++        assert!(!event_message.contains("not responding"));
++        event_overlay.update(cx, |overlay, cx| {
++            overlay.finished = true;
++            cx.emit(DismissEvent);
++        });
++        cx.run_until_parked();
++
++        let workspace_id = workspace.entity_id();
++        let visual_cx = &mut VisualTestContext::from_window(window.into(), cx);
++        let mut async_cx = visual_cx.update(|window, cx| window.to_async(cx));
++
++        DisconnectedOverlay::finish_reconnect_attempt(
++            Ok(window),
++            window,
++            workspace.downgrade(),
++            workspace_id,
++            true,
++            &mut async_cx,
++        )
++        .expect("unchanged-window completion should succeed");
++        visual_cx.run_until_parked();
++
++        let overlay = workspace
++            .read_with(visual_cx, |workspace, cx| {
++                workspace.active_modal::<DisconnectedOverlay>(cx)
++            })
++            .expect("cancelled reconnect should re-show the overlay");
++        let message = overlay.read_with(visual_cx, |overlay, cx| {
++            DisconnectedOverlay::message_for_host(&overlay.host, cx)
++        });
++        assert!(message.contains("remote server process exited unexpectedly"));
++
++        overlay.update(visual_cx, |overlay, cx| {
++            overlay.finished = true;
++            cx.emit(DismissEvent);
++        });
++        visual_cx.run_until_parked();
++        let mut async_cx = visual_cx.update(|window, cx| window.to_async(cx));
++        assert!(
++            DisconnectedOverlay::finish_reconnect_attempt(
++                Err(anyhow::anyhow!("reconnect failed")),
++                window,
++                workspace.downgrade(),
++                workspace_id,
++                true,
++                &mut async_cx,
++            )
++            .is_err()
++        );
++        visual_cx.run_until_parked();
++        assert!(
++            workspace
++                .read_with(visual_cx, |workspace, cx| {
++                    workspace.active_modal::<DisconnectedOverlay>(cx)
++                })
++                .is_some(),
++            "failed reconnect should re-show the overlay on the displayed workspace"
++        );
++        assert!(remote_client.read_with(visual_cx, |remote_client, _| {
++            remote_client.is_disconnected()
++        }));
++        let overlay = workspace
++            .read_with(visual_cx, |workspace, cx| {
++                workspace.active_modal::<DisconnectedOverlay>(cx)
++            })
++            .expect("failed reconnect should leave the overlay available");
++        let message = overlay.read_with(visual_cx, |overlay, cx| {
++            DisconnectedOverlay::message_for_host(&overlay.host, cx)
++        });
++        assert!(message.contains("remote server process exited unexpectedly"));
++    }
++
++    #[gpui::test]
++    async fn test_reconnect_completion_skips_replaced_and_switched_workspaces(
++        cx: &mut TestAppContext,
++        server_cx: &mut TestAppContext,
++    ) {
++        let (window, old_workspace, remote_client, app_state) =
++            disconnected_remote_workspace(cx, server_cx).await;
++        assert!(
++            remote_client.read_with(cx, |remote_client, _| { remote_client.is_disconnected() })
++        );
++        let old_workspace_id = old_workspace.entity_id();
++        let (replacement_options, replacement_session, replacement_connection_guard) =
++            RemoteClient::fake_server(cx, server_cx);
++        let replacement_ping_handler = server_cx.new(|_| ());
++        replacement_session.add_request_handler::<proto::Ping, _, _, _>(
++            replacement_ping_handler.downgrade(),
++            |_, _, _| async { Ok(proto::Ack {}) },
++        );
++        drop(replacement_connection_guard);
++        let replacement_remote_client = RemoteClient::connect_mock(replacement_options, cx).await;
++        let replacement_project = cx.update(|cx| {
++            Project::remote(
++                replacement_remote_client.clone(),
++                app_state.client.clone(),
++                app_state.node_runtime.clone(),
++                app_state.user_store.clone(),
++                app_state.languages.clone(),
++                app_state.fs.clone(),
++                false,
++                cx,
++            )
++        });
++        let switched_project = Project::test(fs::FakeFs::new(cx.executor()), [], cx).await;
++        let visual_cx = &mut VisualTestContext::from_window(window.into(), cx);
++        let replacement_workspace = window
++            .update(visual_cx, |multi_workspace, window, cx| {
++                let workspace = cx.new(|cx| {
++                    Workspace::new(
++                        None,
++                        replacement_project.clone(),
++                        app_state.clone(),
++                        window,
++                        cx,
++                    )
++                });
++                multi_workspace.activate(workspace.clone(), None, window, cx);
++                workspace
++            })
++            .expect("replacement workspace should activate");
++        let focused_before_success = visual_cx.update(|window, cx| window.focused(cx));
++        let mut async_cx = visual_cx.update(|window, cx| window.to_async(cx));
++
++        DisconnectedOverlay::finish_reconnect_attempt(
++            Ok(window),
++            window,
++            old_workspace.downgrade(),
++            old_workspace_id,
++            true,
++            &mut async_cx,
++        )
++        .expect("successful reconnect should complete");
++        visual_cx.run_until_parked();
++
++        assert!(remote_client.read_with(visual_cx, |remote_client, _| {
++            remote_client.is_disconnected()
++        }));
++        assert!(
++            !replacement_remote_client.read_with(visual_cx, |remote_client, _| {
++                remote_client.is_disconnected()
++            })
++        );
++        assert_eq!(
++            window
++                .read_with(visual_cx, |multi_workspace, _| {
++                    multi_workspace.workspace().entity_id()
++                })
++                .expect("window should remain open"),
++            replacement_workspace.entity_id()
++        );
++        assert!(old_workspace.read_with(visual_cx, |workspace, cx| {
++            workspace.active_modal::<DisconnectedOverlay>(cx).is_none()
++        }));
++        assert!(replacement_workspace.read_with(visual_cx, |workspace, cx| {
++            workspace.active_modal::<DisconnectedOverlay>(cx).is_none()
++        }));
++        assert_eq!(
++            visual_cx.update(|window, cx| window.focused(cx)),
++            focused_before_success,
++            "a successful workspace replacement must not steal focus"
++        );
++
++        let switched_workspace = window
++            .update(visual_cx, |multi_workspace, window, cx| {
++                let workspace = cx.new(|cx| {
++                    Workspace::new(
++                        None,
++                        switched_project.clone(),
++                        app_state.clone(),
++                        window,
++                        cx,
++                    )
++                });
++                multi_workspace.activate(workspace.clone(), None, window, cx);
++                workspace
++            })
++            .expect("switched workspace should activate");
++        let mut async_cx = visual_cx.update(|window, cx| window.to_async(cx));
++
++        assert!(
++            DisconnectedOverlay::finish_reconnect_attempt(
++                Err(anyhow::anyhow!("reconnect failed")),
++                window,
++                old_workspace.downgrade(),
++                old_workspace_id,
++                true,
++                &mut async_cx,
++            )
++            .is_err()
++        );
++        visual_cx.run_until_parked();
++
++        assert_eq!(
++            window
++                .read_with(visual_cx, |multi_workspace, _| {
++                    multi_workspace.workspace().entity_id()
++                })
++                .expect("window should remain open"),
++            switched_workspace.entity_id()
++        );
++        assert!(old_workspace.read_with(visual_cx, |workspace, cx| {
++            workspace.active_modal::<DisconnectedOverlay>(cx).is_none()
++        }));
++        assert!(switched_workspace.read_with(visual_cx, |workspace, cx| {
++            workspace.active_modal::<DisconnectedOverlay>(cx).is_none()
++        }));
++    }
++}
+diff --git a/crates/recent_projects/src/remote_connections.rs b/crates/recent_projects/src/remote_connections.rs
+index c6829727d0736e12ff4460d63d98387011c7ccf8..6834cae3ad903538fa3c1e0477fb87b6de27ddb7 100644
+--- a/crates/recent_projects/src/remote_connections.rs
++++ b/crates/recent_projects/src/remote_connections.rs
+@@ -1014,6 +1014,59 @@ mod tests {
+             .unwrap();
+     }
+ 
++    #[gpui::test]
++    async fn test_project_observes_remote_client_notifications(
++        cx: &mut TestAppContext,
++        server_cx: &mut TestAppContext,
++    ) {
++        let app_state = init_test(cx);
++        cx.update(|cx| {
++            release_channel::init(semver::Version::new(0, 0, 0), cx);
++        });
++        server_cx.update(|cx| {
++            release_channel::init(semver::Version::new(0, 0, 0), cx);
++        });
++        let (options, server_session, connection_guard) = RemoteClient::fake_server(cx, server_cx);
++        let ping_handler = server_cx.new(|_| ());
++        server_session.add_request_handler::<proto::Ping, _, _, _>(
++            ping_handler.downgrade(),
++            |_, _, _| async { Ok(proto::Ack {}) },
++        );
++        drop(connection_guard);
++
++        let remote_client = RemoteClient::connect_mock(options, cx).await;
++        let project = cx.update(|cx| {
++            Project::remote(
++                remote_client.clone(),
++                app_state.client.clone(),
++                app_state.node_runtime.clone(),
++                app_state.user_store.clone(),
++                app_state.languages.clone(),
++                app_state.fs.clone(),
++                false,
++                cx,
++            )
++        });
++
++        cx.run_until_parked();
++        let notifications = Arc::new(std::sync::atomic::AtomicUsize::new(0));
++        let observed_notifications = notifications.clone();
++        cx.update(|cx| {
++            cx.observe(&project, move |_, _cx| {
++                observed_notifications.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++            })
++            .detach();
++        });
++
++        remote_client.update(cx, |_, cx| cx.notify());
++        cx.run_until_parked();
++
++        assert!(
++            notifications.load(std::sync::atomic::Ordering::SeqCst) > 0,
++            "project observers should be notified when the remote client changes"
++        );
++    }
++
+     fn init_test(cx: &mut TestAppContext) -> Arc<AppState> {
+         cx.update(|cx| {
+             let state = AppState::test(cx);
+diff --git a/crates/remote/src/remote.rs b/crates/remote/src/remote.rs
+index de8f9348752f622c91e8a544ee7f1c7fe2c5e952..eabb4de58af038b76290d8f61daa584c9ddde8bd 100644
+--- a/crates/remote/src/remote.rs
++++ b/crates/remote/src/remote.rs
+@@ -8,9 +8,10 @@ mod transport;
+ #[cfg(target_os = "windows")]
+ pub use remote_client::OpenWslPath;
+ pub use remote_client::{
+-    CommandTemplate, ConnectionIdentifier, ConnectionState, Interactive, RemoteArch, RemoteClient,
+-    RemoteClientDelegate, RemoteClientEvent, RemoteConnection, RemoteConnectionOptions, RemoteOs,
+-    RemotePlatform, connect, has_active_connection,
++    CommandTemplate, ConnectionIdentifier, ConnectionState, Interactive,
++    NonRetryableReconnectError, RemoteArch, RemoteClient, RemoteClientDelegate, RemoteClientEvent,
++    RemoteConnection, RemoteConnectionOptions, RemoteOs, RemotePlatform, connect,
++    has_active_connection,
+ };
+ pub use remote_identity::{
+     RemoteConnectionIdentity, remote_connection_identity, same_remote_connection_identity,
+diff --git a/crates/remote/src/remote_client.rs b/crates/remote/src/remote_client.rs
+index 4dd7cc2135b44fc15949dd2c0d0a33a7ce0038f6..c062a310f6f4c368a3a0b5de4aabb4eaecc10e1e 100644
+--- a/crates/remote/src/remote_client.rs
++++ b/crates/remote/src/remote_client.rs
+@@ -26,7 +26,7 @@ use futures::{
+ };
+ use gpui::{
+     App, AppContext as _, AsyncApp, BackgroundExecutor, BorrowAppContext, Context, Entity,
+-    EventEmitter, FutureExt, Global, Task, TaskExt, WeakEntity,
++    EventEmitter, FutureExt, Global, SharedString, Task, TaskExt, WeakEntity,
+ };
+ use parking_lot::Mutex;
+ 
+@@ -132,11 +132,21 @@ pub enum Interactive {
+     No,
+ }
+ 
++#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
++pub enum NonRetryableReconnectError {
++    #[error("password prompt unavailable during background reconnect")]
++    PromptUnavailable,
++    #[error("connection canceled by user")]
++    CanceledByUser,
++    #[error("authentication failed: {0}")]
++    AuthenticationFailed(String),
++}
++
+ pub trait RemoteClientDelegate: Send + Sync {
+     fn ask_password(
+         &self,
+         prompt: String,
+-        tx: oneshot::Sender<EncryptedPassword>,
++        tx: oneshot::Sender<Result<EncryptedPassword, askpass::AskPassCancelReason>>,
+         cancellation: oneshot::Receiver<()>,
+         cx: &mut AsyncApp,
+     );
+@@ -195,7 +205,9 @@ enum State {
+         error: anyhow::Error,
+         attempts: usize,
+     },
+-    ReconnectExhausted,
++    ReconnectExhausted {
++        reason: Option<SharedString>,
++    },
+     ServerNotRunning,
+ }
+ 
+@@ -206,7 +218,7 @@ impl fmt::Display for State {
+             Self::Connected { .. } => write!(f, "connected"),
+             Self::Reconnecting => write!(f, "reconnecting"),
+             Self::ReconnectFailed { .. } => write!(f, "reconnect failed"),
+-            Self::ReconnectExhausted => write!(f, "reconnect exhausted"),
++            Self::ReconnectExhausted { .. } => write!(f, "reconnect exhausted"),
+             Self::HeartbeatMissed { .. } => write!(f, "heartbeat missed"),
+             Self::ServerNotRunning { .. } => write!(f, "server not running"),
+         }
+@@ -236,7 +248,7 @@ impl State {
+             | Self::ReconnectFailed { .. } => true,
+             State::Connecting
+             | State::Reconnecting
+-            | State::ReconnectExhausted
++            | State::ReconnectExhausted { .. }
+             | State::ServerNotRunning => false,
+         }
+     }
+@@ -324,7 +336,7 @@ impl From<&State> for ConnectionState {
+             State::Connected { .. } => Self::Connected,
+             State::Reconnecting | State::ReconnectFailed { .. } => Self::Reconnecting,
+             State::HeartbeatMissed { .. } => Self::HeartbeatMissed,
+-            State::ReconnectExhausted => Self::Disconnected,
++            State::ReconnectExhausted { .. } => Self::Disconnected,
+             State::ServerNotRunning => Self::Disconnected,
+         }
+     }
+@@ -340,7 +352,7 @@ pub struct RemoteClient {
+     state: Option<State>,
+ }
+ 
+-#[derive(Debug)]
++#[derive(Clone, Debug, PartialEq, Eq)]
+ pub enum RemoteClientEvent {
+     Disconnected { server_not_running: bool },
+     Reconnected,
+@@ -609,7 +621,7 @@ impl RemoteClient {
+         }
+ 
+         let state = self.state.take().unwrap();
+-        let (attempts, remote_connection, delegate) = match state {
++        let (attempts, remote_connection, delegate, last_error) = match state {
+             State::Connected {
+                 remote_connection,
+                 delegate,
+@@ -625,17 +637,22 @@ impl RemoteClient {
+             } => {
+                 drop(multiplex_task);
+                 drop(heartbeat_task);
+-                (0, remote_connection, delegate)
++                (0, remote_connection, delegate, None)
+             }
+             State::ReconnectFailed {
+                 attempts,
+                 remote_connection,
+                 delegate,
+-                ..
+-            } => (attempts, remote_connection, delegate),
++                error,
++            } => (
++                attempts,
++                remote_connection,
++                delegate,
++                Some(format!("{error:#}").into()),
++            ),
+             State::Connecting
+             | State::Reconnecting
+-            | State::ReconnectExhausted
++            | State::ReconnectExhausted { .. }
+             | State::ServerNotRunning => unreachable!(),
+         };
+ 
+@@ -645,7 +662,7 @@ impl RemoteClient {
+                 "Failed to reconnect to after {} attempts, giving up",
+                 MAX_RECONNECT_ATTEMPTS
+             );
+-            self.set_state(State::ReconnectExhausted, cx);
++            self.set_state(State::ReconnectExhausted { reason: last_error }, cx);
+             return Ok(());
+         }
+ 
+@@ -659,11 +676,31 @@ impl RemoteClient {
+         let unique_identifier = self.unique_identifier.clone();
+         let client = self.client.clone();
+         let reconnect_task = cx.spawn(async move |this, cx| {
++            fn non_retryable_error(error: &anyhow::Error) -> Option<NonRetryableReconnectError> {
++                error
++                    .downcast_ref::<NonRetryableReconnectError>()
++                    .or_else(|| {
++                        error
++                            .root_cause()
++                            .downcast_ref::<NonRetryableReconnectError>()
++                    })
++                    .cloned()
++            }
++
+             macro_rules! failed {
+                 ($error:expr, $attempts:expr, $remote_connection:expr, $delegate:expr) => {
+-                    delegate.set_status(Some(&format!("{error:#}", error = $error)), cx);
++                    let error: anyhow::Error = $error.into();
++                    delegate.set_status(Some(&format!("{error:#}")), cx);
++                    if let Some(non_retryable) = non_retryable_error(&error) {
++                        log::info!(
++                            "Reconnect encountered non-retryable error ({non_retryable}), stopping retry loop"
++                        );
++                        return State::ReconnectExhausted {
++                            reason: Some(format!("{error:#}").into()),
++                        };
++                    }
+                     return State::ReconnectFailed {
+-                        error: anyhow!($error),
++                        error,
+                         attempts: $attempts,
+                         remote_connection: $remote_connection,
+                         delegate: $delegate,
+@@ -702,7 +739,22 @@ impl RemoteClient {
+                         )
+                     })
+                     .await
+-                    .map_err(|error| error.cloned())?;
++                    .map_err(|error| {
++                        let non_retryable = error
++                            .as_ref()
++                            .downcast_ref::<NonRetryableReconnectError>()
++                            .or_else(|| {
++                                error
++                                    .root_cause()
++                                    .downcast_ref::<NonRetryableReconnectError>()
++                            });
++                        if let Some(non_retryable) = non_retryable {
++                            anyhow::Error::new(non_retryable.clone())
++                                .context("Failed to connect to host")
++                        } else {
++                            anyhow!("{error:#}")
++                        }
++                    })?;
+ 
+                 let io_task = remote_connection.start_proxy(
+                     unique_identifier,
+@@ -762,7 +814,7 @@ impl RemoteClient {
+                                     error
+                                 );
+                             }
+-                            State::ReconnectExhausted => {
++                            State::ReconnectExhausted { .. } => {
+                                 log::error!("Reconnect attempt failed and all attempts exhausted");
+                             }
+                         }
+@@ -938,7 +990,15 @@ impl RemoteClient {
+     fn try_set_state(&mut self, cx: &mut Context<Self>, map: impl FnOnce(&State) -> Option<State>) {
+         let new_state = self.state.as_ref().and_then(map);
+         if let Some(new_state) = new_state {
++            log::info!("setting state to '{new_state}'");
++            let is_reconnect_exhausted = new_state.is_reconnect_exhausted();
++            let is_server_not_running = new_state.is_server_not_running();
+             self.state.replace(new_state);
++            if is_reconnect_exhausted || is_server_not_running {
++                cx.emit(RemoteClientEvent::Disconnected {
++                    server_not_running: is_server_not_running,
++                });
++            }
+             cx.notify();
+         }
+     }
+@@ -1043,6 +1103,14 @@ impl RemoteClient {
+         self.connection_state() == ConnectionState::Disconnected
+     }
+ 
++    pub fn disconnect_reason(&self) -> Option<SharedString> {
++        match self.state.as_ref()? {
++            State::ReconnectExhausted { reason } => reason.clone(),
++            State::ServerNotRunning => Some("remote server process exited unexpectedly".into()),
++            _ => None,
++        }
++    }
++
+     pub fn path_style(&self) -> PathStyle {
+         self.path_style
+     }
+@@ -1726,6 +1794,13 @@ mod tests {
+                 heartbeat_task: Task::ready(Ok(())),
+             }),
+         });
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let recorded_events = events.clone();
++        let subscription = cx.update(|cx| {
++            cx.subscribe(&remote_client, move |_, event: &RemoteClientEvent, _| {
++                recorded_events.lock().push(event.clone());
++            })
++        });
+ 
+         assert!(remote_client.read_with(cx, |c, _| c.state.as_ref().unwrap().can_reconnect()));
+         assert!(remote_client.read_with(cx, |c, _| c.remote_connection().is_some()));
+@@ -1787,6 +1862,215 @@ mod tests {
+                 "reconnect exhausted"
+             );
+         });
++        assert_eq!(
++            events.lock().as_slice(),
++            &[RemoteClientEvent::Disconnected {
++                server_not_running: false
++            }],
++            "transient failures should retry and emit Disconnected exactly once on exhaustion"
++        );
++        drop(subscription);
++    }
++
++    async fn assert_non_retryable_reconnect_error_stops_immediately(
++        cx: &mut TestAppContext,
++        connection_id: u64,
++        error: anyhow::Error,
++        expected_reason: &str,
++    ) {
++        cx.update(|cx| {
++            cx.default_global::<ConnectionPool>();
++        });
++        let (_incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
++        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded::<Envelope>();
++        let client =
++            cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test-client", false));
++        let _drain_outgoing = cx
++            .executor()
++            .spawn(async move { while outgoing_rx.next().await.is_some() {} });
++        let options =
++            RemoteConnectionOptions::Mock(crate::transport::mock::MockConnectionOptions {
++                id: connection_id,
++            });
++        let remote_connection: Arc<dyn RemoteConnection> =
++            Arc::new(TestDummyConnection(Some(options.clone())));
++        let connect_error = error.context("Failed to connect to host");
++        let connect_task: Shared<Task<Result<Arc<dyn RemoteConnection>, Arc<anyhow::Error>>>> =
++            Task::ready(Err(Arc::new(connect_error))).shared();
++        cx.update(|cx| {
++            cx.default_global::<ConnectionPool>().connections.insert(
++                options.clone(),
++                ConnectionPoolEntry::Connecting(
++                    connect_task
++                        .downgrade()
++                        .expect("shared connection task should be upgradeable"),
++                ),
++            );
++        });
++        let delegate: Arc<dyn RemoteClientDelegate> =
++            Arc::new(crate::transport::mock::MockDelegate);
++        let remote_client = cx.new(|_| RemoteClient {
++            client,
++            unique_identifier: "test-prompt-unavailable-context".to_string(),
++            connection_options: options,
++            path_style: util::paths::PathStyle::local(),
++            platform: RemotePlatform {
++                os: RemoteOs::Linux,
++                arch: RemoteArch::Aarch64,
++            },
++            os_version: None,
++            state: Some(State::Connected {
++                remote_connection,
++                delegate,
++                multiplex_task: Task::ready(Ok(())),
++                heartbeat_task: Task::ready(Ok(())),
++            }),
++        });
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let recorded_events = events.clone();
++        let subscription = cx.update(|cx| {
++            cx.subscribe(&remote_client, move |_, event: &RemoteClientEvent, _| {
++                recorded_events.lock().push(event.clone());
++            })
++        });
++
++        remote_client.update(cx, |remote_client, cx| {
++            remote_client.reconnect(cx).expect("reconnect should start");
++        });
++        cx.run_until_parked();
++
++        remote_client.read_with(cx, |remote_client, _| {
++            assert!(remote_client.is_disconnected());
++            assert!(
++                remote_client
++                    .disconnect_reason()
++                    .is_some_and(|reason| reason.contains(expected_reason)),
++                "the typed reason should survive the production SSH context"
++            );
++        });
++        assert_eq!(
++            events.lock().as_slice(),
++            &[RemoteClientEvent::Disconnected {
++                server_not_running: false
++            }],
++            "a context-wrapped non-retryable failure must emit Disconnected exactly once"
++        );
++
++        cx.background_executor
++            .advance_clock(Duration::from_secs(100));
++        cx.run_until_parked();
++        assert_eq!(
++            events.lock().as_slice(),
++            &[RemoteClientEvent::Disconnected {
++                server_not_running: false
++            }],
++            "non-retryable reconnect must not schedule another attempt"
++        );
++        drop(subscription);
++    }
++
++    #[gpui::test]
++    async fn test_context_wrapped_prompt_unavailable_stops_immediately_once(
++        cx: &mut TestAppContext,
++    ) {
++        assert_non_retryable_reconnect_error_stops_immediately(
++            cx,
++            888_100,
++            anyhow::Error::new(NonRetryableReconnectError::PromptUnavailable),
++            "password prompt unavailable",
++        )
++        .await;
++    }
++
++    #[gpui::test]
++    async fn test_context_wrapped_user_cancel_stops_immediately_once(cx: &mut TestAppContext) {
++        assert_non_retryable_reconnect_error_stops_immediately(
++            cx,
++            888_101,
++            anyhow::Error::new(NonRetryableReconnectError::CanceledByUser),
++            "connection canceled by user",
++        )
++        .await;
++    }
++
++    #[gpui::test]
++    async fn test_context_wrapped_ssh_auth_error_stops_immediately_once(cx: &mut TestAppContext) {
++        let error = crate::transport::ssh::parse_ssh_connect_error(
++            b"user@host: Permission denied (publickey,password).\n",
++        )
++        .expect_err("OpenSSH authentication failure must be an error");
++        assert_non_retryable_reconnect_error_stops_immediately(
++            cx,
++            888_102,
++            error,
++            "authentication failed",
++        )
++        .await;
++    }
++
++    #[gpui::test]
++    async fn test_is_disconnected_excludes_heartbeat_missed_and_reconnecting(
++        cx: &mut TestAppContext,
++    ) {
++        let (_incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
++        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded::<Envelope>();
++        let client =
++            cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test-client", false));
++        let _drain_outgoing = cx
++            .executor()
++            .spawn(async move { while outgoing_rx.next().await.is_some() {} });
++        let options =
++            RemoteConnectionOptions::Mock(crate::transport::mock::MockConnectionOptions {
++                id: 888_101,
++            });
++        let remote_connection: Arc<dyn RemoteConnection> =
++            Arc::new(TestDummyConnection(Some(options.clone())));
++        let delegate: Arc<dyn RemoteClientDelegate> =
++            Arc::new(crate::transport::mock::MockDelegate);
++        let remote_client = cx.new(|_| RemoteClient {
++            client,
++            unique_identifier: "test-disconnected-state-classification".to_string(),
++            connection_options: options,
++            path_style: util::paths::PathStyle::local(),
++            platform: RemotePlatform {
++                os: RemoteOs::Linux,
++                arch: RemoteArch::Aarch64,
++            },
++            os_version: None,
++            state: Some(State::HeartbeatMissed {
++                missed_heartbeats: MAX_MISSED_HEARTBEATS,
++                remote_connection,
++                delegate,
++                multiplex_task: Task::ready(Ok(())),
++                heartbeat_task: Task::ready(Ok(())),
++            }),
++        });
++
++        assert!(
++            !remote_client.read_with(cx, |remote_client, _| { remote_client.is_disconnected() })
++        );
++        remote_client.update(cx, |remote_client, cx| {
++            remote_client.set_state(State::Reconnecting, cx);
++        });
++        assert!(
++            !remote_client.read_with(cx, |remote_client, _| { remote_client.is_disconnected() })
++        );
++        remote_client.update(cx, |remote_client, cx| {
++            remote_client.set_state(State::ServerNotRunning, cx);
++        });
++        remote_client.read_with(cx, |remote_client, _| {
++            assert!(remote_client.is_disconnected());
++            assert_eq!(
++                remote_client.disconnect_reason().as_deref(),
++                Some("remote server process exited unexpectedly")
++            );
++        });
++        remote_client.update(cx, |remote_client, cx| {
++            remote_client.set_state(State::ReconnectExhausted { reason: None }, cx);
++        });
++        assert!(
++            remote_client.read_with(cx, |remote_client, _| { remote_client.is_disconnected() })
++        );
+     }
+ }
+ 
+diff --git a/crates/remote/src/transport/mock.rs b/crates/remote/src/transport/mock.rs
+index e39d123a1ce3633d7223511d3a041852687a98b5..a80b8c5ce7761144eceeeae2b63bff6b5409d02d 100644
+--- a/crates/remote/src/transport/mock.rs
++++ b/crates/remote/src/transport/mock.rs
+@@ -323,7 +323,9 @@ impl RemoteClientDelegate for MockDelegate {
+     fn ask_password(
+         &self,
+         _prompt: String,
+-        _sender: futures::channel::oneshot::Sender<askpass::EncryptedPassword>,
++        _sender: futures::channel::oneshot::Sender<
++            Result<askpass::EncryptedPassword, askpass::AskPassCancelReason>,
++        >,
+         _cancellation: futures::channel::oneshot::Receiver<()>,
+         _cx: &mut AsyncApp,
+     ) {
+diff --git a/crates/remote/src/transport/ssh.rs b/crates/remote/src/transport/ssh.rs
+index 86ad4c41afb35c4642b4cf0992f91731c6b60a68..fc2cd793b76e0cf0afeaca58b4d2f98fe96529bb 100644
+--- a/crates/remote/src/transport/ssh.rs
++++ b/crates/remote/src/transport/ssh.rs
+@@ -31,6 +31,7 @@ use std::{
+ use tempfile::TempDir;
+ use util::command::{Child, Stdio};
+ use util::{
++    ResultExt as _,
+     paths::{PathStyle, RemotePathBuf},
+     rel_path::RelPath,
+     shell::ShellKind,
+@@ -39,6 +40,61 @@ use util::{
+ /// How long to wait for SSH to connect when no askpass prompt has opened.
+ const SSH_CONNECTION_PROMPT_TIMEOUT: Duration = Duration::from_secs(17);
+ 
++pub(crate) fn parse_ssh_connect_error(output: &[u8]) -> Result<()> {
++    let error_message = String::from_utf8_lossy(output).trim().to_string();
++    let login_unavailable = error_message.contains("pam_nologin")
++        || error_message.contains("System is booting up")
++        || error_message.contains("This account is currently not available");
++    let authentication_denied = error_message.lines().any(|line| {
++        let Some((prefix, suffix)) = line.trim().rsplit_once("Permission denied (") else {
++            return false;
++        };
++        if !prefix.is_empty() && !prefix.ends_with(": ") {
++            return false;
++        }
++        let Some(methods) = suffix
++            .strip_suffix(").")
++            .or_else(|| suffix.strip_suffix(')'))
++        else {
++            return false;
++        };
++        !methods.is_empty()
++            && methods.split(',').all(|method| {
++                matches!(
++                    method,
++                    "publickey"
++                        | "password"
++                        | "keyboard-interactive"
++                        | "hostbased"
++                        | "gssapi-with-mic"
++                        | "gssapi-keyex"
++                        | "none"
++                )
++            })
++    });
++    if !login_unavailable
++        && (authentication_denied || error_message.contains("Too many authentication failures"))
++    {
++        anyhow::bail!(crate::NonRetryableReconnectError::AuthenticationFailed(
++            error_message
++        ));
++    }
++
++    anyhow::bail!("failed to connect: {error_message}");
++}
++
++fn askpass_result_error(result: askpass::AskPassResult) -> anyhow::Error {
++    match result {
++        askpass::AskPassResult::PromptUnavailable => {
++            anyhow::Error::new(crate::NonRetryableReconnectError::PromptUnavailable)
++        }
++        askpass::AskPassResult::CancelledByUser => {
++            anyhow::Error::new(crate::NonRetryableReconnectError::CanceledByUser)
++        }
++        askpass::AskPassResult::Timedout => anyhow!("connecting to host timed out"),
++    }
++}
++
+ pub(crate) struct SshRemoteConnection {
+     socket: SshSocket,
+     master_process: Mutex<Option<MasterProcess>>,
+@@ -658,7 +714,7 @@ impl SshRemoteConnection {
+             let socket = SshSocket::new(connection_options, reused_path).await?;
+             (socket, None)
+         } else {
+-            let askpass_delegate = askpass::AskPassDelegate::new_with_cancellation(cx, {
++            let askpass_delegate = askpass::AskPassDelegate::new_with_reason(cx, {
+                 let delegate = delegate.clone();
+                 move |prompt, tx, cancellation, cx| {
+                     delegate.ask_password(prompt, tx, cancellation, cx)
+@@ -684,15 +740,13 @@ impl SshRemoteConnection {
+ 
+             let result = select_biased! {
+                 result = askpass.run(Some(SSH_CONNECTION_PROMPT_TIMEOUT)).fuse() => {
+-                    match result {
+-                        AskPassResult::CancelledByUser => {
+-                            master_process.as_mut().kill().ok();
+-                            anyhow::bail!("SSH connection canceled")
+-                        }
+-                        AskPassResult::Timedout => {
+-                            anyhow::bail!("connecting to host timed out")
+-                        }
++                    if matches!(
++                        &result,
++                        AskPassResult::PromptUnavailable | AskPassResult::CancelledByUser
++                    ) {
++                        master_process.as_mut().kill().log_err();
+                     }
++                    Err(askpass_result_error(result))
+                 }
+                 _ = master_process.wait_connected().fuse() => {
+                     anyhow::Ok(())
+@@ -708,11 +762,7 @@ impl SshRemoteConnection {
+                 let mut stderr = master_process.as_mut().stderr.take().unwrap();
+                 stderr.read_to_end(&mut output).await?;
+ 
+-                let error_message = format!(
+-                    "failed to connect: {}",
+-                    String::from_utf8_lossy(&output).trim()
+-                );
+-                anyhow::bail!(error_message);
++                parse_ssh_connect_error(&output)?;
+             }
+ 
+             let socket = SshSocket::new(connection_options, socket_path).await?;
+@@ -722,7 +772,7 @@ impl SshRemoteConnection {
+ 
+         #[cfg(windows)]
+         let (socket, master_process_option) = {
+-            let askpass_delegate = askpass::AskPassDelegate::new_with_cancellation(cx, {
++            let askpass_delegate = askpass::AskPassDelegate::new_with_reason(cx, {
+                 let delegate = delegate.clone();
+                 move |prompt, tx, cancellation, cx| {
+                     delegate.ask_password(prompt, tx, cancellation, cx)
+@@ -744,15 +794,13 @@ impl SshRemoteConnection {
+ 
+             let result = select_biased! {
+                 result = askpass.run(Some(SSH_CONNECTION_PROMPT_TIMEOUT)).fuse() => {
+-                    match result {
+-                        AskPassResult::CancelledByUser => {
+-                            master_process.as_mut().kill().ok();
+-                            anyhow::bail!("SSH connection canceled")
+-                        }
+-                        AskPassResult::Timedout => {
+-                            anyhow::bail!("connecting to host timed out")
+-                        }
++                    if matches!(
++                        &result,
++                        AskPassResult::PromptUnavailable | AskPassResult::CancelledByUser
++                    ) {
++                        master_process.as_mut().kill().log_err();
+                     }
++                    Err(askpass_result_error(result))
+                 }
+                 _ = master_process.wait_connected().fuse() => {
+                     anyhow::Ok(())
+@@ -768,11 +816,7 @@ impl SshRemoteConnection {
+                 let mut stderr = master_process.as_mut().stderr.take().unwrap();
+                 stderr.read_to_end(&mut output).await?;
+ 
+-                let error_message = format!(
+-                    "failed to connect: {}",
+-                    String::from_utf8_lossy(&output).trim()
+-                );
+-                anyhow::bail!(error_message);
++                parse_ssh_connect_error(&output)?;
+             }
+ 
+             let socket = SshSocket::new(
+@@ -2409,4 +2453,75 @@ mod tests {
+ 
+         Ok(())
+     }
++
++    #[test]
++    fn test_ssh_authentication_failures_are_non_retryable() {
++        for output in [
++            b"user@host: Permission denied (publickey).\n".as_slice(),
++            b"Permission denied (password).\n",
++            b"user@host: Permission denied (keyboard-interactive,publickey).\n",
++            b"Permission denied (gssapi-keyex,gssapi-with-mic).\n",
++            b"Received disconnect from host port 22: Too many authentication failures\n",
++        ] {
++            let error =
++                parse_ssh_connect_error(output).expect_err("SSH failure should be an error");
++            assert!(
++                error
++                    .root_cause()
++                    .downcast_ref::<crate::NonRetryableReconnectError>()
++                    .is_some(),
++                "expected a non-retryable authentication error for {output:?}"
++            );
++        }
++    }
++
++    #[test]
++    fn test_ssh_non_authentication_errors_remain_retryable() {
++        for output in [
++            b"connect to host proxy port 22: Permission denied\n".as_slice(),
++            b"ProxyCommand: exec /usr/local/bin/proxy: Permission denied\n",
++            b"bash: /home/user/.zed/zed-remote-server: Permission denied\n",
++            b"ProxyCommand: exec /opt/proxy: Permission denied (os error 13)\n",
++            b"bash: /opt/tool: Permission denied (credential helper)\n",
++            b"Permission denied ()\n",
++            b"Permission denied (unknown-method)\n",
++            b"Permission denied (publickey\n",
++            b"Permission denied (publickey,password). trailing\n",
++            b"pam_nologin: System is booting up. Unprivileged users are not permitted to log in yet.\n",
++            b"pam_nologin: System is booting up. Permission denied (publickey,password).\n",
++            b"Authentication failed\n",
++        ] {
++            let error = parse_ssh_connect_error(output).expect_err("SSH failure should be an error");
++            assert!(
++                error
++                    .root_cause()
++                    .downcast_ref::<crate::NonRetryableReconnectError>()
++                    .is_none(),
++                "expected a retryable error for {output:?}"
++            );
++        }
++    }
++
++    #[test]
++    fn test_askpass_result_maps_to_reconnect_error() {
++        let prompt_unavailable = askpass_result_error(askpass::AskPassResult::PromptUnavailable);
++        assert_eq!(
++            prompt_unavailable.downcast_ref::<crate::NonRetryableReconnectError>(),
++            Some(&crate::NonRetryableReconnectError::PromptUnavailable)
++        );
++
++        let cancelled_by_user = askpass_result_error(askpass::AskPassResult::CancelledByUser);
++        assert_eq!(
++            cancelled_by_user.downcast_ref::<crate::NonRetryableReconnectError>(),
++            Some(&crate::NonRetryableReconnectError::CanceledByUser)
++        );
++
++        let timed_out = askpass_result_error(askpass::AskPassResult::Timedout);
++        assert!(
++            timed_out
++                .downcast_ref::<crate::NonRetryableReconnectError>()
++                .is_none()
++        );
++        assert_eq!(timed_out.to_string(), "connecting to host timed out");
++    }
+ }
+diff --git a/crates/remote_connection/src/remote_connection.rs b/crates/remote_connection/src/remote_connection.rs
+index 15645b9b9bbf8c08c316ed32452f88d09c6c1530..9ceb03f10d01017670f6375556f0b3576bca83ca 100644
+--- a/crates/remote_connection/src/remote_connection.rs
++++ b/crates/remote_connection/src/remote_connection.rs
+@@ -463,20 +463,45 @@ impl remote::RemoteClientDelegate for RemoteClientDelegate {
+     fn ask_password(
+         &self,
+         prompt: String,
+-        tx: oneshot::Sender<EncryptedPassword>,
++        tx: oneshot::Sender<Result<EncryptedPassword, askpass::AskPassCancelReason>>,
+         cancellation: oneshot::Receiver<()>,
+         cx: &mut AsyncApp,
+     ) {
+         let mut known_password = self.known_password.clone();
+         if let Some(password) = known_password.take() {
+-            tx.send(password).ok();
++            tx.send(Ok(password)).ok();
++            return;
++        }
++
++        let Some(ui) = self.ui.upgrade() else {
++            log::warn!(
++                "SSH password requested during background reconnect, but interactive prompt is unavailable"
++            );
++            tx.send(Err(askpass::AskPassCancelReason::PromptUnavailable))
++                .ok();
++            return;
++        };
++
++        let (modal_tx, modal_rx) = oneshot::channel();
++        let prompt_result = self.window.update(cx, |_, window, cx| {
++            ui.update(cx, |modal, cx| {
++                modal.set_prompt(prompt, modal_tx, cancellation, window, cx);
++            })
++        });
++
++        if prompt_result.is_ok() {
++            cx.spawn(async move |_cx| {
++                let result = modal_rx
++                    .await
++                    .map_err(|_| askpass::AskPassCancelReason::CancelledByUser);
++                tx.send(result).ok();
++            })
++            .detach();
+         } else {
+-            self.window
+-                .update(cx, |_, window, cx| {
+-                    self.ui.update(cx, |modal, cx| {
+-                        modal.set_prompt(prompt, tx, cancellation, window, cx);
+-                    })
+-                })
++            log::warn!(
++                "SSH password requested during background reconnect, but interactive prompt window is unavailable"
++            );
++            tx.send(Err(askpass::AskPassCancelReason::PromptUnavailable))
+                 .ok();
+         }
+     }
+@@ -640,7 +665,7 @@ impl remote::RemoteClientDelegate for BackgroundRemoteClientDelegate {
+     fn ask_password(
+         &self,
+         prompt: String,
+-        _tx: oneshot::Sender<EncryptedPassword>,
++        tx: oneshot::Sender<Result<EncryptedPassword, askpass::AskPassCancelReason>>,
+         _cancellation: oneshot::Receiver<()>,
+         _cx: &mut AsyncApp,
+     ) {
+@@ -648,6 +673,8 @@ impl remote::RemoteClientDelegate for BackgroundRemoteClientDelegate {
+             "Pooled remote connection unexpectedly requires a password \
+              (prompt: {prompt})"
+         );
++        tx.send(Err(askpass::AskPassCancelReason::PromptUnavailable))
++            .ok();
+     }
+ 
+     fn set_status(&self, _status: Option<&str>, _cx: &mut AsyncApp) {}
+@@ -842,6 +869,63 @@ mod tests {
+         assert!(prompt.read_with(cx, |prompt, _| prompt.prompt.is_some()));
+     }
+ 
++    #[gpui::test]
++    async fn dropped_prompt_ui_answers_prompt_unavailable(cx: &mut TestAppContext) {
++        initialize_test(cx);
++
++        let window = cx.add_window(|window, cx| Editor::single_line(window, cx));
++        let prompt = window
++            .update(cx, |_, window, cx| {
++                cx.new(|cx| {
++                    RemoteConnectionPrompt::new(
++                        "example.com".to_string(),
++                        None,
++                        false,
++                        false,
++                        window,
++                        cx,
++                    )
++                })
++            })
++            .expect("test window should remain open");
++        let prompt_weak = prompt.downgrade();
++        drop(prompt);
++
++        let delegate = RemoteClientDelegate::new(window.into(), prompt_weak, None);
++        let (response_sender, response_receiver) = oneshot::channel();
++        let (_cancellation_sender, cancellation_receiver) = oneshot::channel();
++        remote::RemoteClientDelegate::ask_password(
++            &delegate,
++            "Password:".to_string(),
++            response_sender,
++            cancellation_receiver,
++            &mut cx.to_async(),
++        );
++
++        assert!(matches!(
++            response_receiver.await,
++            Ok(Err(askpass::AskPassCancelReason::PromptUnavailable))
++        ));
++    }
++
++    #[gpui::test]
++    async fn background_delegate_answers_prompt_unavailable(cx: &mut TestAppContext) {
++        let (response_sender, response_receiver) = oneshot::channel();
++        let (_cancellation_sender, cancellation_receiver) = oneshot::channel();
++        remote::RemoteClientDelegate::ask_password(
++            &BackgroundRemoteClientDelegate,
++            "Password:".to_string(),
++            response_sender,
++            cancellation_receiver,
++            &mut cx.to_async(),
++        );
++
++        assert!(matches!(
++            response_receiver.await,
++            Ok(Err(askpass::AskPassCancelReason::PromptUnavailable))
++        ));
++    }
++
+     fn initialize_test(cx: &mut TestAppContext) {
+         cx.update(|cx| {
+             let settings_store = SettingsStore::test(cx);
+-- 
+2.55.0
+

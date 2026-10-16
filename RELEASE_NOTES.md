@@ -5,14 +5,14 @@ Without any setting this build also:
 - Reserves one em instead of two after the text in single-line editors.
 - Bundles the Mono Light theme (not selected by default).
 - Routes application logs to `--user-data-dir` on macOS when specified.
-- Keeps agent panel terminal threads alive in persistent [shpool](https://github.com/shell-pool/shpool) sessions on the host (Mac or remote server), surviving editor restarts, sleep, and SSH disconnects. Process exit keeps the thread with a Restart bar; a thread is closed only with its × button. Initial PTY sizing is held until output arrives (or a 5-second timeout) to avoid truncation. Non-interactive remote shells discover the systemd user socket even when `XDG_RUNTIME_DIR` is not exported.
-- Improves remote reconnection resilience: retries up to 10 times with exponential backoff (~65 s total) before exhausting, and automatically restarts all exited terminal threads upon reconnecting.
+- Keeps managed agent-panel terminal threads created or restored in persistent [shpool](https://github.com/shell-pool/shpool) sessions on the host (Mac or remote server), surviving editor restarts, sleep, and SSH disconnects. Process exit keeps only these persistent threads with a Restart bar; × closes the thread and its session. Ordinary terminal tabs dragged into the agent panel remain non-persistent and close on process exit. Initial PTY sizing is held until output arrives (or a 5-second timeout) to avoid truncation. Non-interactive remote shells discover the systemd user socket even when `XDG_RUNTIME_DIR` is not exported. Login-shell attachment avoids injecting shpool's prompt sentinel or a leading blank line without changing global shell configuration. Probe errors are surfaced rather than silently falling back to a plain shell; a probe that does not complete times out after 17 seconds.
+- Improves remote reconnection resilience: retries transient failures up to 10 times with exponential backoff (~65 s total) before exhausting, and automatically restarts only exited persistent terminal threads upon reconnecting. It stops retrying after a password prompt is canceled or unavailable, or after an authentication failure is verified; a retry action remains available with the actual disconnect reason.
 - Fixes thread tab stability in `agent.threads_sidebar.in_agent_panel`: draft threads are preserved during pending activation, and tab ordering remains stable and deterministic across updates.
 
 
 ## Install
 
-1. Open `Zed-aarch64.dmg` and drag Zed to Applications. It replaces the official Zed.app: same bundle id, same settings and data.
+1. Open `Zed.dmg` and drag Zed to Applications. It replaces the official Zed.app: same bundle id, same settings and data.
 2. The build is ad-hoc signed and not notarized, so remove the quarantine flag once:
 
    ```sh

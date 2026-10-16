@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 67fe260fff58fcbfb8670eefb0429533a52adee2 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 15:43:23 +0300
-Subject: [PATCH 07/11] Add bundled Mono Light theme
+Subject: [PATCH 07/12] Add bundled Mono Light theme
 
 Mono Light is a flat light theme for the borderless layout of this fork.
 The border colours of panes, panels and elements are transparent, and
@@ -20,7 +20,7 @@ chosen with "theme": "Mono Light"; the default theme does not change.
 
 diff --git a/assets/themes/mono/mono.json b/assets/themes/mono/mono.json
 new file mode 100644
-index 0000000000..bd2223f2f9
+index 0000000000000000000000000000000000000000..bd2223f2f9537f2c86da514f3d25dd724987c594
 --- /dev/null
 +++ b/assets/themes/mono/mono.json
 @@ -0,0 +1,99 @@

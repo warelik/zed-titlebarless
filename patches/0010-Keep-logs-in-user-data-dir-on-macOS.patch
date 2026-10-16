@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From c442e18512baa3b517147d147a9a867d7c395306 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 10:36:47 +0300
-Subject: [PATCH 10/11] Keep logs in --user-data-dir on macOS
+Subject: [PATCH 10/12] Keep logs in --user-data-dir on macOS
 
 --user-data-dir is documented to hold the logs, but on macOS they stayed in
 ~/Library/Logs/Zed. A second instance started with its own data directory, such
@@ -26,7 +26,7 @@ confined to crates/paths.
  1 file changed, 24 insertions(+), 6 deletions(-)
 
 diff --git a/crates/paths/src/paths.rs b/crates/paths/src/paths.rs
-index 9c16f1db28..a73618d3e4 100644
+index 9c16f1db289585280e7919297c43085a5a76fdf2..a73618d3e4606cb594ad90cd8177ca5ffc48907a 100644
 --- a/crates/paths/src/paths.rs
 +++ b/crates/paths/src/paths.rs
 @@ -65,6 +65,9 @@ static CURRENT_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();

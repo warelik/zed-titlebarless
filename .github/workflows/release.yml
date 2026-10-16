@@ -134,9 +134,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="${TAG#v}"
-          dmg="zed/target/aarch64-apple-darwin/release/Zed-aarch64.dmg"
+          cp zed/target/aarch64-apple-darwin/release/Zed-aarch64.dmg Zed.dmg
+          dmg="Zed.dmg"
           symbols_archive="${SYMBOLS_ARCHIVE:-zed/target/aarch64-apple-darwin/release/zed-${version}-titlebarless-debug-symbols-macos-aarch64.tar.gz}"
-          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE/Zed-aarch64.dmg"
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE/Zed.dmg"
           printf '{"version":"%s","url":"%s"}\n' "$version" "$url" > latest.json
           {
             echo "Zed [$TAG](https://github.com/zed-industries/zed/releases/tag/$TAG) + [patches](https://github.com/$GITHUB_REPOSITORY/tree/$GITHUB_SHA/patches)."

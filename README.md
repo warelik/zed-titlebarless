@@ -47,7 +47,8 @@ Without any setting:
 - Single-line editors (such as the threads sidebar search) reserve one em instead of two after the text.
 - A flat light theme, Mono Light, is bundled. It only appears in the theme picker (`"theme": "Mono Light"`); the default theme is unchanged.
 - Auto-update comes from this repository's releases. SSH remoting still downloads the official remote server, since the version matches upstream.
-- Agent panel terminal threads keep their shell in a [shpool](https://github.com/shell-pool/shpool) session when `shpool` is on the host's `PATH`, so they survive restarts and dropped SSH connections; a thread is closed only with its × button. Without shpool the terminal runs a plain shell as before.
+- Managed terminal threads created or restored in the agent panel keep their shell in a [shpool](https://github.com/shell-pool/shpool) session when `shpool` is on the host's `PATH`, so they survive restarts and dropped SSH connections; closing one with its × button removes its session. Ordinary terminal tabs dragged into the agent panel remain non-persistent and close when their process exits. Without shpool, managed threads run a plain shell as before. Probe errors are surfaced instead of silently falling back to a plain shell; a probe that does not complete times out after 17 seconds.
+- Manual and automatic SSH reconnect stop retrying after a password prompt is canceled or unavailable, or after an authentication failure is verified. A retry action remains available with the actual disconnect reason; transient failures continue retrying with backoff.
 - On macOS `--user-data-dir` also holds the logs, as documented, so a second instance no longer writes into the default instance's `Zed.log`.
 
 ### Optional density settings
@@ -84,7 +85,7 @@ Other changes will come later, if upstream rejects them.
 
 ## Install
 
-1. Open `Zed-aarch64.dmg` and drag Zed to Applications. It replaces the official Zed.app: same bundle id, same settings and data.
+1. Open `Zed.dmg` and drag Zed to Applications. It replaces the official Zed.app: same bundle id, same settings and data.
 2. The build is ad-hoc signed and not notarized, so remove the quarantine flag once:
 
    ```sh
@@ -93,7 +94,7 @@ Other changes will come later, if upstream rejects them.
 
 ## How it's built
 
-- [`patches/`](patches) holds the changes on top of upstream stable: one patch per commit of the fork, eleven in total, written against `v1.24.2` and applied in file name order.
+- [`patches/`](patches) holds the changes on top of upstream stable: one patch per commit of the fork, twelve in total, written against `v1.24.2` and applied in file name order.
 - [`.github/workflows/release.yml`](.github/workflows/release.yml) checks for a new upstream stable release every 6 hours, applies the patches, builds the DMG on a GitHub macOS runner and publishes a release with `latest.json` for auto-update and `zed-<version>-titlebarless-debug-symbols-macos-aarch64.tar.gz` containing debug symbols.
 - If a patch stops applying, the workflow fails. Regenerate the patches against the new tag and push.
 

@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 83867ed88f9441570ff12f608d0269c707b01d78 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 11:28:27 +0300
-Subject: [PATCH 01/11] Add title_bar_to_status_bar setting
+Subject: [PATCH 01/12] Add title_bar_to_status_bar setting
 
 The title bar spends a whole row of vertical space on a few controls,
 while the status bar at the bottom of the window has room for them.
@@ -55,10 +55,10 @@ partial settings falls back cleanly to stock behavior without panicking.
  18 files changed, 424 insertions(+), 31 deletions(-)
 
 diff --git a/assets/settings/default.json b/assets/settings/default.json
-index 1228f8b859..67798e5099 100644
+index 29ef750de2744ccf476d6b68fab4c72ec1f2344d..04a922488254b1a243ecdc2d91db7ebf0da71a9a 100644
 --- a/assets/settings/default.json
 +++ b/assets/settings/default.json
-@@ -606,6 +606,9 @@
+@@ -611,6 +611,9 @@
    //    on notched displays, the area around the notch.
    //     "simple"
    "fullscreen_mode": "native",
@@ -69,7 +69,7 @@ index 1228f8b859..67798e5099 100644
    "title_bar": {
      // Whether to show git status indicators on the branch icon in the titlebar.
 diff --git a/crates/agent_ui/src/threads_archive_view.rs b/crates/agent_ui/src/threads_archive_view.rs
-index fd1f69de8c..698edb87cb 100644
+index da6c5ddc4eff2a22d8d4d29fc44f6a6f9c9bc429..ea2611575c88700b997d054fef1c4152a24497d2 100644
 --- a/crates/agent_ui/src/threads_archive_view.rs
 +++ b/crates/agent_ui/src/threads_archive_view.rs
 @@ -28,14 +28,13 @@ use picker::{
@@ -88,7 +88,7 @@ index fd1f69de8c..698edb87cb 100644
  };
  use util::ResultExt;
  use util::paths::PathExt;
-@@ -856,7 +855,7 @@ impl ThreadsArchiveView {
+@@ -857,7 +856,7 @@ impl ThreadsArchiveView {
          .detach_and_log_err(cx);
      }
  
@@ -97,7 +97,7 @@ index fd1f69de8c..698edb87cb 100644
          let has_query = !self.filter_editor.read(cx).text(cx).is_empty();
          let sidebar_on_left = matches!(
              AgentSettings::get_global(cx).sidebar_side(),
-@@ -868,7 +867,8 @@ impl ThreadsArchiveView {
+@@ -869,7 +868,8 @@ impl ThreadsArchiveView {
          let left_window_controls = !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_left;
          let right_window_controls =
              !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_right;
@@ -107,7 +107,7 @@ index fd1f69de8c..698edb87cb 100644
          let show_focus_keybinding =
              self.selection.is_some() && !self.filter_editor.focus_handle(cx).is_focused(window);
  
-@@ -881,6 +881,7 @@ impl ThreadsArchiveView {
+@@ -882,6 +882,7 @@ impl ThreadsArchiveView {
                      right_window_controls,
                      false,
                  ),
@@ -115,7 +115,7 @@ index fd1f69de8c..698edb87cb 100644
                  Decorations::Server => header.mt_px().pb_px(),
              })
              .when(left_window_controls, |this| {
-@@ -895,6 +896,9 @@ impl ThreadsArchiveView {
+@@ -896,6 +897,9 @@ impl ThreadsArchiveView {
                      this
                  }
              })
@@ -126,10 +126,10 @@ index fd1f69de8c..698edb87cb 100644
              .gap_1()
              .justify_between()
 diff --git a/crates/gpui/src/platform.rs b/crates/gpui/src/platform.rs
-index c03653ed94..4f8d597616 100644
+index e47fd002885cc3d947d7e8dfaa595863d2c3abd1..ab108abbdd961f629dccd68654cc1259a4edf732 100644
 --- a/crates/gpui/src/platform.rs
 +++ b/crates/gpui/src/platform.rs
-@@ -979,6 +979,10 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+@@ -1243,6 +1243,10 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
      }
      #[cfg(target_os = "macos")]
      fn set_traffic_light_position(&self, _position: Point<Pixels>) {}
@@ -141,10 +141,10 @@ index c03653ed94..4f8d597616 100644
      fn titlebar_double_click(&self, _is_resizable: bool, _is_minimizable: bool) {}
      fn on_move_tab_to_new_window(&self, _callback: Box<dyn FnMut()>) {}
 diff --git a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
-index 52d729f75a..5ced012252 100644
+index e892ea2afefb2cfd3f1a2030e108e75e066b1f25..3e4dd5501db7e42e9c59ed3dadb46461dadc2272 100644
 --- a/crates/gpui/src/window.rs
 +++ b/crates/gpui/src/window.rs
-@@ -2888,6 +2888,12 @@ impl Window {
+@@ -2980,6 +2980,12 @@ impl Window {
          self.platform_window.set_traffic_light_position(position);
      }
  
@@ -158,7 +158,7 @@ index 52d729f75a..5ced012252 100644
      pub fn set_app_id(&mut self, app_id: &str) {
          self.platform_window.set_app_id(app_id);
 diff --git a/crates/gpui_macos/src/window.rs b/crates/gpui_macos/src/window.rs
-index 12a75e73ee..79661d5a54 100644
+index 55b69b09b0a3412ccfadf2803550a8bf4b364296..d55943f6ba83156708456171039846794347ae53 100644
 --- a/crates/gpui_macos/src/window.rs
 +++ b/crates/gpui_macos/src/window.rs
 @@ -1626,6 +1626,15 @@ impl PlatformWindow for MacWindow {
@@ -178,7 +178,7 @@ index 12a75e73ee..79661d5a54 100644
          self.0.as_ref().lock().scale_factor()
      }
 diff --git a/crates/platform_title_bar/src/platform_title_bar.rs b/crates/platform_title_bar/src/platform_title_bar.rs
-index b69bb0d1ff..92fb6ff2d5 100644
+index b69bb0d1ff0083bef7a9ddb40554df67610ea721..92fb6ff2d57b0f309a19dffe6894143237a95acb 100644
 --- a/crates/platform_title_bar/src/platform_title_bar.rs
 +++ b/crates/platform_title_bar/src/platform_title_bar.rs
 @@ -2,15 +2,16 @@ pub mod platforms;
@@ -230,10 +230,10 @@ index b69bb0d1ff..92fb6ff2d5 100644
      id: ElementId,
      platform_style: PlatformStyle,
 diff --git a/crates/settings/src/vscode_import.rs b/crates/settings/src/vscode_import.rs
-index 7248c1ab19..f4d59b06b2 100644
+index 8f6e81ec696da9c6e35e9be13e23cb1be3fd3f5c..d9138ee781a67b27639cdcb08ee70075ef91a496 100644
 --- a/crates/settings/src/vscode_import.rs
 +++ b/crates/settings/src/vscode_import.rs
-@@ -1094,6 +1094,7 @@ impl VsCodeSettings {
+@@ -1096,6 +1096,7 @@ impl VsCodeSettings {
              reveal_if_open: self.read_bool("workbench.editor.revealIfOpen"),
              restore_on_startup: None,
              window_decorations: None,
@@ -242,7 +242,7 @@ index 7248c1ab19..f4d59b06b2 100644
              use_system_path_prompts: self.read_bool("files.simpleDialog.enable").map(|b| !b),
              use_system_prompts: None,
 diff --git a/crates/settings_content/src/workspace.rs b/crates/settings_content/src/workspace.rs
-index dbcb6fc414..d106cc9f15 100644
+index dbcb6fc41435c0a00b7c872dabcc0e9687af66fa..d106cc9f1552943e652f5794f592c31c7b6f6c2b 100644
 --- a/crates/settings_content/src/workspace.rs
 +++ b/crates/settings_content/src/workspace.rs
 @@ -169,6 +169,11 @@ pub struct WorkspaceSettingsContent {
@@ -258,7 +258,7 @@ index dbcb6fc414..d106cc9f15 100644
      /// Default: false
      pub focus_follows_mouse: Option<FocusFollowsMouse>,
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 890248d674..cb12edd25b 100644
+index edf18fc6365fc97dd5fd4205b3a8a0b3b8aa7b28..c58584c6cdcc9b11ee86d3d5c193381abc2e916b 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -39,13 +39,12 @@ use menu::{
@@ -276,7 +276,7 @@ index 890248d674..cb12edd25b 100644
  
  use serde::{Deserialize, Serialize};
  use settings::{Settings as _, SettingsStore};
-@@ -7361,7 +7360,7 @@ impl Sidebar {
+@@ -7369,7 +7368,7 @@ impl Sidebar {
      fn render_sidebar_header(
          &self,
          no_open_projects: bool,
@@ -285,7 +285,7 @@ index 890248d674..cb12edd25b 100644
          cx: &mut Context<Self>,
      ) -> impl IntoElement {
          let has_query = self.has_filter_query(cx);
-@@ -7372,7 +7371,8 @@ impl Sidebar {
+@@ -7380,7 +7379,8 @@ impl Sidebar {
          let left_window_controls = !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_left;
          let right_window_controls =
              !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_right;
@@ -295,7 +295,7 @@ index 890248d674..cb12edd25b 100644
  
          h_flex()
              .h(header_height)
-@@ -7384,6 +7384,7 @@ impl Sidebar {
+@@ -7392,6 +7392,7 @@ impl Sidebar {
                      right_window_controls,
                      no_open_projects,
                  ),
@@ -303,7 +303,7 @@ index 890248d674..cb12edd25b 100644
                  Decorations::Server => header.mt_px().pb_px(),
              })
              .when(left_window_controls, |this| {
-@@ -7398,6 +7399,9 @@ impl Sidebar {
+@@ -7406,6 +7407,9 @@ impl Sidebar {
                      this
                  }
              })
@@ -314,7 +314,7 @@ index 890248d674..cb12edd25b 100644
              .gap_1()
              .when(!no_open_projects, |this| {
 diff --git a/crates/title_bar/src/title_bar.rs b/crates/title_bar/src/title_bar.rs
-index 09c36b3855..95a70f5b9e 100644
+index 3ffc153bbcf3e4520973328edf04e2213f2f81c4..c7e01b220d9a2adf35a54c1ba3d268ed61c2a46e 100644
 --- a/crates/title_bar/src/title_bar.rs
 +++ b/crates/title_bar/src/title_bar.rs
 @@ -55,6 +55,7 @@ use util::ResultExt;
@@ -341,7 +341,7 @@ index 09c36b3855..95a70f5b9e 100644
  pub struct TitleBar {
      platform_titlebar: Entity<PlatformTitleBar>,
      project: Entity<Project>,
-@@ -409,6 +419,18 @@ impl Render for TitleBar {
+@@ -410,6 +420,18 @@ impl Render for TitleBar {
                  .into_any_element(),
          );
  
@@ -360,7 +360,7 @@ index 09c36b3855..95a70f5b9e 100644
          if show_menus {
              self.platform_titlebar.update(cx, |this, _| {
                  this.set_button_layout(button_layout);
-@@ -697,7 +719,7 @@ impl TitleBar {
+@@ -698,7 +720,7 @@ impl TitleBar {
                          )
                      },
                  )
@@ -369,7 +369,7 @@ index 09c36b3855..95a70f5b9e 100644
                  .into_any_element(),
          )
      }
-@@ -871,7 +893,7 @@ impl TitleBar {
+@@ -872,7 +894,7 @@ impl TitleBar {
                      Tooltip::for_action("Recent Projects", &zed_actions::OpenRecent::default(), cx)
                  },
              )
@@ -378,7 +378,7 @@ index 09c36b3855..95a70f5b9e 100644
              .into_any_element()
      }
  
-@@ -923,7 +945,7 @@ impl TitleBar {
+@@ -924,7 +946,7 @@ impl TitleBar {
                      Tooltip::for_action("Recent Projects", &zed_actions::OpenRecent::default(), cx)
                  },
              )
@@ -387,7 +387,7 @@ index 09c36b3855..95a70f5b9e 100644
      }
  
      fn render_worktree_and_branch(
-@@ -1029,7 +1051,7 @@ impl TitleBar {
+@@ -1030,7 +1052,7 @@ impl TitleBar {
                          )
                      },
                  )
@@ -396,7 +396,7 @@ index 09c36b3855..95a70f5b9e 100644
          });
  
          let branch_picker = branch_name.and_then(|branch_name| {
-@@ -1086,7 +1108,7 @@ impl TitleBar {
+@@ -1087,7 +1109,7 @@ impl TitleBar {
                              cx,
                          )
                      })
@@ -405,7 +405,7 @@ index 09c36b3855..95a70f5b9e 100644
              })
          });
  
-@@ -1436,7 +1458,7 @@ impl TitleBar {
+@@ -1437,7 +1459,7 @@ impl TitleBar {
                  })
                  .into()
              })
@@ -415,7 +415,7 @@ index 09c36b3855..95a70f5b9e 100644
  }
  
 diff --git a/crates/workspace/src/dock.rs b/crates/workspace/src/dock.rs
-index 918607c0cd..1a6059cbf4 100644
+index 918607c0cdffe0d689733a48f827e58763dc0781..1a6059cbf41e835a3e7ae4cd69467e451d5ea689 100644
 --- a/crates/workspace/src/dock.rs
 +++ b/crates/workspace/src/dock.rs
 @@ -1,7 +1,10 @@
@@ -467,7 +467,7 @@ index 918607c0cd..1a6059cbf4 100644
                              Axis::Vertical => this.h_full().w_full(),
                          })
 diff --git a/crates/workspace/src/pane.rs b/crates/workspace/src/pane.rs
-index 25771a8ee1..528dfa2976 100644
+index 25771a8ee1f8c0bd071d468f2239f51f355bd66a..528dfa297694c8c189e28d3d1ccb05a92515b691 100644
 --- a/crates/workspace/src/pane.rs
 +++ b/crates/workspace/src/pane.rs
 @@ -9,9 +9,11 @@ use crate::{
@@ -626,7 +626,7 @@ index 25771a8ee1..528dfa2976 100644
                  let has_worktrees = project.read(cx).visible_worktrees(cx).next().is_some();
                  // main content
 diff --git a/crates/workspace/src/status_bar.rs b/crates/workspace/src/status_bar.rs
-index 0cf9e97b13..a3966a06a3 100644
+index 0cf9e97b1360710e0eea288460797dbe785d5bba..a3966a06a3017d662a643e0337b1100b169a2ec3 100644
 --- a/crates/workspace/src/status_bar.rs
 +++ b/crates/workspace/src/status_bar.rs
 @@ -1,6 +1,6 @@
@@ -679,7 +679,7 @@ index 0cf9e97b13..a3966a06a3 100644
          &mut self,
          multi_workspace: WeakEntity<MultiWorkspace>,
 diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
-index 7d50ce7297..715ed113bf 100644
+index 605fe6c27f6111735ce294161bdb2e0acc2f4065..357e80e59212254b0ff3d981c691726710f7123b 100644
 --- a/crates/workspace/src/workspace.rs
 +++ b/crates/workspace/src/workspace.rs
 @@ -325,6 +325,99 @@ static ZED_WINDOW_POSITION: LazyLock<Option<Point<Pixels>>> = LazyLock::new(|| {
@@ -851,7 +851,7 @@ index 7d50ce7297..715ed113bf 100644
          self.titlebar_item = Some(item);
          cx.notify();
      }
-@@ -8753,7 +8880,7 @@ impl Workspace {
+@@ -8760,7 +8887,7 @@ impl Workspace {
          };
  
          let mut parts = Vec::new();
@@ -860,7 +860,7 @@ index 7d50ce7297..715ed113bf 100644
              // The title bar is an ARIA toolbar, so region navigation lands on
              // its first control rather than the toolbar container.
              parts.push(FocusablePart::toolbar(self.titlebar_focus_handle.clone()));
-@@ -9562,6 +9689,10 @@ impl Render for Workspace {
+@@ -9569,6 +9696,10 @@ impl Render for Workspace {
              && self.active_item(cx).is_some();
          let pad_zoomed_pane =
              self.centered_layout && self.zoomed.is_some() && self.zoomed_position.is_none();
@@ -871,7 +871,7 @@ index 7d50ce7297..715ed113bf 100644
          let render_padding = |size| {
              (size > 0.0).then(|| {
                  div()
-@@ -9588,6 +9719,18 @@ impl Render for Workspace {
+@@ -9595,6 +9726,18 @@ impl Render for Workspace {
          };
          let centered_paddings = render_centered_paddings(pad_center_pane);
          let zoomed_paddings = render_centered_paddings(pad_zoomed_pane);
@@ -890,7 +890,7 @@ index 7d50ce7297..715ed113bf 100644
          let ui_font = theme_settings::setup_ui_font(window, cx);
  
          let theme = cx.theme().clone();
-@@ -9625,7 +9768,7 @@ impl Render for Workspace {
+@@ -9632,7 +9775,7 @@ impl Render for Workspace {
              // a tab group: region navigation lands on the first control (per
              // the ARIA toolbar pattern), Tab steps through them, and arrow keys
              // move between them once focus is inside.
@@ -899,7 +899,7 @@ index 7d50ce7297..715ed113bf 100644
                  this.child(
                      div()
                          .id("titlebar-region")
-@@ -9677,7 +9820,7 @@ impl Render for Workspace {
+@@ -9684,7 +9827,7 @@ impl Render for Workspace {
                              .flex()
                              .flex_col()
                              .overflow_hidden()
@@ -908,7 +908,7 @@ index 7d50ce7297..715ed113bf 100644
                              .border_b_1()
                              .border_color(colors.border)
                              .child({
-@@ -10028,6 +10171,17 @@ impl Render for Workspace {
+@@ -10035,6 +10178,17 @@ impl Render for Workspace {
                                          })
                                          .into_any_element(),
                                  };
@@ -926,7 +926,7 @@ index 7d50ce7297..715ed113bf 100644
                                  let overlay = div()
                                      .occlude()
                                      .absolute()
-@@ -10042,13 +10196,20 @@ impl Render for Workspace {
+@@ -10049,13 +10203,20 @@ impl Render for Workspace {
                                      return Some(overlay);
                                  }
  
@@ -948,7 +948,7 @@ index 7d50ce7297..715ed113bf 100644
                                  })
                              }))
                              .children(self.render_notifications(window, cx)),
-@@ -12996,6 +13157,68 @@ mod tests {
+@@ -13016,6 +13177,68 @@ mod tests {
          );
      }
  
@@ -1018,7 +1018,7 @@ index 7d50ce7297..715ed113bf 100644
      async fn test_window_title_format_empty_project(cx: &mut TestAppContext) {
          init_test(cx);
 diff --git a/crates/workspace/src/workspace_settings.rs b/crates/workspace/src/workspace_settings.rs
-index eff3a0a93c..830b7b2145 100644
+index eff3a0a93cc87c98a476c3ed69e9fc8bece91751..830b7b2145b60291b736975672cec64352d269c4 100644
 --- a/crates/workspace/src/workspace_settings.rs
 +++ b/crates/workspace/src/workspace_settings.rs
 @@ -45,6 +45,7 @@ pub struct WorkspaceSettings {
@@ -1038,7 +1038,7 @@ index eff3a0a93c..830b7b2145 100644
                  enabled: workspace
                      .focus_follows_mouse
 diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
-index a5d947b967..7253fce1e3 100644
+index a5d947b9675124aeb44c1bbf1c6cbbc0dc0aa92e..7253fce1e36edec822eff560d7685a38942d72b1 100644
 --- a/crates/zed/src/zed.rs
 +++ b/crates/zed/src/zed.rs
 @@ -394,7 +394,10 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
@@ -1054,10 +1054,10 @@ index a5d947b967..7253fce1e3 100644
          window_bounds: None,
          focus: false,
 diff --git a/docs/src/reference/all-settings.md b/docs/src/reference/all-settings.md
-index 9ce09d7ea5..5098c651ca 100644
+index 4d95a7479afdc16bf95e541c6f80b43a5c7985ed..08e838b000cd1352e6c6e213899c073427880246 100644
 --- a/docs/src/reference/all-settings.md
 +++ b/docs/src/reference/all-settings.md
-@@ -5493,6 +5493,16 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a
+@@ -5509,6 +5509,16 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a
  - `open_menus_on_hover`: Whether to open title-bar menus on hover. Once a menu is open, hovering always switches between menus.
  - `button_layout`: The layout of window control buttons in the title bar (Linux only). Can be set to `"platform_default"` to follow the system setting, `"standard"` to use Zed's built-in layout, or a custom format like `"close:minimize,maximize"`
  
@@ -1075,10 +1075,10 @@ index 9ce09d7ea5..5098c651ca 100644
  
  - Description: Template for the window title. Use `${separator}` to insert a
 diff --git a/docs/src/visual-customization.md b/docs/src/visual-customization.md
-index c727ee4f17..85138e7e2b 100644
+index 3ab4692c3fd9fd31912ae6618c417f8c0f4cad33..5ff018af9e6a80d6540e91f2ae6b6122bd1eb24f 100644
 --- a/docs/src/visual-customization.md
 +++ b/docs/src/visual-customization.md
-@@ -133,6 +133,8 @@ To disable this behavior use:
+@@ -140,6 +140,8 @@ To disable this behavior use:
  ### Titlebar
  
  ```json [settings]

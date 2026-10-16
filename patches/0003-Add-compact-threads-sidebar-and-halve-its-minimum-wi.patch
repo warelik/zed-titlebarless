@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 44488bb4be0130bc7d925c4134bc594ebeca3ce4 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 11:28:27 +0300
-Subject: [PATCH 03/11] Add compact threads sidebar and halve its minimum width
+Subject: [PATCH 03/12] Add compact threads sidebar and halve its minimum width
 
 Each sidebar thread takes two lines even when its only metadata is a
 timestamp, so few threads fit on screen. With
@@ -33,10 +33,10 @@ fallback to stock defaults when the compact setting is omitted.
  8 files changed, 123 insertions(+), 46 deletions(-)
 
 diff --git a/assets/settings/default.json b/assets/settings/default.json
-index bbc8f654c9..470efc3d33 100644
+index b41faccf25951f26d8525acf8a71497c6e1fbad3..b83cae69bb99865568f517973933ba55e34c0376 100644
 --- a/assets/settings/default.json
 +++ b/assets/settings/default.json
-@@ -1179,6 +1179,8 @@
+@@ -1189,6 +1189,8 @@
        "default_width": 300,
        // Automatically open the Threads Sidebar when opening a folder in an existing window.
        "auto_open": true,
@@ -46,7 +46,7 @@ index bbc8f654c9..470efc3d33 100644
      // Default fixed width when the agent panel is docked to the left or right and
      // `flexible` is false.
 diff --git a/crates/agent/src/tool_permissions.rs b/crates/agent/src/tool_permissions.rs
-index fa38a0b0bb..750154a1fe 100644
+index fa38a0b0bb0fc7c9efd40a9b2970c65c1dc4e901..750154a1fe1ac82775d6be70f8d95a01d6bc1ce6 100644
 --- a/crates/agent/src/tool_permissions.rs
 +++ b/crates/agent/src/tool_permissions.rs
 @@ -613,6 +613,7 @@ mod tests {
@@ -58,7 +58,7 @@ index fa38a0b0bb..750154a1fe 100644
              thinking_display: Default::default(),
          }
 diff --git a/crates/agent_settings/src/agent_settings.rs b/crates/agent_settings/src/agent_settings.rs
-index 331480c2e6..0cecde9362 100644
+index 331480c2e6f3b5faec246383fda2b4fa89289aea..0cecde93623f473698996a0f24bbd3eb65f74032 100644
 --- a/crates/agent_settings/src/agent_settings.rs
 +++ b/crates/agent_settings/src/agent_settings.rs
 @@ -34,7 +34,7 @@ pub const COMPACTION_PROMPT: &str = include_str!("prompts/compaction_prompt.txt"
@@ -110,10 +110,10 @@ index 331480c2e6..0cecde9362 100644
      fn test_threads_sidebar_settings_edit_and_reset_clears_legacy_keys(cx: &mut gpui::App) {
          let store = SettingsStore::test(cx);
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index 7d28603d46..d9bcdf1811 100644
+index eee943e6657e3a935ebabf6ccb643354168b76a9..b04b36f4a644e0adc7b53ffd9735b3d9cb486e9d 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
-@@ -1014,6 +1014,7 @@ mod tests {
+@@ -1110,6 +1110,7 @@ mod tests {
                  auto_open: true,
                  default_width: px(300.),
                  position: settings::SidebarDockPosition::Left,
@@ -122,7 +122,7 @@ index 7d28603d46..d9bcdf1811 100644
              thinking_display: Default::default(),
          };
 diff --git a/crates/settings_content/src/agent.rs b/crates/settings_content/src/agent.rs
-index 6bafc029cb..b23be559ce 100644
+index b066bdaf298913b905c9ddb6374a7bc06839c738..564652083f535b64243a2dbe37395ab24413fd5a 100644
 --- a/crates/settings_content/src/agent.rs
 +++ b/crates/settings_content/src/agent.rs
 @@ -51,12 +51,17 @@ pub struct ThreadsSidebarSettingsContent {
@@ -146,10 +146,10 @@ index 6bafc029cb..b23be559ce 100644
  
  #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index cb12edd25b..3c09915d4c 100644
+index c58584c6cdcc9b11ee86d3d5c193381abc2e916b..45d5b4a5a540d46e6a4bdaec6bec7d3885569cb5 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
-@@ -2385,7 +2385,13 @@ impl Sidebar {
+@@ -2393,7 +2393,13 @@ impl Sidebar {
              .group(&group_name)
              .when(!has_filter, |this| this.cursor_pointer())
              .relative()
@@ -164,7 +164,7 @@ index cb12edd25b..3c09915d4c 100644
              .w_full()
              .pl_2()
              .pr_1p5()
-@@ -2517,15 +2523,16 @@ impl Sidebar {
+@@ -2525,15 +2531,16 @@ impl Sidebar {
              .block_mouse_except_scroll();
  
          if !is_collapsed && !has_threads {
@@ -183,7 +183,7 @@ index cb12edd25b..3c09915d4c 100644
                          .child(Icon::new(IconName::Circle).size(IconSize::Small).color(
                              Color::Custom(cx.theme().colors().icon_placeholder.opacity(0.1)),
                          ))
-@@ -3415,6 +3422,10 @@ impl Sidebar {
+@@ -3423,6 +3430,10 @@ impl Sidebar {
          !self.filter_editor.read(cx).text(cx).is_empty()
      }
  
@@ -194,7 +194,7 @@ index cb12edd25b..3c09915d4c 100644
      fn start_renaming_entry(
          &mut self,
          ix: usize,
-@@ -6302,6 +6313,7 @@ impl Sidebar {
+@@ -6310,6 +6321,7 @@ impl Sidebar {
  
          let thread_item = ThreadItem::new(id, title.clone())
              .base_bg(sidebar_bg)
@@ -202,7 +202,7 @@ index cb12edd25b..3c09915d4c 100644
              .icon(icon)
              .when(is_draft, |this| {
                  this.icon_color(Color::Custom(cx.theme().colors().icon_muted.opacity(0.2)))
-@@ -6625,6 +6637,7 @@ impl Sidebar {
+@@ -6633,6 +6645,7 @@ impl Sidebar {
  
          let terminal_item = ThreadItem::new(id, title)
              .base_bg(sidebar_bg)
@@ -210,7 +210,7 @@ index cb12edd25b..3c09915d4c 100644
              .icon(IconName::Terminal)
              .when_some(icon_char, |this, icon_char| this.icon_char(icon_char))
              .is_remote(is_remote)
-@@ -7364,6 +7377,7 @@ impl Sidebar {
+@@ -7372,6 +7385,7 @@ impl Sidebar {
          cx: &mut Context<Self>,
      ) -> impl IntoElement {
          let has_query = self.has_filter_query(cx);
@@ -218,7 +218,7 @@ index cb12edd25b..3c09915d4c 100644
          let sidebar_on_left = self.side(cx) == SidebarSide::Left;
          let sidebar_on_right = self.side(cx) == SidebarSide::Right;
          let not_fullscreen = !window.is_fullscreen() && !window.is_simple_fullscreen();
-@@ -7407,16 +7421,18 @@ impl Sidebar {
+@@ -7415,16 +7429,18 @@ impl Sidebar {
              .when(!no_open_projects, |this| {
                  this.border_b_1()
                      .border_color(cx.theme().colors().border)
@@ -245,7 +245,7 @@ index cb12edd25b..3c09915d4c 100644
                      .child(self.render_filter_input(cx))
                      .child(
                          h_flex()
-@@ -7426,7 +7442,7 @@ impl Sidebar {
+@@ -7434,7 +7450,7 @@ impl Sidebar {
                                      && !self.filter_editor.focus_handle(cx).is_focused(window),
                                  |this| this.child(KeyBinding::for_action(&FocusSidebarFilter, cx)),
                              )
@@ -255,7 +255,7 @@ index cb12edd25b..3c09915d4c 100644
                                      IconButton::new("clear_filter", IconName::Close)
                                          .icon_size(IconSize::Small)
 diff --git a/crates/ui/src/components/ai/thread_item.rs b/crates/ui/src/components/ai/thread_item.rs
-index 7cf574848a..65b2c66b1f 100644
+index 7cf574848a8ad9442cbc8b83e9dee22f9b6c0c67..65b2c66b1f2e3de57d70a93c765f907bb6f9a190 100644
 --- a/crates/ui/src/components/ai/thread_item.rs
 +++ b/crates/ui/src/components/ai/thread_item.rs
 @@ -64,6 +64,7 @@ pub struct ThreadItem {
@@ -423,7 +423,7 @@ index 7cf574848a..65b2c66b1f 100644
                  let status = self.status;
                  this.tooltip(Tooltip::element(move |_, _| match status {
 diff --git a/docs/src/reference/all-settings.md b/docs/src/reference/all-settings.md
-index 5098c651ca..7d5b0563d4 100644
+index 08e838b000cd1352e6c6e213899c073427880246..1f3e86ed374f4a78f2ba42492a52880510027cb7 100644
 --- a/docs/src/reference/all-settings.md
 +++ b/docs/src/reference/all-settings.md
 @@ -151,7 +151,7 @@ Open the Settings Editor and search for “Threads Sidebar Position”. Or add t

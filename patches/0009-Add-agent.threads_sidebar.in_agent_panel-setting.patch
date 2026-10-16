@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 46004e170fd98dfda4d88f3d3b2d82badcefe1ec Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 11:03:26 +0300
-Subject: [PATCH 09/11] Add agent.threads_sidebar.in_agent_panel setting
+Subject: [PATCH 09/12] Add agent.threads_sidebar.in_agent_panel setting
 
 Few people juggle as many threads as the threads sidebar holds, yet
 keeping them in view costs a whole column, and toggling the sidebar
@@ -33,6 +33,12 @@ Traffic light layout in the panel header is gated for macOS, allowing
 compilation on Linux and Windows. Stale sidebar_open checks are replaced
 with active render state checks. Settings deserialization safely defaults
 in_agent_panel to false with regression unit tests.
+
+Keep platform-specific inputs explicit without discarding the context on
+non-macOS builds; preserve the macOS traffic-light layout unchanged.
+
+Make workspace state and weak-entity lifecycle handling explicit while
+preserving the expected harmless behavior when a view has been released.
 ---
  assets/settings/default.json                |   3 +
  crates/agent/src/tool_permissions.rs        |   1 +
@@ -48,15 +54,15 @@ in_agent_panel to false with regression unit tests.
  crates/workspace/src/dock.rs                |  13 +-
  crates/workspace/src/multi_workspace.rs     |  97 ++-
  crates/workspace/src/status_bar.rs          |   4 +-
- crates/workspace/src/workspace.rs           |  47 +-
- 15 files changed, 1550 insertions(+), 165 deletions(-)
+ crates/workspace/src/workspace.rs           |  46 +-
+ 15 files changed, 1549 insertions(+), 165 deletions(-)
  create mode 100644 crates/sidebar/src/thread_tabs.rs
 
 diff --git a/assets/settings/default.json b/assets/settings/default.json
-index 4ef8ff4d83..0747f964ec 100644
+index f68fad05aacc5ce109f13898c06e7adfd50242d1..79636a83e05fe1250283be02590af39e68a424f6 100644
 --- a/assets/settings/default.json
 +++ b/assets/settings/default.json
-@@ -1193,6 +1193,9 @@
+@@ -1203,6 +1203,9 @@
        "auto_open": true,
        // Show each thread on a single line at the height of the tab bar, with its details on hover.
        "compact": false,
@@ -67,7 +73,7 @@ index 4ef8ff4d83..0747f964ec 100644
      // Default fixed width when the agent panel is docked to the left or right and
      // `flexible` is false.
 diff --git a/crates/agent/src/tool_permissions.rs b/crates/agent/src/tool_permissions.rs
-index 750154a1fe..7ad17cd055 100644
+index 750154a1fe1ac82775d6be70f8d95a01d6bc1ce6..7ad17cd05566ffc94d809614087f2d43b89d0451 100644
 --- a/crates/agent/src/tool_permissions.rs
 +++ b/crates/agent/src/tool_permissions.rs
 @@ -614,6 +614,7 @@ mod tests {
@@ -79,7 +85,7 @@ index 750154a1fe..7ad17cd055 100644
              thinking_display: Default::default(),
          }
 diff --git a/crates/agent_settings/src/agent_settings.rs b/crates/agent_settings/src/agent_settings.rs
-index 0cecde9362..5ac5d29343 100644
+index 0cecde93623f473698996a0f24bbd3eb65f74032..5ac5d29343d094dda065a638d185387234dc2734 100644
 --- a/crates/agent_settings/src/agent_settings.rs
 +++ b/crates/agent_settings/src/agent_settings.rs
 @@ -258,6 +258,7 @@ pub struct ThreadsSidebarSettings {
@@ -122,7 +128,7 @@ index 0cecde9362..5ac5d29343 100644
      fn test_threads_sidebar_compact_defaults_to_false_when_none(cx: &mut gpui::App) {
          let store = SettingsStore::test(cx);
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 5a179247a1..1f8087c324 100644
+index 057bbcbf07ae6c2be7b852a9050cd7ffcb7641bd..03384589c293393a7a5678a6087958124f8549a5 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
 @@ -94,7 +94,7 @@ use text::OffsetRangeExt;
@@ -134,7 +140,7 @@ index 5a179247a1..1f8087c324 100644
  };
  use util::ResultExt as _;
  use workspace::{
-@@ -2874,7 +2874,9 @@ impl AgentPanel {
+@@ -2890,7 +2890,9 @@ impl AgentPanel {
  
          if let Some(multi_workspace) = window.root::<MultiWorkspace>().flatten() {
              let multi_workspace = multi_workspace.read(cx);
@@ -145,7 +151,7 @@ index 5a179247a1..1f8087c324 100644
                  return true;
              }
  
-@@ -5102,6 +5104,10 @@ impl Panel for AgentPanel {
+@@ -5143,6 +5145,10 @@ impl Panel for AgentPanel {
          true
      }
  
@@ -156,7 +162,7 @@ index 5a179247a1..1f8087c324 100644
      fn hide_button_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
          Some(workspace::HideStatusItem::new(|settings| {
              settings.agent.get_or_insert_default().button = Some(false);
-@@ -5644,6 +5650,7 @@ impl AgentPanel {
+@@ -5685,6 +5691,7 @@ impl AgentPanel {
              .is_some();
  
          let workspace = self.workspace.clone();
@@ -164,7 +170,7 @@ index 5a179247a1..1f8087c324 100644
  
          PopoverMenu::new("agent-options-menu")
              .trigger_with_tooltip(
-@@ -5787,10 +5794,22 @@ impl AgentPanel {
+@@ -5828,10 +5835,22 @@ impl AgentPanel {
                                  .action("Profiles", Box::new(ManageProfiles::default()));
                          }
  
@@ -191,7 +197,7 @@ index 5a179247a1..1f8087c324 100644
  
                          if has_auth_methods || supports_logout {
                              menu = menu.separator()
-@@ -5837,8 +5856,39 @@ impl AgentPanel {
+@@ -5878,8 +5897,39 @@ impl AgentPanel {
          })
      }
  
@@ -232,7 +238,7 @@ index 5a179247a1..1f8087c324 100644
  
          let focus_handle = self.focus_handle(cx);
  
-@@ -6171,6 +6221,49 @@ impl AgentPanel {
+@@ -6212,6 +6262,49 @@ impl AgentPanel {
                      thread_view.update(cx, |thread_view, cx| thread_view.render_sandbox_status(cx))
                  });
  
@@ -282,7 +288,7 @@ index 5a179247a1..1f8087c324 100644
              base_container
                  .child(
                      h_flex()
-@@ -6210,6 +6303,7 @@ impl AgentPanel {
+@@ -6251,6 +6344,7 @@ impl AgentPanel {
              .border_b_1()
              .border_color(cx.theme().colors().border)
              .child(toolbar_content)
@@ -290,7 +296,7 @@ index 5a179247a1..1f8087c324 100644
      }
  
      fn should_render_trial_end_upsell(&self, cx: &mut Context<Self>) -> bool {
-@@ -6491,6 +6585,7 @@ impl AgentPanel {
+@@ -6601,6 +6695,7 @@ impl AgentPanel {
  
  impl Render for AgentPanel {
      fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -298,7 +304,7 @@ index 5a179247a1..1f8087c324 100644
          // WARNING: Changes to this element hierarchy can have
          // non-obvious implications to the layout of children.
          //
-@@ -6547,7 +6642,11 @@ impl Render for AgentPanel {
+@@ -6657,7 +6752,11 @@ impl Render for AgentPanel {
              }))
              .child(self.render_toolbar(window, cx))
              .children(self.render_new_user_onboarding(window, cx))
@@ -311,10 +317,10 @@ index 5a179247a1..1f8087c324 100644
                      parent.child(self.render_no_project_state(cx))
                  }
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index d9bcdf1811..e08f10b51f 100644
+index b04b36f4a644e0adc7b53ffd9735b3d9cb486e9d..9fe7206e61588709709722fb1c36ec837db3f079 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
-@@ -1015,6 +1015,7 @@ mod tests {
+@@ -1111,6 +1111,7 @@ mod tests {
                  default_width: px(300.),
                  position: settings::SidebarDockPosition::Left,
                  compact: false,
@@ -323,10 +329,10 @@ index d9bcdf1811..e08f10b51f 100644
              thinking_display: Default::default(),
          };
 diff --git a/crates/agent_ui/src/conversation_view.rs b/crates/agent_ui/src/conversation_view.rs
-index ce890d8fa9..d8df4f3cdf 100644
+index 5ac8971aa862593912e511188718b03e65af6823..e14b7a6d1c9db9158ea14c341f93292bc3af5fd2 100644
 --- a/crates/agent_ui/src/conversation_view.rs
 +++ b/crates/agent_ui/src/conversation_view.rs
-@@ -2972,7 +2972,8 @@ impl ConversationView {
+@@ -3121,7 +3121,8 @@ impl ConversationView {
          };
  
          let multi_workspace = multi_workspace.read(cx);
@@ -337,7 +343,7 @@ index ce890d8fa9..d8df4f3cdf 100644
                  && self.is_visible_in_agent_panel(&workspace, cx)
      }
 diff --git a/crates/settings_content/src/agent.rs b/crates/settings_content/src/agent.rs
-index b23be559ce..19a03795bf 100644
+index 564652083f535b64243a2dbe37395ab24413fd5a..d8d56290b6a6dd07ab6c949e41a847be9370e703 100644
 --- a/crates/settings_content/src/agent.rs
 +++ b/crates/settings_content/src/agent.rs
 @@ -62,6 +62,12 @@ pub struct ThreadsSidebarSettingsContent {
@@ -354,7 +360,7 @@ index b23be559ce..19a03795bf 100644
  
  #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 3c09915d4c..9f54d917fd 100644
+index 45d5b4a5a540d46e6a4bdaec6bec7d3885569cb5..77b783e606ee0d90714532bec0f16fc333487ead 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -1,4 +1,5 @@
@@ -386,7 +392,7 @@ index 3c09915d4c..9f54d917fd 100644
  
  #[cfg(test)]
  mod sidebar_tests;
-@@ -826,6 +828,9 @@ pub struct Sidebar {
+@@ -834,6 +836,9 @@ pub struct Sidebar {
      /// Display names of other release channels that have threads available to
      /// import.
      cross_channel_import_channels: Vec<SharedString>,
@@ -396,7 +402,7 @@ index 3c09915d4c..9f54d917fd 100644
  }
  
  impl Sidebar {
-@@ -842,6 +847,7 @@ impl Sidebar {
+@@ -850,6 +855,7 @@ impl Sidebar {
  
          let mut previous_default_width =
              AgentSettings::get_global(cx).threads_sidebar.default_width;
@@ -404,7 +410,7 @@ index 3c09915d4c..9f54d917fd 100644
          cx.observe_global::<SettingsStore>(move |this, cx| {
              let width = AgentSettings::get_global(cx).threads_sidebar.default_width;
              if previous_default_width != width {
-@@ -849,6 +855,12 @@ impl Sidebar {
+@@ -857,6 +863,12 @@ impl Sidebar {
                  this.set_width(None, cx);
                  this.serialize(cx);
              }
@@ -417,7 +423,7 @@ index 3c09915d4c..9f54d917fd 100644
          })
          .detach();
  
-@@ -970,6 +982,7 @@ impl Sidebar {
+@@ -978,6 +990,7 @@ impl Sidebar {
              update_task: None,
              import_banners_use_verbose_labels: None,
              cross_channel_import_channels: Vec::new(),
@@ -425,7 +431,7 @@ index 3c09915d4c..9f54d917fd 100644
          }
      }
  
-@@ -977,7 +990,15 @@ impl Sidebar {
+@@ -985,7 +998,15 @@ impl Sidebar {
          cx.emit(workspace::SidebarEvent::SerializeNeeded);
      }
  
@@ -441,7 +447,7 @@ index 3c09915d4c..9f54d917fd 100644
          self.multi_workspace
              .upgrade()
              .and_then(|mw| {
-@@ -1072,6 +1093,9 @@ impl Sidebar {
+@@ -1080,6 +1101,9 @@ impl Sidebar {
  
          if let Some(agent_panel) = workspace.read(cx).panel::<AgentPanel>(cx) {
              self.subscribe_to_agent_panel(workspace, &agent_panel, window, cx);
@@ -451,7 +457,7 @@ index 3c09915d4c..9f54d917fd 100644
          }
      }
  
-@@ -1401,7 +1425,11 @@ impl Sidebar {
+@@ -1409,7 +1433,11 @@ impl Sidebar {
              .first()
              .map(|ws| ws.read(cx).project().read(cx).agent_server_store().clone());
  
@@ -464,7 +470,7 @@ index 3c09915d4c..9f54d917fd 100644
  
          let previous = mem::take(&mut self.contents);
  
-@@ -1736,6 +1764,7 @@ impl Sidebar {
+@@ -1744,6 +1772,7 @@ impl Sidebar {
  
                  // Keep empty drafts only while their thread is active; preserve
                  // drafts with content because they hold user-typed state.
@@ -472,7 +478,7 @@ index 3c09915d4c..9f54d917fd 100644
                  let pending_activation = self.pending_thread_activation;
                  let active_panel_thread_id = active_workspace
                      .as_ref()
-@@ -1745,10 +1774,18 @@ impl Sidebar {
+@@ -1753,10 +1782,18 @@ impl Sidebar {
                      if thread.draft != Some(DraftKind::Empty) {
                          return true;
                      }
@@ -494,7 +500,7 @@ index 3c09915d4c..9f54d917fd 100644
                  });
  
                  // Build a lookup from live_infos and compute running/waiting
-@@ -2052,6 +2089,16 @@ impl Sidebar {
+@@ -2060,6 +2097,16 @@ impl Sidebar {
          let previous_shapes: Vec<EntryShape> =
              self.entry_shapes(multi_workspace.read(cx)).collect();
  
@@ -511,7 +517,7 @@ index 3c09915d4c..9f54d917fd 100644
          self.rebuild_contents(cx);
          self.refresh_refilled_draft_times(cx);
          self.refresh_draft_editor_observations(cx);
-@@ -2493,6 +2540,7 @@ impl Sidebar {
+@@ -2501,6 +2548,7 @@ impl Sidebar {
                                  is_active,
                                  has_threads,
                                  &group_name,
@@ -519,7 +525,7 @@ index 3c09915d4c..9f54d917fd 100644
                                  cx,
                              ))
                              .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-@@ -2854,6 +2902,7 @@ impl Sidebar {
+@@ -2862,6 +2910,7 @@ impl Sidebar {
          is_active: bool,
          has_threads: bool,
          group_name: &SharedString,
@@ -527,7 +533,7 @@ index 3c09915d4c..9f54d917fd 100644
          cx: &mut Context<Self>,
      ) -> AnyElement {
          let multi_workspace = self.multi_workspace.clone();
-@@ -2887,6 +2936,13 @@ impl Sidebar {
+@@ -2895,6 +2944,13 @@ impl Sidebar {
                      })
                      .selected_style(ButtonStyle::Tinted(TintColor::Accent))
                      .icon_size(IconSize::Small)
@@ -541,7 +547,7 @@ index 3c09915d4c..9f54d917fd 100644
                      .when(!is_menu_open, |el| el.visible_on_hover(group_name)),
              )
              .on_open(Rc::new({
-@@ -3561,7 +3617,18 @@ impl Sidebar {
+@@ -3569,7 +3625,18 @@ impl Sidebar {
          if self.rename_target.take().is_none() {
              return false;
          }
@@ -561,7 +567,7 @@ index 3c09915d4c..9f54d917fd 100644
          self.update_entries(cx);
          true
      }
-@@ -6448,7 +6515,6 @@ impl Sidebar {
+@@ -6456,7 +6523,6 @@ impl Sidebar {
                  )
              })
              .on_click({
@@ -569,7 +575,7 @@ index 3c09915d4c..9f54d917fd 100644
                  cx.listener(move |this, _, window, cx| {
                      this.selection = None;
                      match &thread_workspace {
-@@ -6471,15 +6537,28 @@ impl Sidebar {
+@@ -6479,15 +6545,28 @@ impl Sidebar {
                  })
              });
  
@@ -604,7 +610,7 @@ index 3c09915d4c..9f54d917fd 100644
          let sidebar = cx.weak_entity();
  
          let active_workspace = self.active_workspace(cx);
-@@ -6492,113 +6571,108 @@ impl Sidebar {
+@@ -6500,113 +6579,108 @@ impl Sidebar {
          let can_open_as_markdown = thread.is_live || is_zed_thread;
          let folder_paths = thread.metadata.folder_paths().clone();
  
@@ -803,7 +809,7 @@ index 3c09915d4c..9f54d917fd 100644
      }
  
      fn render_terminal(
-@@ -6697,33 +6771,41 @@ impl Sidebar {
+@@ -6705,33 +6779,41 @@ impl Sidebar {
                  }
              }));
  
@@ -866,7 +872,7 @@ index 3c09915d4c..9f54d917fd 100644
      }
  
      fn render_filter_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
-@@ -6738,7 +6820,11 @@ impl Sidebar {
+@@ -6746,7 +6828,11 @@ impl Sidebar {
              .child(self.filter_editor.clone())
      }
  
@@ -879,7 +885,7 @@ index 3c09915d4c..9f54d917fd 100644
          let multi_workspace = self.multi_workspace.upgrade();
  
          let workspace = multi_workspace
-@@ -6777,11 +6863,18 @@ impl Sidebar {
+@@ -6785,11 +6871,18 @@ impl Sidebar {
                      .selected_style(ButtonStyle::Tinted(TintColor::Accent)),
                  |_window, cx| Tooltip::for_action("Add Project", &OpenRecent::default(), cx),
              )
@@ -902,7 +908,7 @@ index 3c09915d4c..9f54d917fd 100644
      }
  
      fn new_thread_in_group(
-@@ -7558,7 +7651,7 @@ impl Sidebar {
+@@ -7566,7 +7659,7 @@ impl Sidebar {
                      })),
              )
              .child(div().flex_1())
@@ -911,7 +917,7 @@ index 3c09915d4c..9f54d917fd 100644
      }
  
      fn active_workspace(&self, cx: &App) -> Option<Entity<Workspace>> {
-@@ -7792,8 +7885,11 @@ impl Sidebar {
+@@ -7800,8 +7893,11 @@ impl Sidebar {
      fn show_thread_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
          self.view = SidebarView::ThreadList;
          self._subscriptions.clear();
@@ -925,7 +931,7 @@ index 3c09915d4c..9f54d917fd 100644
          self.serialize(cx);
          cx.notify();
      }
-@@ -7912,6 +8008,45 @@ impl WorkspaceSidebar for Sidebar {
+@@ -7920,6 +8016,45 @@ impl WorkspaceSidebar for Sidebar {
          self.cycle_thread_impl(forward, window, cx);
      }
  
@@ -972,10 +978,10 @@ index 3c09915d4c..9f54d917fd 100644
          let serialized = SerializedSidebar {
              width: self.width_set_by_user.then(|| f32::from(self.width)),
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index d6ae15cad5..27551d6726 100644
+index dc1a7c81bcbb1e2def6239a52f8c5b80967d969d..de25aa92ca840b879a0325620c91e900537e4f58 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -15878,3 +15878,275 @@ fn sidebar_painted_background_at(position: Point<Pixels>, cx: &mut VisualTestCon
+@@ -15907,3 +15907,275 @@ fn sidebar_painted_background_at(position: Point<Pixels>, cx: &mut VisualTestCon
          u32::from(Rgba::from(color))
      })
  }
@@ -1253,7 +1259,7 @@ index d6ae15cad5..27551d6726 100644
 +}
 diff --git a/crates/sidebar/src/thread_tabs.rs b/crates/sidebar/src/thread_tabs.rs
 new file mode 100644
-index 0000000000..85ac844038
+index 0000000000000000000000000000000000000000..85ac8440380fd692435aac7bbbb6291f55cfcc48
 --- /dev/null
 +++ b/crates/sidebar/src/thread_tabs.rs
 @@ -0,0 +1,730 @@
@@ -1988,10 +1994,10 @@ index 0000000000..85ac844038
 +    }
 +}
 diff --git a/crates/title_bar/src/title_bar.rs b/crates/title_bar/src/title_bar.rs
-index 95a70f5b9e..84da5a326f 100644
+index c7e01b220d9a2adf35a54c1ba3d268ed61c2a46e..ecee27f545b0262b9f11f0ed147271c7a32869b1 100644
 --- a/crates/title_bar/src/title_bar.rs
 +++ b/crates/title_bar/src/title_bar.rs
-@@ -836,7 +836,7 @@ impl TitleBar {
+@@ -837,7 +837,7 @@ impl TitleBar {
              .multi_workspace
              .as_ref()
              .and_then(|mw| mw.upgrade())
@@ -2001,7 +2007,7 @@ index 95a70f5b9e..84da5a326f 100644
              && PlatformTitleBar::is_multi_workspace_enabled(cx);
  
 diff --git a/crates/workspace/src/dock.rs b/crates/workspace/src/dock.rs
-index 1a6059cbf4..e87fa0cab0 100644
+index 1a6059cbf41e835a3e7ae4cd69467e451d5ea689..e87fa0cab0cc412479c33eaaa93c8cc0fe635948 100644
 --- a/crates/workspace/src/dock.rs
 +++ b/crates/workspace/src/dock.rs
 @@ -98,6 +98,11 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
@@ -2046,7 +2052,7 @@ index 1a6059cbf4..e87fa0cab0 100644
              let has_top_spacer = top_spacer.is_some();
              let create_resize_handle = || {
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 0946495883..7a8902841a 100644
+index 09464958834769d0786716e8ae8b3c2d6f37a439..aa0f0b5acc2a5c0288d247f6bc84d37a0f4fb929 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -157,6 +157,29 @@ pub trait Sidebar: Focusable + Render + EventEmitter<SidebarEvent> + Sized {
@@ -2151,7 +2157,7 @@ index 0946495883..7a8902841a 100644
 +                        .sidebar
 +                        .as_ref()
 +                        .filter(|_| !in_agent_panel && this.sidebar_open)
-+                        .map(|s| s.focus_handle(cx));
++                        .map(|sidebar| sidebar.focus_handle(cx));
 +                    for workspace in this.workspaces().cloned().collect::<Vec<_>>() {
 +                        workspace.update(cx, |workspace, _cx| {
 +                            workspace.set_sidebar_focus_handle(sidebar_focus_handle.clone());
@@ -2204,7 +2210,7 @@ index 0946495883..7a8902841a 100644
 +            .sidebar
 +            .as_ref()
 +            .filter(|_| !threads_sidebar_in_agent_panel(cx))
-+            .map(|s| s.focus_handle(cx));
++            .map(|sidebar| sidebar.focus_handle(cx));
          for workspace in self.workspaces().cloned().collect::<Vec<_>>() {
              workspace.update(cx, |workspace, _cx| {
                  workspace.set_sidebar_focus_handle(sidebar_focus_handle.clone());
@@ -2230,7 +2236,7 @@ index 0946495883..7a8902841a 100644
                  let weak = cx.weak_entity();
  
 diff --git a/crates/workspace/src/status_bar.rs b/crates/workspace/src/status_bar.rs
-index a3966a06a3..b8075ca416 100644
+index a3966a06a3017d662a643e0337b1100b169a2ec3..b8075ca4165cab1d146840559cca9988c6798679 100644
 --- a/crates/workspace/src/status_bar.rs
 +++ b/crates/workspace/src/status_bar.rs
 @@ -87,10 +87,10 @@ impl SidebarStatus {
@@ -2247,7 +2253,7 @@ index a3966a06a3..b8075ca416 100644
              })
              .unwrap_or_default()
 diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
-index 2ee0e41367..c28a687e60 100644
+index f316b5d46ed2dae9942033ccb31dd9f6e05e7629..03e074345c582fa580ea3a3b6622dbf453c0b870 100644
 --- a/crates/workspace/src/workspace.rs
 +++ b/crates/workspace/src/workspace.rs
 @@ -31,11 +31,12 @@ mod workspace_settings;
@@ -2268,24 +2274,23 @@ index 2ee0e41367..c28a687e60 100644
  };
  pub use path_list::{PathList, SerializedPathList};
  pub use remote::{
-@@ -340,15 +341,27 @@ pub const TRAFFIC_LIGHT_INSET: Pixels = px(9.);
+@@ -346,15 +347,26 @@ pub fn panel_row_height(cx: &App) -> Option<Pixels> {
  /// then (and with the title bar in place) they keep the stock inset. The headers' reserved width
  /// (`TRAFFIC_LIGHT_PADDING`) assumes that stock inset, so the centred lights leave up to ~2.5px
  /// more room before the first tab (compact density): not worth reading the live size every frame.
-+pub fn traffic_light_inset(window: &Window, cx: &App) -> Pixels {
++pub fn traffic_light_inset(_window: &Window, _cx: &App) -> Pixels {
 +    #[cfg(target_os = "macos")]
 +    {
-+        match window.traffic_light_size() {
-+            Some(button) if title_bar_in_status_bar(cx) => {
++        match _window.traffic_light_size() {
++            Some(button) if title_bar_in_status_bar(_cx) => {
 +                // A header shorter than the buttons (tiny UI font) would push them off the window.
-+                ((ui::Tab::content_height(cx) - button.height) / 2.).max(px(0.))
++                ((ui::Tab::content_height(_cx) - button.height) / 2.).max(px(0.))
 +            }
 +            _ => TRAFFIC_LIGHT_INSET,
 +        }
 +    }
 +    #[cfg(not(target_os = "macos"))]
 +    {
-+        let _ = (window, cx);
 +        TRAFFIC_LIGHT_INSET
 +    }
 +}
@@ -2303,7 +2308,7 @@ index 2ee0e41367..c28a687e60 100644
      window.set_traffic_light_position(point(inset, inset));
  }
  
-@@ -10171,7 +10184,15 @@ impl Render for Workspace {
+@@ -10184,7 +10196,15 @@ impl Render for Workspace {
                                          })
                                          .into_any_element(),
                                  };

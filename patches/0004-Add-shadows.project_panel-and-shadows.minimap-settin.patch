@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 1e533bdc5d8bba724ed83da9f76846679c99e2a9 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 21:24:41 +0300
-Subject: [PATCH 04/11] Add shadows.project_panel and shadows.minimap settings
+Subject: [PATCH 04/12] Add shadows.project_panel and shadows.minimap settings
 
 The sticky folder rows of the project panel and the minimap draw
 shadows that read as visual noise in flat themes. These toggles turn
@@ -12,18 +12,21 @@ the stock shadows.
 ThemeSettings::from_settings deserializes shadows.project_panel and
 shadows.minimap via shadows.as_ref().and_then(...).unwrap_or(true),
 gracefully handling missing parent shadows objects and missing child fields.
+
+Use descriptive settings names so the opt-in shadow behavior remains easy
+to follow without changing its defaults.
 ---
  assets/settings/default.json                |  7 +++++++
  crates/editor/src/element.rs                |  6 ++++--
  crates/project_panel/src/project_panel.rs   |  3 ++-
  crates/settings/src/vscode_import.rs        |  1 +
  crates/settings_content/src/theme.rs        | 17 +++++++++++++++++
- crates/theme_settings/src/settings.rs       | 16 ++++++++++++++++
+ crates/theme_settings/src/settings.rs       | 18 ++++++++++++++++++
  crates/theme_settings/src/theme_settings.rs |  4 ++--
- 7 files changed, 49 insertions(+), 5 deletions(-)
+ 7 files changed, 51 insertions(+), 5 deletions(-)
 
 diff --git a/assets/settings/default.json b/assets/settings/default.json
-index 470efc3d33..0695356169 100644
+index b83cae69bb99865568f517973933ba55e34c0376..4e990e125d06f59b34eeaa69db089ac23c38b7f6 100644
 --- a/assets/settings/default.json
 +++ b/assets/settings/default.json
 @@ -69,6 +69,13 @@
@@ -41,7 +44,7 @@ index 470efc3d33..0695356169 100644
    "agent_ui_font_family": null,
    // The default font size for agent responses in the agent panel. Falls back to the UI font size if unset.
 diff --git a/crates/editor/src/element.rs b/crates/editor/src/element.rs
-index 91f06b0e2f..b8b0e67c24 100644
+index 56663881ff0208b0baf4504137a2f39d3f7743a2..5482f08f7e590886c8581363dc898bfe23f7bec5 100644
 --- a/crates/editor/src/element.rs
 +++ b/crates/editor/src/element.rs
 @@ -87,7 +87,7 @@ use std::{
@@ -53,7 +56,7 @@ index 91f06b0e2f..b8b0e67c24 100644
  use ui::utils::ensure_minimum_contrast;
  use ui::{ButtonLike, POPOVER_Y_PADDING, Tooltip, prelude::*, scrollbars::ShowScrollbar};
  use unicode_segmentation::UnicodeSegmentation;
-@@ -1681,7 +1681,9 @@ impl EditorElement {
+@@ -1687,7 +1687,9 @@ impl EditorElement {
  
          let mut minimap = div()
              .size_full()
@@ -65,10 +68,10 @@ index 91f06b0e2f..b8b0e67c24 100644
              .child(minimap_editor)
              .into_any_element();
 diff --git a/crates/project_panel/src/project_panel.rs b/crates/project_panel/src/project_panel.rs
-index 7fb5e6d7ef..9737f28538 100644
+index e456d7b2feab1dd9d8c8f86184bd42cd1476db19..fbd3459d389a1c62e2e4583743120641476000bc 100644
 --- a/crates/project_panel/src/project_panel.rs
 +++ b/crates/project_panel/src/project_panel.rs
-@@ -7230,6 +7230,7 @@ impl ProjectPanel {
+@@ -7300,6 +7300,7 @@ impl ProjectPanel {
          // already checked if non empty above
          let last_item_index = sticky_parents.len() - 1;
          let marked_selections: Arc<[SelectedEntry]> = Arc::from(self.marked_entries.clone());
@@ -76,7 +79,7 @@ index 7fb5e6d7ef..9737f28538 100644
          sticky_parents
              .iter()
              .enumerate()
-@@ -7258,7 +7259,7 @@ impl ProjectPanel {
+@@ -7328,7 +7329,7 @@ impl ProjectPanel {
                      window,
                      cx,
                  )
@@ -86,10 +89,10 @@ index 7fb5e6d7ef..9737f28538 100644
                      let shadow_color_bottom = hsla(0.0, 0.0, 0.0, 0.);
                      let sticky_shadow = div()
 diff --git a/crates/settings/src/vscode_import.rs b/crates/settings/src/vscode_import.rs
-index d1cd0ed3ea..47472ba2ee 100644
+index a458433589f84fd9066e31e795f98e6f6d1d7aac..ed1d3a3cbbd9761edbf89333fc8d5d27ad68f36f 100644
 --- a/crates/settings/src/vscode_import.rs
 +++ b/crates/settings/src/vscode_import.rs
-@@ -1043,6 +1043,7 @@ impl VsCodeSettings {
+@@ -1045,6 +1045,7 @@ impl VsCodeSettings {
              theme: None,
              icon_theme: None,
              ui_density: None,
@@ -98,10 +101,10 @@ index d1cd0ed3ea..47472ba2ee 100644
              experimental_theme_overrides: None,
              theme_overrides: Default::default(),
 diff --git a/crates/settings_content/src/theme.rs b/crates/settings_content/src/theme.rs
-index 157d138455..2124b535a5 100644
+index 0b2b7106091ea01e5de8cb2635d3bc5178491a4e..8cc6ea474ac7cec09f34fc14ba222f5ba30c72f1 100644
 --- a/crates/settings_content/src/theme.rs
 +++ b/crates/settings_content/src/theme.rs
-@@ -225,6 +225,9 @@ pub struct ThemeSettingsContent {
+@@ -228,6 +228,9 @@ pub struct ThemeSettingsContent {
      #[serde(rename = "unstable.ui_density")]
      pub ui_density: Option<UiDensity>,
  
@@ -111,7 +114,7 @@ index 157d138455..2124b535a5 100644
      /// How much to fade out unused code.
      #[schemars(range(min = 0.0, max = 0.9))]
      pub unnecessary_code_fade: Option<CodeFade>,
-@@ -242,6 +245,20 @@ pub struct ThemeSettingsContent {
+@@ -245,6 +248,20 @@ pub struct ThemeSettingsContent {
      pub theme_overrides: HashMap<String, ThemeStyleContent>,
  }
  
@@ -133,10 +136,10 @@ index 157d138455..2124b535a5 100644
  #[derive(
      Clone,
 diff --git a/crates/theme_settings/src/settings.rs b/crates/theme_settings/src/settings.rs
-index e72179bdc5..3605ac9bcc 100644
+index 0a587340f5b7cb3473b6a4fecaf92c3ae7f0a5aa..dc72cfbd8350ba1c1f6391da2537b667e5f13c92 100644
 --- a/crates/theme_settings/src/settings.rs
 +++ b/crates/theme_settings/src/settings.rs
-@@ -94,10 +94,21 @@ pub struct ThemeSettings {
+@@ -99,10 +99,21 @@ pub struct ThemeSettings {
      /// The density of the UI.
      /// Note: This setting is still experimental. See [this tracking issue](
      pub ui_density: UiDensity,
@@ -158,7 +161,7 @@ index e72179bdc5..3605ac9bcc 100644
  /// Returns the name of the default theme for the given [`Appearance`].
  pub fn default_theme(appearance: Appearance) -> &'static str {
      match appearance {
-@@ -707,6 +718,7 @@ impl settings::Settings for ThemeSettings {
+@@ -725,6 +736,7 @@ impl settings::Settings for ThemeSettings {
          let markdown_preview = settings_content.markdown_preview.as_ref();
          let theme_selection: ThemeSelection = content.theme.clone().unwrap().into();
          let icon_theme_selection: IconThemeSelection = content.icon_theme.clone().unwrap().into();
@@ -166,19 +169,21 @@ index e72179bdc5..3605ac9bcc 100644
          Self {
              ui_font_size: clamp_font_size(content.ui_font_size.unwrap().into_gpui()),
              ui_font: Font {
-@@ -761,6 +773,10 @@ impl settings::Settings for ThemeSettings {
+@@ -787,6 +799,12 @@ impl settings::Settings for ThemeSettings {
              theme_overrides: content.theme_overrides.clone(),
              icon_theme: icon_theme_selection,
              ui_density: ui_density_from_settings(content.ui_density.unwrap_or_default()),
 +            shadows: ShadowSettings {
-+                project_panel: shadows.and_then(|s| s.project_panel).unwrap_or(true),
-+                minimap: shadows.and_then(|s| s.minimap).unwrap_or(true),
++                project_panel: shadows
++                    .and_then(|shadows| shadows.project_panel)
++                    .unwrap_or(true),
++                minimap: shadows.and_then(|shadows| shadows.minimap).unwrap_or(true),
 +            },
              unnecessary_code_fade: content.unnecessary_code_fade.unwrap().0.clamp(0.0, 0.9),
          }
      }
 diff --git a/crates/theme_settings/src/theme_settings.rs b/crates/theme_settings/src/theme_settings.rs
-index f56a46b405..e5296d656a 100644
+index f56a46b40507f9ca5ebbc7933b6244f2fbc03ab1..e5296d656a3f79a2ba19866b99527d786db248d6 100644
 --- a/crates/theme_settings/src/theme_settings.rs
 +++ b/crates/theme_settings/src/theme_settings.rs
 @@ -30,8 +30,8 @@ use crate::settings::adjust_buffer_font_size;
