@@ -218,7 +218,8 @@ def push_review_refs(repo, app, remote, base, upstream, head, sha):
     refspecs = [f"{value}:refs/heads/{branch}"
                 for branch, value in missing if branch not in refs]
     if refspecs:
-        run("git", "push", "--atomic", remote, *refspecs, cwd=app)
+        env = {**os.environ, "GH_TOKEN": owner_token(repo)}
+        run("git", "push", "--atomic", remote, *refspecs, cwd=app, env=env)
 
 def cleanup_closed_pull_refs(repo, number, head_sha, *, upstream=None):
     """Atomically retire verified workflow-owned refs for a closed pull request."""
@@ -538,7 +539,13 @@ def failure_evidence(repo):
         if job.get("conclusion") == "failure":
             lines.append(f"\nFailed job: {job['name']}\n")
             try:
-                lines.append(run("gh", "api", f"repos/{repo}/actions/jobs/{job['id']}/logs")[-18000:])
+                command = ["gh", "api", f"repos/{repo}/actions/jobs/{job['id']}/logs"]
+                if "--allow-escape-sequences" in run("gh", "api", "--help"):
+                    command.append("--allow-escape-sequences")
+                logs = run(*command)
+                logs = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", logs)
+                logs = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", logs)
+                lines.append(logs[-18000:])
             except subprocess.CalledProcessError:
                 lines.append(f"Log unavailable; inspect {job['html_url']}")
     pr, sha = os.environ.get("CANDIDATE_PR", ""), os.environ.get("CANDIDATE_SHA", "")
@@ -1421,10 +1428,15 @@ def isolated_environment(root):
     keep = ("PATH", "LANG", "LC_ALL", "TZ", "DEVELOPER_DIR", "SDKROOT",
             "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "MACOSX_DEPLOYMENT_TARGET")
     env = {key: os.environ[key] for key in keep if key in os.environ}
-    # Toolchain caches are inputs, not the application's HOME or configuration.
-    for key, default in (("CARGO_HOME", Path.home() / ".cargo"),
-                         ("RUSTUP_HOME", Path.home() / ".rustup")):
-        env.setdefault(key, str(default))
+    # Preserve optional toolchain inputs without requiring a user database entry.
+    if "CARGO_HOME" not in env or "RUSTUP_HOME" not in env:
+        try:
+            home = Path.home()
+        except RuntimeError:
+            home = None
+        if home is not None:
+            env.setdefault("CARGO_HOME", str(home / ".cargo"))
+            env.setdefault("RUSTUP_HOME", str(home / ".rustup"))
     for key, relative in (
         ("HOME", "home"), ("TMPDIR", "tmp"), ("XDG_CONFIG_HOME", "config"),
         ("XDG_CACHE_HOME", "cache"), ("XDG_DATA_HOME", "data"),
