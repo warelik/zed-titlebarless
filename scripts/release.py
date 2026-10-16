@@ -206,7 +206,7 @@ def output(**values):
             stream.write(f"{name}={text}\n")
 
 def push_review_refs(repo, app, remote, base, upstream, head, sha):
-    """Create the exact upstream base before pushing its patched descendant."""
+    """Publish the patched commit, then create its exact upstream base."""
     current = run("git", "ls-remote", "--refs", remote,
                   f"refs/heads/{base}", f"refs/heads/{head}", cwd=app)
     refs = {name.removeprefix("refs/heads/"): value
@@ -214,13 +214,14 @@ def push_review_refs(repo, app, remote, base, upstream, head, sha):
     for branch, expected in ((base, upstream), (head, sha)):
         if branch in refs and refs[branch] != expected:
             raise ValueError(f"Review branch changed: {branch}; refusing to overwrite it")
+    if head not in refs:
+        run("git", "push", remote, f"{sha}:refs/heads/{head}", cwd=app)
     if base not in refs:
         created = api(f"repos/{repo}/git/refs", method="POST",
                       data={"ref": f"refs/heads/{base}", "sha": upstream})
         if (created.get("ref") != f"refs/heads/{base}"
                 or (created.get("object") or {}).get("sha") != upstream):
             raise ValueError("GitHub did not create the exact review base")
-    run("git", "push", remote, f"{sha}:refs/heads/{head}", cwd=app)
 
 def cleanup_closed_pull_refs(repo, number, head_sha, *, upstream=None):
     """Atomically retire verified workflow-owned refs for a closed pull request."""

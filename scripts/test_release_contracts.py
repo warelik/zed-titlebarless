@@ -669,7 +669,7 @@ class WorkflowContractTests(unittest.TestCase):
 
 
 class ReviewRefPublicationTests(unittest.TestCase):
-    def test_exact_upstream_base_is_created_before_pushing_patched_head(self):
+    def test_patched_head_exposes_upstream_commit_before_base_creation(self):
         calls = []
         repo, upstream, head = "maintainer/zed-fork", "b" * 40, "a" * 40
 
@@ -690,10 +690,10 @@ class ReviewRefPublicationTests(unittest.TestCase):
                 repo, Path("app"), "https://example.invalid/repo.git",
                 f"review-base/{upstream}", upstream, "review/candidate", head)
 
-        creation = next(index for index, call in enumerate(calls) if call[0] == "api")
         push = next(index for index, call in enumerate(calls)
                     if call[0] == "run" and call[1][:2] == ("git", "push"))
-        self.assertLess(creation, push)
+        creation = next(index for index, call in enumerate(calls) if call[0] == "api")
+        self.assertLess(push, creation)
         self.assertEqual(calls[push][1][-1], f"{head}:refs/heads/review/candidate")
         self.assertNotIn(upstream, calls[push][1][-1])
 
