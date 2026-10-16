@@ -183,14 +183,108 @@ def output(**values):
                 raise ValueError("Invalid workflow output")
             stream.write(f"{name}={text}\n")
 
+def cleanup_closed_pull_refs(repo, number, head_sha, *, upstream=None):
+    """Atomically retire verified workflow-owned refs for a closed pull request."""
+    if not SHA.fullmatch(head_sha):
+        return
+    pull = api(f"repos/{repo}/pulls/{number}")
+    owner = repo.split("/", 1)[0]
+    head = pull.get("head") or {}
+    base = pull.get("base") or {}
+    if (pull.get("state") != "closed" or head.get("sha") != head_sha
+            or (head.get("repo") or {}).get("full_name") != repo
+            or (base.get("repo") or {}).get("full_name") != repo
+            or (pull.get("user") or {}).get("login") not in {owner, "github-actions[bot]"}):
+        return
+
+    candidates = []
+    if upstream is not None:
+        match = re.fullmatch(r"review/([0-9a-f]{40})-([0-9a-f]{64})", head.get("ref") or "")
+        if (not SHA.fullmatch(upstream) or not match or match.group(1) != upstream
+                or base.get("ref") != f"review-base/{upstream}"
+                or base.get("sha") != upstream):
+            return
+        candidates = [(head["ref"], head_sha), (base["ref"], upstream)]
+    else:
+        if (not (head.get("ref") or "").startswith("repair/")
+                or base.get("ref") != "downstream"):
+            return
+        markers = REPAIR_STATE.findall(pull.get("body") or "")
+        if len(markers) != 1:
+            return
+        try:
+            state = json.loads(markers[0])
+        except (TypeError, ValueError):
+            return
+        if (state.get("schema") != 1
+                or any(not SHA.fullmatch(state.get(key, ""))
+                       for key in ("config", "upstream", "seed"))):
+            return
+        candidates = [(head["ref"], head_sha)]
+
+    try:
+        archive = api(f"repos/{repo}/git/ref/pull/{number}/head")
+    except subprocess.CalledProcessError:
+        return
+    archived = archive.get("object") or {}
+    if archived.get("type") != "commit" or archived.get("sha") != head_sha:
+        return
+
+    open_pulls = pages(f"repos/{repo}/pulls?state=open")
+    referenced = set()
+    for other in open_pulls:
+        for side in ("head", "base"):
+            ref = other.get(side) or {}
+            if (ref.get("repo") or {}).get("full_name") == repo:
+                referenced.add(ref.get("ref"))
+
+    verified = []
+    for branch, expected_sha in candidates:
+        records = api(f"repos/{repo}/git/matching-refs/heads/{branch}")
+        exact = [record for record in records
+                 if record.get("ref") == f"refs/heads/{branch}"]
+        if not exact:
+            continue
+        if (len(exact) != 1 or (exact[0].get("object") or {}).get("sha") != expected_sha
+                or (exact[0].get("object") or {}).get("type") != "commit"):
+            return
+        if branch not in referenced:
+            verified.append((branch, expected_sha))
+    if not verified:
+        return
+
+    repository_id = api(f"repos/{repo}").get("node_id")
+    if not repository_id:
+        raise ValueError("Repository node identity is missing")
+    result = api("graphql", method="POST", data={
+        "query": (
+            "mutation($input: UpdateRefsInput!) { "
+            "updateRefs(input: $input) { clientMutationId } }"
+        ),
+        "variables": {"input": {
+            "repositoryId": repository_id,
+            "refUpdates": [{
+                "name": "refs/heads/" + branch,
+                "beforeOid": expected_sha,
+                "afterOid": "0" * 40,
+            } for branch, expected_sha in verified],
+        }},
+    })
+    if (not isinstance(result, dict) or result.get("errors")
+            or not isinstance(result.get("data"), dict)
+            or not isinstance(result["data"].get("updateRefs"), dict)):
+        raise ValueError("GitHub rejected atomic temporary-ref cleanup")
+
 def close_published_reviews(repo, sha, upstream, head):
     base = f"review-base/{upstream}"
-    query = urlencode({"state": "open", "head": f"{repo.split('/')[0]}:{head}", "base": base})
+    query = urlencode({"state": "all", "head": f"{repo.split('/')[0]}:{head}", "base": base})
     for pull in pages(f"repos/{repo}/pulls?{query}"):
         if (pull["head"]["sha"] == sha and pull["base"]["sha"] == upstream
                 and pull["base"]["ref"] == base
                 and (pull["head"].get("repo") or {}).get("full_name") == repo):
-            api(f"repos/{repo}/pulls/{pull['number']}", method="PATCH", data={"state": "closed"})
+            if pull["state"] == "open":
+                api(f"repos/{repo}/pulls/{pull['number']}", method="PATCH", data={"state": "closed"})
+            cleanup_closed_pull_refs(repo, pull["number"], sha, upstream=upstream)
 
 def repair_pull(repo, config):
     for pull in pages(f"repos/{repo}/pulls?state=open&base=downstream"):
@@ -207,6 +301,7 @@ def repair_pull(repo, config):
             raise ValueError("Invalid machine repair identity")
         if state["config"] != config:
             api(f"repos/{repo}/pulls/{pull['number']}", method="PATCH", data={"state": "closed"})
+            cleanup_closed_pull_refs(repo, pull["number"], pull["head"]["sha"])
             continue
         return {**state, "number": pull["number"], "head": pull["head"]["sha"],
                 "created_at": pull["created_at"], "branch": pull["head"]["ref"]}
@@ -351,6 +446,7 @@ def close_recovered_repair(repo, config, *, state=None, has_minor=False, expecte
         data={"body": "The original candidate passed normal verification without this proposal. "
                        "No unpublished agent change was accepted; the obsolete repair is closed."})
     api(f"repos/{repo}/pulls/{state['number']}", method="PATCH", data={"state": "closed"})
+    cleanup_closed_pull_refs(repo, state["number"], state["head"])
 
 def escalation(repo, config, upstream, reason, *, nonblocking=False):
     marker = f"<!-- zed-escalation:{config}:{upstream} -->"
@@ -1156,7 +1252,9 @@ def land_repair(directory):
                                      os.environ["CANDIDATE_SHA"], state["upstream"])
     if not ready:
         raise ValueError(reason)
-    followup = minor_findings(repo, state["number"], state["head"]) if policy else []
+    finding_pr = state["number"] if policy else int(os.environ["CANDIDATE_PR"])
+    finding_sha = state["head"] if policy else os.environ["CANDIDATE_SHA"]
+    followup = minor_findings(repo, finding_pr, finding_sha)
     if api(f"repos/{repo}/commits/downstream")["sha"] != config:
         raise ValueError("Default configuration changed; do not land stale repairs")
     directory.mkdir(parents=True, exist_ok=True)
@@ -1207,14 +1305,16 @@ def land_repair(directory):
                 and issue.get("user", {}).get("login") in {"github-actions[bot]", repo.split("/")[0]}):
             api(f"repos/{repo}/issues/{issue['number']}", method="PATCH", data={"state": "closed"})
     if followup:
-        evidence = (f"Nonblocking policy findings on https://github.com/{repo}/pull/{state['number']} "
-                    f"at reviewed commit {state['head']}; adopted as {commit}.\n\n"
+        scope = "policy" if policy else "application"
+        evidence = (f"Nonblocking {scope} findings on https://github.com/{repo}/pull/{finding_pr} "
+                    f"at reviewed commit {finding_sha}; adopted as {commit}.\n\n"
                     + "\n\n".join(f"{item.get('path')}:{item.get('line')}\n{item['body']}"
                                   for item in followup))
         request_repair(directory / "followup", config=commit, upstream=state["upstream"],
                        evidence=evidence, nonblocking=True)
     api(f"repos/{repo}/actions/workflows/release.yml/dispatches", method="POST",
         data={"ref": "downstream"})
+    cleanup_closed_pull_refs(repo, state["number"], state["head"])
     print(f"Adopted {commit}; requested normal exact-source verification and release")
 
 def added_cases(diff):

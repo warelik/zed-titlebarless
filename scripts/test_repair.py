@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -31,6 +32,85 @@ def request(head=SEED, attempt=1, age=0):
 
 
 class RepairBoundaryTests(unittest.TestCase):
+    def test_deferred_proposal_preserves_recovery_and_bounded_repair_paths(self):
+        candidate, patchset = "7" * 40, "8" * 64
+        tag = f"build-1.24.2-{UPSTREAM[:12]}-{patchset[:12]}"
+
+        for nonblocking, broken, expected_followup in (
+            (False, False, False), (True, False, True), (False, True, False),
+        ):
+            with self.subTest(nonblocking=nonblocking, broken=broken):
+                state = {**STATE, "nonblocking": nonblocking}
+                old = request(HEAD, age=release.MAX_REPAIR_SECONDS + 60)
+                outputs, writes = {}, []
+
+                def api(path, *, method="GET", data=None, token=None):
+                    if method != "GET":
+                        writes.append((path, method, data))
+                        return {}
+                    if path == f"repos/{REPO}/commits/downstream": return {"sha": CONFIG}
+                    if path == f"repos/{release.UPSTREAM}/commits/v1.24.2": return {"sha": UPSTREAM}
+                    if path == f"repos/{REPO}/pulls/2": return {"state": "open", "head": {"sha": HEAD}}
+                    raise AssertionError(path)
+
+                def pages(path):
+                    if path == f"repos/{REPO}/releases":
+                        return [{"tag_name": tag, "draft": False}]
+                    if path.startswith(f"repos/{REPO}/pulls?"):
+                        return [{"number": 7, "head": {"sha": candidate}}]
+                    raise AssertionError(path)
+
+                def run(*args, cwd=None, env=None):
+                    if args[:2] == ("git", "init"):
+                        manifest = Path(args[2]) / "crates/zed/Cargo.toml"
+                        manifest.parent.mkdir(parents=True)
+                        manifest.write_text('[package]\nversion = "1.24.2"\n')
+                    if args[:2] == ("git", "am") and broken:
+                        raise subprocess.CalledProcessError(1, args)
+                    if args == ("git", "rev-parse", "HEAD"): return candidate
+                    if args[:2] == ("git", "show"): return '[package]\nversion = "1.24.2"\n'
+                    if args[:2] == ("git", "diff"): return "crates/auto_update/src/auto_update.rs"
+                    return ""
+
+                with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+                    stack.enter_context(patch.dict(os.environ, {
+                        "GITHUB_REPOSITORY": REPO, "GITHUB_SHA": CONFIG, "GITHUB_RUN_ID": "42",
+                    }, clear=True))
+                    for name, replacement in (("api", api), ("pages", pages), ("run", run),
+                                               ("output", lambda **values: outputs.update(values))):
+                        stack.enter_context(patch.object(release, name, side_effect=replacement))
+                    stack.enter_context(patch.object(release, "repair_pull", return_value=state))
+                    stack.enter_context(patch.object(release, "repair_comments", return_value=[old]))
+                    stack.enter_context(patch.object(release, "repair_requests", return_value=[old]))
+                    stack.enter_context(patch.object(release, "mirror_main"))
+                    stack.enter_context(patch.object(release, "select_upstream", return_value=("v1.24.2", UPSTREAM)))
+                    stack.enter_context(patch.object(release, "patch_identity", return_value=([Path("fixture.patch")], patchset)))
+                    stack.enter_context(patch.object(release, "ensure_forward_release"))
+                    stack.enter_context(patch.object(release, "verify_published_release"))
+                    stack.enter_context(patch.object(release, "check_review", return_value=(True, "reviewed")))
+                    stack.enter_context(patch.object(release, "minor_findings", return_value=[]))
+                    stack.enter_context(patch.object(release, "close_published_reviews"))
+                    stack.enter_context(patch.object(release, "cleanup_closed_pull_refs"))
+                    stack.enter_context(patch.object(release, "owner_token", return_value="fake"))
+                    escalation = stack.enter_context(patch.object(
+                        release, "escalation", side_effect=ValueError("expected escalation")))
+                    try:
+                        release.prepare(Path(directory) / "app")
+                    except subprocess.CalledProcessError:
+                        self.assertTrue(broken)
+                    closed = any(method == "PATCH" and data == {"state": "closed"}
+                                 for _, method, data in writes)
+                    if broken or outputs.get("followup"):
+                        with self.assertRaisesRegex(ValueError, "expected escalation"):
+                            release.request_repair(Path(directory) / "repair", evidence="failure")
+                        escalation.assert_called_once()
+                    else:
+                        self.assertTrue(closed)
+                        escalation.assert_not_called()
+                    self.assertEqual(bool(outputs.get("followup")), expected_followup)
+                    self.assertFalse(any("/comments" in path and "@codex" in str(data)
+                                         for path, _, data in writes))
+
     def test_only_patch_changes_or_policy_changes_are_eligible(self):
         for changed, policy in (
             ("patches/0009-fix.patch", False), ("scripts/release.py", True),
@@ -128,16 +208,20 @@ class RepairBoundaryTests(unittest.TestCase):
 
     def test_recovered_candidate_closes_only_the_unchanged_blocking_repair(self):
         with (patch.object(release, "api", side_effect=[
-                  {"sha": CONFIG}, {"state": "open", "head": {"sha": HEAD}}, {}, {}]) as api):
+                  {"sha": CONFIG}, {"state": "open", "head": {"sha": HEAD}}, {}, {}]) as api,
+              patch.object(release, "cleanup_closed_pull_refs") as cleanup):
             release.close_recovered_repair(REPO, CONFIG, state=STATE)
         self.assertEqual(api.call_args.kwargs, {"method": "PATCH", "data": {"state": "closed"}})
+        cleanup.assert_called_once_with(REPO, 2, HEAD)
 
     def test_late_lookup_closes_the_captured_unchanged_blocking_repair(self):
         with (patch.object(release, "repair_pull", return_value=STATE),
               patch.object(release, "api", side_effect=[
-                  {"sha": CONFIG}, {"state": "open", "head": {"sha": HEAD}}, {}, {}]) as api):
+                  {"sha": CONFIG}, {"state": "open", "head": {"sha": HEAD}}, {}, {}]) as api,
+              patch.object(release, "cleanup_closed_pull_refs") as cleanup):
             release.close_recovered_repair(REPO, CONFIG, expected_head=HEAD)
         self.assertEqual(api.call_args.kwargs, {"method": "PATCH", "data": {"state": "closed"}})
+        cleanup.assert_called_once_with(REPO, 2, HEAD)
 
     def test_late_lookup_does_not_close_a_repair_advanced_after_preparation(self):
         with (patch.object(release, "repair_pull", return_value={**STATE, "head": SEED}),
@@ -171,6 +255,11 @@ class RepairBoundaryTests(unittest.TestCase):
                 return {"sha": CONFIG}
             return {"state": "open", "head": {"sha": HEAD}}
         def run(*args, **kwargs):
+            if args[:3] == ("git", "worktree", "add"):
+                work = Path(args[4])
+                (work / "patches").mkdir(parents=True)
+                (work / "patches/source.json").write_text(
+                    json.dumps({"schema": 1, "test_cases": []}) + "\n")
             return adopted if args == ("git", "rev-parse", "HEAD") else ""
         with (tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, ENV),
               patch.object(release, "repair_pull", return_value=STATE),
@@ -183,12 +272,173 @@ class RepairBoundaryTests(unittest.TestCase):
               patch.object(release, "run", side_effect=run),
               patch.object(release.subprocess, "check_output", return_value=b"verified diff"),
               patch.object(release.subprocess, "run", return_value=SimpleNamespace(stdout="", returncode=1)),
-              patch.object(release, "request_repair") as followup):
+              patch.object(release, "request_repair") as followup,
+              patch.object(release, "cleanup_closed_pull_refs")):
             release.land_repair(Path(directory))
         self.assertEqual(followup.call_args.kwargs["config"], adopted)
         self.assertEqual(followup.call_args.kwargs["upstream"], UPSTREAM)
         self.assertTrue(followup.call_args.kwargs["nonblocking"])
         self.assertIn("P2 policy followup", followup.call_args.kwargs["evidence"])
+
+    def test_application_minor_followup_keeps_application_review_identity(self):
+        adopted, application = "e" * 40, "f" * 40
+        finding = {"body": "P2 application followup", "path": "crates/app.rs", "line": 17}
+        environment = {**ENV, "CANDIDATE_SHA": application, "CANDIDATE_PR": "7"}
+
+        def api(path, **kwargs):
+            if path.endswith("/commits/downstream"):
+                return {"sha": CONFIG}
+            return {}
+
+        def run(*args, **kwargs):
+            if args[:3] == ("git", "worktree", "add"):
+                work = Path(args[4])
+                (work / "patches").mkdir(parents=True)
+                (work / "patches/source.json").write_text(
+                    json.dumps({"schema": 1, "test_cases": []}) + "\n")
+            return adopted if args == ("git", "rev-parse", "HEAD") else ""
+
+        with (tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, environment),
+              patch.object(release, "repair_pull", return_value=STATE),
+              patch.object(release, "repair_changes", return_value=(["patches/0009-fix.patch"], False)),
+              patch.object(release, "check_review", return_value=(True, "Accepted")),
+              patch.object(release, "minor_findings", return_value=[finding]) as findings,
+              patch.object(release, "api", side_effect=api),
+              patch.object(release, "pages", return_value=[]),
+              patch.object(release, "run", side_effect=run),
+              patch.object(release, "copy_patch_series", return_value=[]),
+              patch.object(release, "patch_identity", return_value=([], "1" * 64)),
+              patch.object(release, "patch_regressions", return_value=set()),
+              patch.object(release.subprocess, "check_output", return_value=b"verified diff"),
+              patch.object(release.subprocess, "run", return_value=SimpleNamespace(stdout="", returncode=1)),
+              patch.object(release, "request_repair") as followup,
+              patch.object(release, "cleanup_closed_pull_refs")):
+            release.land_repair(Path(directory))
+        findings.assert_called_once_with(REPO, 7, application)
+        self.assertEqual(followup.call_args.kwargs["config"], adopted)
+        self.assertEqual(followup.call_args.kwargs["upstream"], UPSTREAM)
+        self.assertTrue(followup.call_args.kwargs["nonblocking"])
+        evidence = followup.call_args.kwargs["evidence"]
+        self.assertIn("application findings", evidence)
+        self.assertIn(f"pull/7", evidence)
+        self.assertIn(application, evidence)
+        self.assertIn("crates/app.rs:17\nP2 application followup", evidence)
+
+
+class TemporaryRefCleanupTests(unittest.TestCase):
+    PATCHSET = "9" * 64
+
+    def review_pull(self, **changes):
+        pull = {
+            "state": "closed", "user": {"login": "maintainer"},
+            "head": {"sha": HEAD, "ref": f"review/{UPSTREAM}-{self.PATCHSET}",
+                     "repo": {"full_name": REPO}},
+            "base": {"sha": UPSTREAM, "ref": f"review-base/{UPSTREAM}",
+                     "repo": {"full_name": REPO}},
+        }
+        pull.update(changes)
+        return pull
+
+    @staticmethod
+    def ref(branch, sha):
+        return {"ref": f"refs/heads/{branch}", "object": {"type": "commit", "sha": sha}}
+
+    def invoke_review(self, pull=None, open_pulls=None, refs=None, graphql=None):
+        pull = pull or self.review_pull()
+        refs = refs or {
+            pull["head"]["ref"]: [self.ref(pull["head"]["ref"], HEAD)],
+            pull["base"]["ref"]: [self.ref(pull["base"]["ref"], UPSTREAM)],
+        }
+        writes = []
+
+        def api(path, *, method="GET", data=None, token=None):
+            if path == f"repos/{REPO}/pulls/2":
+                return pull
+            if path == f"repos/{REPO}/git/ref/pull/2/head":
+                return {"object": {"type": "commit", "sha": HEAD}}
+            prefix = f"repos/{REPO}/git/matching-refs/heads/"
+            if path.startswith(prefix):
+                return refs.get(path[len(prefix):], [])
+            if path == f"repos/{REPO}":
+                return {"node_id": "R_test"}
+            if path == "graphql":
+                writes.append(data)
+                return graphql if graphql is not None else {
+                    "data": {"updateRefs": {"clientMutationId": None}}}
+            raise AssertionError(path)
+
+        with (patch.object(release, "api", side_effect=api),
+              patch.object(release, "pages", return_value=open_pulls or [])):
+            release.cleanup_closed_pull_refs(REPO, 2, HEAD, upstream=UPSTREAM)
+        return writes
+
+    def test_owned_closed_review_deletes_both_exact_refs_atomically(self):
+        writes = self.invoke_review()
+        self.assertEqual(len(writes), 1)
+        updates = writes[0]["variables"]["input"]["refUpdates"]
+        self.assertEqual({item["name"] for item in updates}, {
+            f"refs/heads/review/{UPSTREAM}-{self.PATCHSET}",
+            f"refs/heads/review-base/{UPSTREAM}",
+        })
+        self.assertEqual({item["beforeOid"] for item in updates}, {HEAD, UPSTREAM})
+        self.assertTrue(all(item["afterOid"] == "0" * 40 for item in updates))
+        self.assertTrue(all("force" not in item for item in updates))
+
+    def test_shared_review_base_is_retained(self):
+        other = {"head": {"ref": "review/other", "repo": {"full_name": REPO}},
+                 "base": {"ref": f"review-base/{UPSTREAM}", "repo": {"full_name": REPO}}}
+        updates = self.invoke_review(open_pulls=[other])[0]["variables"]["input"]["refUpdates"]
+        self.assertEqual([item["name"] for item in updates],
+                         [f"refs/heads/review/{UPSTREAM}-{self.PATCHSET}"])
+
+    def test_changed_closed_pull_or_ref_and_noncanonical_identity_are_preserved(self):
+        cases = [
+            self.review_pull(state="open"),
+            self.review_pull(user={"login": "stranger"}),
+            self.review_pull(head={"sha": SEED, "ref": f"review/{UPSTREAM}-{self.PATCHSET}",
+                                   "repo": {"full_name": REPO}}),
+            self.review_pull(head={"sha": HEAD, "ref": "review/maintenance-bootstrap",
+                                   "repo": {"full_name": REPO}}),
+        ]
+        for pull in cases:
+            with self.subTest(pull=pull):
+                self.assertEqual(self.invoke_review(pull=pull), [])
+        branch = self.review_pull()["head"]["ref"]
+        self.assertEqual(self.invoke_review(refs={branch: [self.ref(branch, SEED)]}), [])
+
+    def test_missing_archive_or_refs_never_mutates(self):
+        with (patch.object(release, "api", side_effect=[
+                  self.review_pull(), subprocess.CalledProcessError(1, "gh")]),
+              patch.object(release, "pages", side_effect=AssertionError("no listing"))):
+            release.cleanup_closed_pull_refs(REPO, 2, HEAD, upstream=UPSTREAM)
+        self.assertEqual(self.invoke_review(refs={"unused": []}), [])
+
+    def test_closed_marked_repair_deletes_only_its_head(self):
+        state = {"schema": 1, "config": CONFIG, "upstream": UPSTREAM, "seed": SEED}
+        pull = {"state": "closed", "user": {"login": "github-actions[bot]"},
+                "head": {"sha": HEAD, "ref": "repair/example", "repo": {"full_name": REPO}},
+                "base": {"sha": CONFIG, "ref": "downstream", "repo": {"full_name": REPO}},
+                "body": "<!-- zed-repair:v1 " + json.dumps(state) + " -->"}
+        calls = []
+        def api(path, *, method="GET", data=None, token=None):
+            if path.endswith("/pulls/2"): return pull
+            if path.endswith("/git/ref/pull/2/head"):
+                return {"object": {"type": "commit", "sha": HEAD}}
+            if "/git/matching-refs/heads/" in path:
+                return [self.ref("repair/example", HEAD)]
+            if path == f"repos/{REPO}": return {"node_id": "R_test"}
+            if path == "graphql":
+                calls.append(data)
+                return {"data": {"updateRefs": {"clientMutationId": None}}}
+            raise AssertionError(path)
+        with patch.object(release, "api", side_effect=api), patch.object(release, "pages", return_value=[]):
+            release.cleanup_closed_pull_refs(REPO, 2, HEAD)
+        updates = calls[0]["variables"]["input"]["refUpdates"]
+        self.assertEqual([item["name"] for item in updates], ["refs/heads/repair/example"])
+
+    def test_graphql_rejection_is_reported_without_retry(self):
+        with self.assertRaisesRegex(ValueError, "atomic temporary-ref cleanup"):
+            self.invoke_review(graphql={"errors": [{"message": "beforeOid changed"}]})
 
 
 class NativeTaskTests(unittest.TestCase):
@@ -299,6 +549,7 @@ class AdoptionTests(unittest.TestCase):
               patch.object(release, "repair_pull", return_value=STATE),
               patch.object(release, "repair_changes", return_value=(["patches/0009-fix.patch"], False)),
               patch.object(release, "check_review", return_value=(True, "reviewed")),
+              patch.object(release, "minor_findings", return_value=[]),
               patch.object(release, "api", return_value={"sha": HEAD}),
               patch.object(release, "run", side_effect=AssertionError("No Git writes")),
               self.assertRaisesRegex(ValueError, "stale repairs")):
@@ -326,6 +577,7 @@ class AdoptionTests(unittest.TestCase):
               patch.object(release, "repair_pull", return_value=STATE),
               patch.object(release, "repair_changes", return_value=(["patches/0009-fix.patch"], False)),
               patch.object(release, "check_review", return_value=(True, "reviewed")),
+              patch.object(release, "minor_findings", return_value=[]),
               patch.object(release, "api", return_value={"sha": CONFIG}),
               patch.object(release, "run", return_value=""),
               patch.object(release.subprocess, "check_output", return_value=b"delta"),
