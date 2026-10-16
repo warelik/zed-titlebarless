@@ -386,6 +386,31 @@ def repair_comments(repo, number):
             if c.get("user", {}).get("login") == repo.split("/")[0]
             and c.get("user", {}).get("type") == "User"]
 
+def adopted_repair(repo, pull, config):
+    """A verified adoption ends the old repair, not an arbitrary config change."""
+    if pull.get("state") != "closed":
+        return False
+    for comment in pages(f"repos/{repo}/issues/{pull['number']}/comments"):
+        user = comment.get("user") or {}
+        if not ((user.get("login") == repo.split("/")[0] and user.get("type") == "User")
+                or (user.get("login") == "github-actions[bot]" and user.get("type") == "Bot")):
+            continue
+        match = re.fullmatch(
+            r"Verified repair adopted as `([0-9a-f]{40})`; source-context files were not merged\.",
+            (comment.get("body") or "").strip())
+        if not match:
+            continue
+        adopted = match[1]
+        try:
+            comparison = api(f"repos/{repo}/compare/{adopted}...{config}")
+        except subprocess.CalledProcessError:
+            continue
+        if (comparison.get("status") in {"ahead", "identical"}
+                and (comparison.get("merge_base_commit") or {}).get("sha") == adopted):
+            return True
+    return False
+
+
 def repair_requests(repo, state):
     records = [c for c in repair_comments(repo, state["number"])
                if FIX_REQUEST.search(c.get("body") or "")]
@@ -398,6 +423,8 @@ def repair_requests(repo, state):
                 continue
             markers = REPAIR_STATE.findall(pull.get("body") or "")
             if len(markers) == 1 and json.loads(markers[0]).get("cycle") == state["cycle"]:
+                if adopted_repair(repo, pull, state["config"]):
+                    continue
                 records.extend(c for c in repair_comments(repo, pull["number"])
                                if FIX_REQUEST.search(c.get("body") or ""))
     return sorted(records, key=lambda c: c["created_at"])
