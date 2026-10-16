@@ -26,7 +26,7 @@ use futures::{
 };
 use gpui::{
     App, AppContext as _, AsyncApp, BackgroundExecutor, BorrowAppContext, Context, Entity,
-    EventEmitter, FutureExt, Global, Task, TaskExt, WeakEntity,
+    EventEmitter, FutureExt, Global, SharedString, Task, TaskExt, WeakEntity,
 };
 use parking_lot::Mutex;
 
@@ -132,11 +132,21 @@ pub enum Interactive {
     No,
 }
 
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum NonRetryableReconnectError {
+    #[error("password prompt unavailable during background reconnect")]
+    PromptUnavailable,
+    #[error("connection canceled by user")]
+    CanceledByUser,
+    #[error("authentication failed: {0}")]
+    AuthenticationFailed(String),
+}
+
 pub trait RemoteClientDelegate: Send + Sync {
     fn ask_password(
         &self,
         prompt: String,
-        tx: oneshot::Sender<EncryptedPassword>,
+        tx: oneshot::Sender<Result<EncryptedPassword, askpass::AskPassCancelReason>>,
         cancellation: oneshot::Receiver<()>,
         cx: &mut AsyncApp,
     );
@@ -163,7 +173,11 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
 const INITIAL_CONNECTION_TIMEOUT: Duration =
     Duration::from_secs(if cfg!(debug_assertions) { 5 } else { 60 });
 
-pub const MAX_RECONNECT_ATTEMPTS: usize = 3;
+pub const MAX_RECONNECT_ATTEMPTS: usize = 10;
+/// Each retry waits twice as long as the one before: after a wake from sleep the
+/// network often comes up seconds later, and immediate retries would all fail.
+const RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
+const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(10);
 
 enum State {
     Connecting,
@@ -191,7 +205,9 @@ enum State {
         error: anyhow::Error,
         attempts: usize,
     },
-    ReconnectExhausted,
+    ReconnectExhausted {
+        reason: Option<SharedString>,
+    },
     ServerNotRunning,
 }
 
@@ -202,7 +218,7 @@ impl fmt::Display for State {
             Self::Connected { .. } => write!(f, "connected"),
             Self::Reconnecting => write!(f, "reconnecting"),
             Self::ReconnectFailed { .. } => write!(f, "reconnect failed"),
-            Self::ReconnectExhausted => write!(f, "reconnect exhausted"),
+            Self::ReconnectExhausted { .. } => write!(f, "reconnect exhausted"),
             Self::HeartbeatMissed { .. } => write!(f, "heartbeat missed"),
             Self::ServerNotRunning { .. } => write!(f, "server not running"),
         }
@@ -232,7 +248,7 @@ impl State {
             | Self::ReconnectFailed { .. } => true,
             State::Connecting
             | State::Reconnecting
-            | State::ReconnectExhausted
+            | State::ReconnectExhausted { .. }
             | State::ServerNotRunning => false,
         }
     }
@@ -320,7 +336,7 @@ impl From<&State> for ConnectionState {
             State::Connected { .. } => Self::Connected,
             State::Reconnecting | State::ReconnectFailed { .. } => Self::Reconnecting,
             State::HeartbeatMissed { .. } => Self::HeartbeatMissed,
-            State::ReconnectExhausted => Self::Disconnected,
+            State::ReconnectExhausted { .. } => Self::Disconnected,
             State::ServerNotRunning => Self::Disconnected,
         }
     }
@@ -336,7 +352,7 @@ pub struct RemoteClient {
     state: Option<State>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteClientEvent {
     Disconnected { server_not_running: bool },
     Reconnected,
@@ -605,7 +621,7 @@ impl RemoteClient {
         }
 
         let state = self.state.take().unwrap();
-        let (attempts, remote_connection, delegate) = match state {
+        let (attempts, remote_connection, delegate, last_error) = match state {
             State::Connected {
                 remote_connection,
                 delegate,
@@ -621,17 +637,22 @@ impl RemoteClient {
             } => {
                 drop(multiplex_task);
                 drop(heartbeat_task);
-                (0, remote_connection, delegate)
+                (0, remote_connection, delegate, None)
             }
             State::ReconnectFailed {
                 attempts,
                 remote_connection,
                 delegate,
-                ..
-            } => (attempts, remote_connection, delegate),
+                error,
+            } => (
+                attempts,
+                remote_connection,
+                delegate,
+                Some(format!("{error:#}").into()),
+            ),
             State::Connecting
             | State::Reconnecting
-            | State::ReconnectExhausted
+            | State::ReconnectExhausted { .. }
             | State::ServerNotRunning => unreachable!(),
         };
 
@@ -641,7 +662,7 @@ impl RemoteClient {
                 "Failed to reconnect to after {} attempts, giving up",
                 MAX_RECONNECT_ATTEMPTS
             );
-            self.set_state(State::ReconnectExhausted, cx);
+            self.set_state(State::ReconnectExhausted { reason: last_error }, cx);
             return Ok(());
         }
 
@@ -655,16 +676,42 @@ impl RemoteClient {
         let unique_identifier = self.unique_identifier.clone();
         let client = self.client.clone();
         let reconnect_task = cx.spawn(async move |this, cx| {
+            fn non_retryable_error(error: &anyhow::Error) -> Option<NonRetryableReconnectError> {
+                error
+                    .downcast_ref::<NonRetryableReconnectError>()
+                    .or_else(|| {
+                        error
+                            .root_cause()
+                            .downcast_ref::<NonRetryableReconnectError>()
+                    })
+                    .cloned()
+            }
+
             macro_rules! failed {
                 ($error:expr, $attempts:expr, $remote_connection:expr, $delegate:expr) => {
-                    delegate.set_status(Some(&format!("{error:#}", error = $error)), cx);
+                    let error: anyhow::Error = $error.into();
+                    delegate.set_status(Some(&format!("{error:#}")), cx);
+                    if let Some(non_retryable) = non_retryable_error(&error) {
+                        log::info!(
+                            "Reconnect encountered non-retryable error ({non_retryable}), stopping retry loop"
+                        );
+                        return State::ReconnectExhausted {
+                            reason: Some(format!("{error:#}").into()),
+                        };
+                    }
                     return State::ReconnectFailed {
-                        error: anyhow!($error),
+                        error,
                         attempts: $attempts,
                         remote_connection: $remote_connection,
                         delegate: $delegate,
                     };
                 };
+            }
+
+            if attempts > 1 {
+                let raw_backoff = RECONNECT_BACKOFF * 2u32.pow((attempts - 2) as u32);
+                let backoff = raw_backoff.min(MAX_RECONNECT_BACKOFF);
+                cx.background_executor().timer(backoff).await;
             }
 
             if let Err(error) = remote_connection
@@ -692,7 +739,22 @@ impl RemoteClient {
                         )
                     })
                     .await
-                    .map_err(|error| error.cloned())?;
+                    .map_err(|error| {
+                        let non_retryable = error
+                            .as_ref()
+                            .downcast_ref::<NonRetryableReconnectError>()
+                            .or_else(|| {
+                                error
+                                    .root_cause()
+                                    .downcast_ref::<NonRetryableReconnectError>()
+                            });
+                        if let Some(non_retryable) = non_retryable {
+                            anyhow::Error::new(non_retryable.clone())
+                                .context("Failed to connect to host")
+                        } else {
+                            anyhow!("{error:#}")
+                        }
+                    })?;
 
                 let io_task = remote_connection.start_proxy(
                     unique_identifier,
@@ -752,7 +814,7 @@ impl RemoteClient {
                                     error
                                 );
                             }
-                            State::ReconnectExhausted => {
+                            State::ReconnectExhausted { .. } => {
                                 log::error!("Reconnect attempt failed and all attempts exhausted");
                             }
                         }
@@ -928,7 +990,15 @@ impl RemoteClient {
     fn try_set_state(&mut self, cx: &mut Context<Self>, map: impl FnOnce(&State) -> Option<State>) {
         let new_state = self.state.as_ref().and_then(map);
         if let Some(new_state) = new_state {
+            log::info!("setting state to '{new_state}'");
+            let is_reconnect_exhausted = new_state.is_reconnect_exhausted();
+            let is_server_not_running = new_state.is_server_not_running();
             self.state.replace(new_state);
+            if is_reconnect_exhausted || is_server_not_running {
+                cx.emit(RemoteClientEvent::Disconnected {
+                    server_not_running: is_server_not_running,
+                });
+            }
             cx.notify();
         }
     }
@@ -1031,6 +1101,14 @@ impl RemoteClient {
 
     pub fn is_disconnected(&self) -> bool {
         self.connection_state() == ConnectionState::Disconnected
+    }
+
+    pub fn disconnect_reason(&self) -> Option<SharedString> {
+        match self.state.as_ref()? {
+            State::ReconnectExhausted { reason } => reason.clone(),
+            State::ServerNotRunning => Some("remote server process exited unexpectedly".into()),
+            _ => None,
+        }
     }
 
     pub fn path_style(&self) -> PathStyle {
@@ -1589,6 +1667,410 @@ mod tests {
         });
 
         assert_eq!(options.host(), "1.2.3.4");
+    }
+
+    struct TestDummyConnection(pub Option<RemoteConnectionOptions>);
+    #[async_trait::async_trait(?Send)]
+    impl RemoteConnection for TestDummyConnection {
+        async fn kill(&self) -> Result<()> {
+            Ok(())
+        }
+        fn has_been_killed(&self) -> bool {
+            false
+        }
+        fn build_command(
+            &self,
+            _program: Option<String>,
+            _args: &[String],
+            _env: &collections::HashMap<String, String>,
+            _working_dir: Option<String>,
+            _port_forward: Option<(u16, String, u16)>,
+            _interactive: Interactive,
+        ) -> Result<CommandTemplate> {
+            Ok(CommandTemplate {
+                program: "sh".into(),
+                args: vec![],
+                env: Default::default(),
+            })
+        }
+        fn build_forward_ports_command(
+            &self,
+            _forwards: Vec<(u16, String, u16)>,
+        ) -> Result<CommandTemplate> {
+            Ok(CommandTemplate {
+                program: "sh".into(),
+                args: vec![],
+                env: Default::default(),
+            })
+        }
+        fn upload_directory(
+            &self,
+            _src_path: PathBuf,
+            _dest_path: util::paths::RemotePathBuf,
+            _cx: &App,
+        ) -> Task<Result<()>> {
+            Task::ready(Ok(()))
+        }
+        fn start_proxy(
+            &self,
+            _unique_identifier: String,
+            _reconnect: bool,
+            _client_incoming_tx: mpsc::UnboundedSender<Envelope>,
+            _client_outgoing_rx: mpsc::UnboundedReceiver<Envelope>,
+            _connection_activity_tx: futures::channel::mpsc::Sender<()>,
+            _delegate: Arc<dyn RemoteClientDelegate>,
+            _cx: &mut AsyncApp,
+        ) -> Task<Result<i32>> {
+            Task::ready(Ok(0))
+        }
+        fn path_style(&self) -> util::paths::PathStyle {
+            util::paths::PathStyle::local()
+        }
+        fn remote_platform(&self) -> RemotePlatform {
+            RemotePlatform {
+                os: RemoteOs::Linux,
+                arch: RemoteArch::Aarch64,
+            }
+        }
+        fn remote_os_version(&self) -> Option<String> {
+            None
+        }
+        fn shell(&self) -> String {
+            "sh".to_string()
+        }
+        fn default_system_shell(&self) -> String {
+            "sh".to_string()
+        }
+        fn has_wsl_interop(&self) -> bool {
+            false
+        }
+        fn connection_options(&self) -> RemoteConnectionOptions {
+            self.0
+                .clone()
+                .unwrap_or_else(|| RemoteConnectionOptions::Ssh(SshConnectionOptions::default()))
+        }
+    }
+
+    #[gpui::test]
+    async fn test_reconnect_exhausted_clears_connection_and_enables_fresh_reconnect(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.default_global::<ConnectionPool>();
+        });
+        let (_incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
+        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded::<Envelope>();
+
+        let client =
+            cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test-client", false));
+
+        let _drain_outgoing = cx
+            .executor()
+            .spawn(async move { while outgoing_rx.next().await.is_some() {} });
+
+        let opts = RemoteConnectionOptions::Mock(crate::transport::mock::MockConnectionOptions {
+            id: 999_999,
+        });
+
+        let mock_conn: Arc<dyn RemoteConnection> =
+            Arc::new(TestDummyConnection(Some(opts.clone())));
+        let mock_delegate: Arc<dyn RemoteClientDelegate> =
+            Arc::new(crate::transport::mock::MockDelegate);
+
+        let remote_client = cx.new(|_| RemoteClient {
+            client,
+            unique_identifier: "test-unique-id".to_string(),
+            connection_options: opts,
+            path_style: util::paths::PathStyle::local(),
+            platform: RemotePlatform {
+                os: RemoteOs::Linux,
+                arch: RemoteArch::Aarch64,
+            },
+            os_version: None,
+            state: Some(State::Connected {
+                remote_connection: mock_conn.clone(),
+                delegate: mock_delegate.clone(),
+                multiplex_task: Task::ready(Ok(())),
+                heartbeat_task: Task::ready(Ok(())),
+            }),
+        });
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let recorded_events = events.clone();
+        let subscription = cx.update(|cx| {
+            cx.subscribe(&remote_client, move |_, event: &RemoteClientEvent, _| {
+                recorded_events.lock().push(event.clone());
+            })
+        });
+
+        assert!(remote_client.read_with(cx, |c, _| c.state.as_ref().unwrap().can_reconnect()));
+        assert!(remote_client.read_with(cx, |c, _| c.remote_connection().is_some()));
+
+        remote_client.update(cx, |client, cx| {
+            client.reconnect(cx).expect("reconnect should initiate");
+        });
+
+        // Advance clock by 30 seconds: under 10 attempts with exponential backoff (1+2+4+8+10=25s),
+        // reconnect is on attempt 6 and STILL ACTIVE.
+        cx.run_until_parked();
+        cx.background_executor
+            .advance_clock(Duration::from_secs(30));
+        cx.run_until_parked();
+
+        remote_client.read_with(cx, |client, _| {
+            let state = client
+                .state
+                .as_ref()
+                .expect("client state must be initialized");
+            assert!(
+                state.is_reconnecting(),
+                "state must still be reconnecting at 30s due to exponential backoff schedule, but got: {state}"
+            );
+            assert!(
+                !state.is_reconnect_exhausted(),
+                "must not be exhausted at 30s"
+            );
+        });
+
+        // Advance clock by another 40 seconds (total 70s > full 65s schedule): now exhausted.
+        cx.background_executor
+            .advance_clock(Duration::from_secs(40));
+        cx.run_until_parked();
+
+        remote_client.read_with(cx, |client, _| {
+            let state = client
+                .state
+                .as_ref()
+                .expect("client state must be initialized");
+            assert!(
+                state.is_reconnect_exhausted(),
+                "state must be ReconnectExhausted after reaching MAX_RECONNECT_ATTEMPTS, but got: {state}"
+            );
+            assert!(
+                !state.can_reconnect(),
+                "can_reconnect must be false when exhausted"
+            );
+            assert!(
+                client.remote_connection().is_none(),
+                "remote_connection() must return None so stock DisconnectedOverlay establishes fresh connection"
+            );
+            assert_eq!(
+                ConnectionState::from(state),
+                ConnectionState::Disconnected
+            );
+            assert_eq!(
+                format!("{state}"),
+                "reconnect exhausted"
+            );
+        });
+        assert_eq!(
+            events.lock().as_slice(),
+            &[RemoteClientEvent::Disconnected {
+                server_not_running: false
+            }],
+            "transient failures should retry and emit Disconnected exactly once on exhaustion"
+        );
+        drop(subscription);
+    }
+
+    async fn assert_non_retryable_reconnect_error_stops_immediately(
+        cx: &mut TestAppContext,
+        connection_id: u64,
+        error: anyhow::Error,
+        expected_reason: &str,
+    ) {
+        cx.update(|cx| {
+            cx.default_global::<ConnectionPool>();
+        });
+        let (_incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
+        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded::<Envelope>();
+        let client =
+            cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test-client", false));
+        let _drain_outgoing = cx
+            .executor()
+            .spawn(async move { while outgoing_rx.next().await.is_some() {} });
+        let options =
+            RemoteConnectionOptions::Mock(crate::transport::mock::MockConnectionOptions {
+                id: connection_id,
+            });
+        let remote_connection: Arc<dyn RemoteConnection> =
+            Arc::new(TestDummyConnection(Some(options.clone())));
+        let connect_error = error.context("Failed to connect to host");
+        let connect_task: Shared<Task<Result<Arc<dyn RemoteConnection>, Arc<anyhow::Error>>>> =
+            Task::ready(Err(Arc::new(connect_error))).shared();
+        cx.update(|cx| {
+            cx.default_global::<ConnectionPool>().connections.insert(
+                options.clone(),
+                ConnectionPoolEntry::Connecting(
+                    connect_task
+                        .downgrade()
+                        .expect("shared connection task should be upgradeable"),
+                ),
+            );
+        });
+        let delegate: Arc<dyn RemoteClientDelegate> =
+            Arc::new(crate::transport::mock::MockDelegate);
+        let remote_client = cx.new(|_| RemoteClient {
+            client,
+            unique_identifier: "test-prompt-unavailable-context".to_string(),
+            connection_options: options,
+            path_style: util::paths::PathStyle::local(),
+            platform: RemotePlatform {
+                os: RemoteOs::Linux,
+                arch: RemoteArch::Aarch64,
+            },
+            os_version: None,
+            state: Some(State::Connected {
+                remote_connection,
+                delegate,
+                multiplex_task: Task::ready(Ok(())),
+                heartbeat_task: Task::ready(Ok(())),
+            }),
+        });
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let recorded_events = events.clone();
+        let subscription = cx.update(|cx| {
+            cx.subscribe(&remote_client, move |_, event: &RemoteClientEvent, _| {
+                recorded_events.lock().push(event.clone());
+            })
+        });
+
+        remote_client.update(cx, |remote_client, cx| {
+            remote_client.reconnect(cx).expect("reconnect should start");
+        });
+        cx.run_until_parked();
+
+        remote_client.read_with(cx, |remote_client, _| {
+            assert!(remote_client.is_disconnected());
+            assert!(
+                remote_client
+                    .disconnect_reason()
+                    .is_some_and(|reason| reason.contains(expected_reason)),
+                "the typed reason should survive the production SSH context"
+            );
+        });
+        assert_eq!(
+            events.lock().as_slice(),
+            &[RemoteClientEvent::Disconnected {
+                server_not_running: false
+            }],
+            "a context-wrapped non-retryable failure must emit Disconnected exactly once"
+        );
+
+        cx.background_executor
+            .advance_clock(Duration::from_secs(100));
+        cx.run_until_parked();
+        assert_eq!(
+            events.lock().as_slice(),
+            &[RemoteClientEvent::Disconnected {
+                server_not_running: false
+            }],
+            "non-retryable reconnect must not schedule another attempt"
+        );
+        drop(subscription);
+    }
+
+    #[gpui::test]
+    async fn test_context_wrapped_prompt_unavailable_stops_immediately_once(
+        cx: &mut TestAppContext,
+    ) {
+        assert_non_retryable_reconnect_error_stops_immediately(
+            cx,
+            888_100,
+            anyhow::Error::new(NonRetryableReconnectError::PromptUnavailable),
+            "password prompt unavailable",
+        )
+        .await;
+    }
+
+    #[gpui::test]
+    async fn test_context_wrapped_user_cancel_stops_immediately_once(cx: &mut TestAppContext) {
+        assert_non_retryable_reconnect_error_stops_immediately(
+            cx,
+            888_101,
+            anyhow::Error::new(NonRetryableReconnectError::CanceledByUser),
+            "connection canceled by user",
+        )
+        .await;
+    }
+
+    #[gpui::test]
+    async fn test_context_wrapped_ssh_auth_error_stops_immediately_once(cx: &mut TestAppContext) {
+        let error = crate::transport::ssh::parse_ssh_connect_error(
+            b"user@host: Permission denied (publickey,password).\n",
+        )
+        .expect_err("OpenSSH authentication failure must be an error");
+        assert_non_retryable_reconnect_error_stops_immediately(
+            cx,
+            888_102,
+            error,
+            "authentication failed",
+        )
+        .await;
+    }
+
+    #[gpui::test]
+    async fn test_is_disconnected_excludes_heartbeat_missed_and_reconnecting(
+        cx: &mut TestAppContext,
+    ) {
+        let (_incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
+        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded::<Envelope>();
+        let client =
+            cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test-client", false));
+        let _drain_outgoing = cx
+            .executor()
+            .spawn(async move { while outgoing_rx.next().await.is_some() {} });
+        let options =
+            RemoteConnectionOptions::Mock(crate::transport::mock::MockConnectionOptions {
+                id: 888_101,
+            });
+        let remote_connection: Arc<dyn RemoteConnection> =
+            Arc::new(TestDummyConnection(Some(options.clone())));
+        let delegate: Arc<dyn RemoteClientDelegate> =
+            Arc::new(crate::transport::mock::MockDelegate);
+        let remote_client = cx.new(|_| RemoteClient {
+            client,
+            unique_identifier: "test-disconnected-state-classification".to_string(),
+            connection_options: options,
+            path_style: util::paths::PathStyle::local(),
+            platform: RemotePlatform {
+                os: RemoteOs::Linux,
+                arch: RemoteArch::Aarch64,
+            },
+            os_version: None,
+            state: Some(State::HeartbeatMissed {
+                missed_heartbeats: MAX_MISSED_HEARTBEATS,
+                remote_connection,
+                delegate,
+                multiplex_task: Task::ready(Ok(())),
+                heartbeat_task: Task::ready(Ok(())),
+            }),
+        });
+
+        assert!(
+            !remote_client.read_with(cx, |remote_client, _| { remote_client.is_disconnected() })
+        );
+        remote_client.update(cx, |remote_client, cx| {
+            remote_client.set_state(State::Reconnecting, cx);
+        });
+        assert!(
+            !remote_client.read_with(cx, |remote_client, _| { remote_client.is_disconnected() })
+        );
+        remote_client.update(cx, |remote_client, cx| {
+            remote_client.set_state(State::ServerNotRunning, cx);
+        });
+        remote_client.read_with(cx, |remote_client, _| {
+            assert!(remote_client.is_disconnected());
+            assert_eq!(
+                remote_client.disconnect_reason().as_deref(),
+                Some("remote server process exited unexpectedly")
+            );
+        });
+        remote_client.update(cx, |remote_client, cx| {
+            remote_client.set_state(State::ReconnectExhausted { reason: None }, cx);
+        });
+        assert!(
+            remote_client.read_with(cx, |remote_client, _| { remote_client.is_disconnected() })
+        );
     }
 }
 
