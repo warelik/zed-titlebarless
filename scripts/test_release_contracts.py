@@ -630,7 +630,6 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("ref: ${{ needs.prepare.outputs.sha }}", self.workflow)
         self.assertIn("fetch-depth: ${{ needs.prepare.outputs.source_depth }}", self.workflow)
         self.assertIn("persist-credentials: false", self.workflow)
-
     def test_macos_job_is_read_only_and_has_no_write_or_codex_credentials(self):
         application_job = self.workflow.split("\n  test:\n", 1)[1].split("\n  publish:\n", 1)[0]
         self.assertIn("timeout-minutes: 355", application_job)
@@ -667,6 +666,155 @@ class WorkflowContractTests(unittest.TestCase):
             release.MAX_REPAIR_SECONDS,
             3 * (release.REVIEW_WAIT_SECONDS + release.MACOS_JOB_TIMEOUT_MINUTES * 60),
         )
+
+
+class IsolatedEnvironmentTests(unittest.TestCase):
+    def test_both_explicit_toolchain_paths_avoid_home_lookup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "sandbox"
+            root.mkdir()
+            environment = {
+                "HOME": "/host/home",
+                "CARGO_HOME": "/toolchain/cargo",
+                "RUSTUP_HOME": "/toolchain/rustup",
+                "GH_TOKEN": "secret",
+                "GITHUB_TOKEN": "secret",
+                "CODEX_REQUEST_TOKEN": "secret",
+                "GITHUB_ENV": "/runner/env",
+                "GITHUB_PATH": "/runner/path",
+                "ZED_UPDATE_MANIFEST_URL": "secret",
+                "ZED_DOWNSTREAM_RELEASE_ID": "secret",
+                "ZED_COMMIT_SHA": "secret",
+            }
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch.object(Path, "home", side_effect=AssertionError("Path.home must not run")),
+            ):
+                isolated = release.isolated_environment(root)
+            self.assertEqual(isolated["CARGO_HOME"], "/toolchain/cargo")
+            self.assertEqual(isolated["RUSTUP_HOME"], "/toolchain/rustup")
+            self.assertNotEqual(isolated["HOME"], "/host/home")
+            self.assertFalse(set(environment) & isolated.keys() - {
+                "HOME", "CARGO_HOME", "RUSTUP_HOME"
+            })
+
+    def test_missing_home_keeps_isolated_application_home_without_toolchain_defaults(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "sandbox"
+            root.mkdir()
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "HOME": "/host/home",
+                        "GH_TOKEN": "secret",
+                        "CODEX_REQUEST_TOKEN": "secret",
+                    },
+                    clear=True,
+                ),
+                patch.object(Path, "home", side_effect=RuntimeError("no home database entry")),
+            ):
+                isolated = release.isolated_environment(root)
+            self.assertEqual(isolated["HOME"], str(root / "home"))
+            self.assertNotIn("CARGO_HOME", isolated)
+            self.assertNotIn("RUSTUP_HOME", isolated)
+            self.assertNotIn("GH_TOKEN", isolated)
+            self.assertNotIn("CODEX_REQUEST_TOKEN", isolated)
+
+    def test_one_explicit_toolchain_path_survives_missing_host_home(self):
+        for supplied, value, absent in (
+            ("CARGO_HOME", "/toolchain/cargo", "RUSTUP_HOME"),
+            ("RUSTUP_HOME", "/toolchain/rustup", "CARGO_HOME"),
+        ):
+            with self.subTest(supplied=supplied), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "sandbox"
+                root.mkdir()
+                with (
+                    patch.dict(
+                        os.environ,
+                        {"HOME": "/host/home", supplied: value, "CODEX_REQUEST_TOKEN": "secret"},
+                        clear=True,
+                    ),
+                    patch.object(Path, "home", side_effect=RuntimeError("no home database entry")),
+                ):
+                    isolated = release.isolated_environment(root)
+                self.assertEqual(isolated[supplied], value)
+                self.assertNotIn(absent, isolated)
+                self.assertEqual(isolated["HOME"], str(root / "home"))
+                self.assertNotIn("CODEX_REQUEST_TOKEN", isolated)
+
+    def test_host_defaults_are_toolchain_inputs_not_application_home(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "sandbox"
+            root.mkdir()
+            host_home = Path(temporary) / "host-home"
+            with (
+                patch.dict(os.environ, {"HOME": str(host_home)}, clear=True),
+                patch.object(Path, "home", return_value=host_home),
+            ):
+                isolated = release.isolated_environment(root)
+            self.assertEqual(isolated["CARGO_HOME"], str(host_home / ".cargo"))
+            self.assertEqual(isolated["RUSTUP_HOME"], str(host_home / ".rustup"))
+            self.assertEqual(isolated["HOME"], str(root / "home"))
+            self.assertNotEqual(isolated["HOME"], str(host_home))
+
+
+class ReviewRefPublicationTests(unittest.TestCase):
+    def test_exact_base_and_patched_head_are_published_atomically(self):
+        calls = []
+        repo, upstream, head = "maintainer/zed-fork", "b" * 40, "a" * 40
+        parent_token = "parent-gh-token"
+        owner_token = "fixture-owner-token"
+
+        def run(*args, cwd=None, env=None):
+            calls.append((args, env))
+            if args[:3] == ("git", "ls-remote", "--refs"):
+                return ""
+            return ""
+
+        with (
+            patch.dict(os.environ, {"GH_TOKEN": parent_token}),
+            patch.object(release, "owner_token", return_value=owner_token) as get_owner_token,
+            patch.object(release, "run", side_effect=run),
+        ):
+            release.push_review_refs(
+                repo, Path("app"), "https://example.invalid/repo.git",
+                f"review-base/{upstream}", upstream, "review/candidate", head)
+            self.assertEqual(os.environ["GH_TOKEN"], parent_token)
+
+        push_args, push_env = next(call for call in calls if call[0][:2] == ("git", "push"))
+        self.assertEqual(push_args, (
+            "git", "push", "--atomic", "https://example.invalid/repo.git",
+            f"{upstream}:refs/heads/review-base/{upstream}",
+            f"{head}:refs/heads/review/candidate",
+        ))
+        self.assertEqual(push_env["GH_TOKEN"], owner_token)
+        self.assertNotIn(owner_token, " ".join(push_args))
+        get_owner_token.assert_called_once_with(repo)
+
+    def test_mismatched_existing_ref_fails_before_owner_token_or_push(self):
+        calls = []
+        repo, upstream, head = "maintainer/zed-fork", "b" * 40, "a" * 40
+        base = f"review-base/{upstream}"
+
+        def run(*args, cwd=None, env=None):
+            calls.append((args, env))
+            if args[:3] == ("git", "ls-remote", "--refs"):
+                return f"{'f' * 40}\trefs/heads/{base}\n"
+            raise AssertionError(args)
+
+        with (
+            patch.object(release, "run", side_effect=run),
+            patch.object(release, "owner_token") as get_owner_token,
+            self.assertRaisesRegex(ValueError, "Review branch changed"),
+        ):
+            release.push_review_refs(
+                repo, Path("app"), "https://example.invalid/repo.git",
+                base, upstream, "review/candidate", head)
+
+        get_owner_token.assert_not_called()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0][:3], ("git", "ls-remote", "--refs"))
 
 
 class RepairPromptContractTests(unittest.TestCase):

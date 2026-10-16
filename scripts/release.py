@@ -205,6 +205,22 @@ def output(**values):
                 raise ValueError("Invalid workflow output")
             stream.write(f"{name}={text}\n")
 
+def push_review_refs(repo, app, remote, base, upstream, head, sha):
+    """Publish the exact review base and patched head atomically."""
+    current = run("git", "ls-remote", "--refs", remote,
+                  f"refs/heads/{base}", f"refs/heads/{head}", cwd=app)
+    refs = {name.removeprefix("refs/heads/"): value
+            for value, name in (line.split() for line in current.splitlines())}
+    for branch, expected in ((base, upstream), (head, sha)):
+        if branch in refs and refs[branch] != expected:
+            raise ValueError(f"Review branch changed: {branch}; refusing to overwrite it")
+    missing = [(base, upstream), (head, sha)]
+    refspecs = [f"{value}:refs/heads/{branch}"
+                for branch, value in missing if branch not in refs]
+    if refspecs:
+        env = {**os.environ, "GH_TOKEN": owner_token(repo)}
+        run("git", "push", "--atomic", remote, *refspecs, cwd=app, env=env)
+
 def cleanup_closed_pull_refs(repo, number, head_sha, *, upstream=None):
     """Atomically retire verified workflow-owned refs for a closed pull request."""
     if not SHA.fullmatch(head_sha):
@@ -523,7 +539,13 @@ def failure_evidence(repo):
         if job.get("conclusion") == "failure":
             lines.append(f"\nFailed job: {job['name']}\n")
             try:
-                lines.append(run("gh", "api", f"repos/{repo}/actions/jobs/{job['id']}/logs")[-18000:])
+                command = ["gh", "api", f"repos/{repo}/actions/jobs/{job['id']}/logs"]
+                if "--allow-escape-sequences" in run("gh", "api", "--help"):
+                    command.append("--allow-escape-sequences")
+                logs = run(*command)
+                logs = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", logs)
+                logs = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", logs)
+                lines.append(logs[-18000:])
             except subprocess.CalledProcessError:
                 lines.append(f"Log unavailable; inspect {job['html_url']}")
     pr, sha = os.environ.get("CANDIDATE_PR", ""), os.environ.get("CANDIDATE_SHA", "")
@@ -789,11 +811,7 @@ def prepare(app):
         raise ValueError("Published source has no matching exact-SHA review PR")
     run("gh", "auth", "setup-git")
     remote = f"https://github.com/{repo}.git"
-    for branch, expected in ((base, upstream), (head, sha)):
-        current = run("git", "ls-remote", "--refs", remote, f"refs/heads/{branch}", cwd=app)
-        if current and current.split()[0] != expected:
-            raise ValueError(f"Review branch changed: {branch}; refusing to overwrite it")
-    run("git", "push", remote, f"{upstream}:refs/heads/{base}", f"{sha}:refs/heads/{head}", cwd=app)
+    push_review_refs(repo, app, remote, base, upstream, head, sha)
     query = urlencode({"state": "all", "head": f"{repo.split('/')[0]}:{head}", "base": base})
     pulls = pages(f"repos/{repo}/pulls?{query}")
     pull = pulls[0] if pulls else api(f"repos/{repo}/pulls", method="POST", data={
@@ -1410,10 +1428,15 @@ def isolated_environment(root):
     keep = ("PATH", "LANG", "LC_ALL", "TZ", "DEVELOPER_DIR", "SDKROOT",
             "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "MACOSX_DEPLOYMENT_TARGET")
     env = {key: os.environ[key] for key in keep if key in os.environ}
-    # Toolchain caches are inputs, not the application's HOME or configuration.
-    for key, default in (("CARGO_HOME", Path.home() / ".cargo"),
-                         ("RUSTUP_HOME", Path.home() / ".rustup")):
-        env.setdefault(key, str(default))
+    # Preserve optional toolchain inputs without requiring a user database entry.
+    if "CARGO_HOME" not in env or "RUSTUP_HOME" not in env:
+        try:
+            home = Path.home()
+        except RuntimeError:
+            home = None
+        if home is not None:
+            env.setdefault("CARGO_HOME", str(home / ".cargo"))
+            env.setdefault("RUSTUP_HOME", str(home / ".rustup"))
     for key, relative in (
         ("HOME", "home"), ("TMPDIR", "tmp"), ("XDG_CONFIG_HOME", "config"),
         ("XDG_CACHE_HOME", "cache"), ("XDG_DATA_HOME", "data"),

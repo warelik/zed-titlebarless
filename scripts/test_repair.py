@@ -569,19 +569,68 @@ class NativeTaskTests(unittest.TestCase):
                 return [native_p2, wrong_app]
             raise AssertionError(path)
 
+        commands = []
+        failure_log = "\x1b[31mActual assertion failed\x1b[0m\x01"
+
+        def run(*args, **_kwargs):
+            commands.append(args)
+            if args == ("gh", "api", "--help"):
+                return "gh api [flags]\n  --allow-escape-sequences"
+            if args == (
+                "gh", "api", f"repos/{REPO}/actions/jobs/9/logs",
+                "--allow-escape-sequences",
+            ):
+                return failure_log
+            raise AssertionError(args)
+
         with (patch.dict(os.environ, ENV), patch.object(release, "api", side_effect=api),
               patch.object(release, "pages", side_effect=pages),
-              patch.object(release, "run", return_value="Actual assertion failed")):
+              patch.object(release, "run", side_effect=run)):
             evidence = release.failure_evidence(REPO)
         self.assertIn("Failed job: Regression", evidence)
         self.assertIn("Actual assertion failed", evidence)
         self.assertIn("open-sse/utils/example.js:3", evidence)
+        self.assertIn(f"Exact review: https://github.com/{REPO}/pull/1 at {HEAD}", evidence)
         self.assertIn("[P1] Formal exact-SHA finding", evidence)
         self.assertIn("[P2] Restore custom call type", evidence)
         self.assertIn("[P2] Native issue finding", evidence)
         self.assertNotIn("[P1] Stale original commit finding", evidence)
         self.assertNotIn("[P1] Spoofed actor finding", evidence)
         self.assertNotIn("[P1] Wrong application finding", evidence)
+        self.assertEqual(commands, [
+            ("gh", "api", "--help"),
+            ("gh", "api", f"repos/{REPO}/actions/jobs/9/logs", "--allow-escape-sequences"),
+        ])
+        self.assertNotIn("\x1b", evidence)
+        self.assertNotIn("\x01", evidence)
+
+    def test_failure_evidence_uses_legacy_gh_without_escape_flag(self):
+        jobs = {"total_count": 1, "jobs": [{"id": 9, "conclusion": "failure",
+                "name": "Regression", "html_url": "https://github.com/example"}]}
+        commands = []
+
+        def run(*args, **_kwargs):
+            commands.append(args)
+            if args == ("gh", "api", "--help"):
+                return "gh api [flags]"
+            if args == ("gh", "api", f"repos/{REPO}/actions/jobs/9/logs"):
+                return "\x1b[33mLegacy job log body\x1b[0m\x02"
+            raise AssertionError(args)
+
+        with (
+            patch.dict(os.environ, ENV),
+            patch.object(release, "api", return_value=jobs),
+            patch.object(release, "pages", return_value=[]),
+            patch.object(release, "run", side_effect=run),
+        ):
+            evidence = release.failure_evidence(REPO)
+        self.assertIn("Legacy job log body", evidence)
+        self.assertNotIn("\x1b", evidence)
+        self.assertNotIn("\x02", evidence)
+        self.assertEqual(commands, [
+            ("gh", "api", "--help"),
+            ("gh", "api", f"repos/{REPO}/actions/jobs/9/logs"),
+        ])
 
     def test_failure_evidence_keeps_exact_review_body_with_a_healthy_job(self):
         native_state = {"code_review": {"commit_sha": HEAD, "status": "completed"}}
