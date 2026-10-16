@@ -1,66 +1,139 @@
-name: Release
+name: Upstream Plus Patches
 
 on:
   schedule:
     - cron: "23 */6 * * *"
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Upstream tag to build (defaults to the latest stable release)
-        required: false
-      force:
-        description: Rebuild even if the release already exists
-        type: boolean
-        default: false
+  push:
+    branches: [downstream]
+    paths: ["patches/**", "scripts/**", ".github/workflows/release.yml"]
+  issue_comment:
+    types: [created, edited]
+  pull_request_target:
+    types: [opened, synchronize, reopened]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: release
+  group: upstream-plus-patches
   cancel-in-progress: false
 
 jobs:
-  check:
-    runs-on: ubuntu-latest
+  prepare:
+    name: Select One Snapshot And Request Review
+    if: >-
+      (github.event_name != 'issue_comment' &&
+       github.event_name != 'pull_request_target') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+       github.event.comment.user.login == 'chatgpt-codex-connector[bot]' &&
+       github.event.comment.user.type == 'Bot') ||
+      (github.event_name == 'pull_request_target' &&
+       github.event.pull_request.base.ref == 'downstream' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       startsWith(github.event.pull_request.head.ref, 'repair/'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
     outputs:
-      tag: ${{ steps.check.outputs.tag }}
-      build: ${{ steps.check.outputs.build }}
-    steps:
-      - id: check
-        env:
-          GH_TOKEN: ${{ github.token }}
-          INPUT_TAG: ${{ inputs.tag }}
-          FORCE: ${{ inputs.force }}
-        run: |
-          tag="${INPUT_TAG:-$(gh release view --repo zed-industries/zed --json tagName --jq .tagName)}"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          if [ "$FORCE" != true ] && gh release view "$tag-titlebarless" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            echo "build=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          fi
-
-  build:
-    needs: check
-    if: needs.check.outputs.build == 'true'
-    runs-on: macos-15
-    timeout-minutes: 355
-    env:
-      TAG: ${{ needs.check.outputs.tag }}
-      RELEASE: ${{ needs.check.outputs.tag }}-titlebarless
+      ready: ${{ steps.snapshot.outputs.ready }}
+      sha: ${{ steps.snapshot.outputs.sha }}
+      upstream: ${{ steps.snapshot.outputs.upstream }}
+      patchset: ${{ steps.snapshot.outputs.patchset }}
+      version: ${{ steps.snapshot.outputs.version }}
+      release: ${{ steps.snapshot.outputs.release }}
+      release_id: ${{ steps.snapshot.outputs.release_id }}
+      source_depth: ${{ steps.snapshot.outputs.source_depth }}
+      pr: ${{ steps.snapshot.outputs.pr }}
+      mode: ${{ steps.snapshot.outputs.mode }}
+      repair_pr: ${{ steps.snapshot.outputs.repair_pr }}
+      repair_head: ${{ steps.snapshot.outputs.repair_head }}
+      followup: ${{ steps.snapshot.outputs.followup }}
     steps:
       - uses: actions/checkout@v4
         with:
-          path: fork
-
-      - name: Check out upstream and apply patches
+          persist-credentials: false
+      - name: Require The Trusted Default Branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          git clone --depth 1 --branch "$TAG" https://github.com/zed-industries/zed.git zed
-          cd zed
-          git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com am ../fork/patches/*.patch
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          test "$DEFAULT_BRANCH" = downstream
+      - name: Test Release Policy
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+      - name: Prepare The Exact Source And Review
+        id: snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+        run: python3 scripts/release.py prepare "$RUNNER_TEMP/zed-source"
+      - name: Report The Actual State
+        if: always()
+        env:
+          READY: ${{ steps.snapshot.outputs.ready }}
+          REASON: ${{ steps.snapshot.outputs.reason }}
+          SOURCE_SHA: ${{ steps.snapshot.outputs.sha }}
+          VERSION: ${{ steps.snapshot.outputs.version }}
+          PR: ${{ steps.snapshot.outputs.pr }}
+        run: |
+          {
+            echo "### Upstream plus patches"
+            printf '%s\n' "- State: ${REASON:-stopped before a decision}"
+            printf '%s\n' "- Review accepted: ${READY:-false}"
+            if [ -n "$SOURCE_SHA" ]; then printf '%s\n' "- Application: $VERSION at $SOURCE_SHA"; fi
+            if [ -n "$PR" ]; then printf '%s\n' "- Review PR: #$PR"; fi
+            echo "- Publication is not a restart or validation of an existing editor"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Free disk space
+  policy-check:
+    name: Check Proposed Policy Without Write Credentials
+    needs: prepare
+    if: always() && needs.prepare.outputs.mode == 'policy'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.repair_head }}
+          path: candidate
+          persist-credentials: false
+      - name: Enforce Trusted Tests And Validate Proposed YAML
+        run: python3 trusted/scripts/release.py check-policy "$GITHUB_WORKSPACE/candidate"
+
+  test:
+    name: Test, Build And Inspect One macOS Application
+    needs: prepare
+    if: needs.prepare.outputs.ready == 'true' && needs.prepare.outputs.mode == 'application'
+    runs-on: macos-15
+    timeout-minutes: 355
+    env:
+      UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream }}
+      CANDIDATE_SHA: ${{ needs.prepare.outputs.sha }}
+      PATCHSET_SHA256: ${{ needs.prepare.outputs.patchset }}
+      APP_VERSION: ${{ needs.prepare.outputs.version }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.release }}
+      RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+      CONFIG_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: ${{ needs.prepare.outputs.source_depth }}
+          path: app
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Free Space On The Disposable macOS Runner
         run: |
           df -h /
           keep=$(realpath "$(xcode-select -p)/../..")
@@ -69,96 +142,104 @@ jobs:
           done
           sudo rm -rf ~/Library/Android /usr/local/share/dotnet ~/.dotnet ~/hostedtoolcache/CodeQL
           df -h /
-
-      - name: Build
-        working-directory: zed
-        env:
-          CARGO_INCREMENTAL: 0
-          CARGO_PROFILE_RELEASE_DEBUG: "line-tables-only"
-          ZED_UPDATE_MANIFEST_URL: https://github.com/${{ github.repository }}/releases/latest/download/latest.json
-        run: ./script/bundle-mac aarch64-apple-darwin
-
+      - name: Run Every Preserved Rust Regression
+        run: python3 trusted/scripts/release.py test "$GITHUB_WORKSPACE/app"
+      - name: Build And Inspect The Exact Reviewed Application
+        if: needs.prepare.outputs.repair_pr == ''
+        run: python3 trusted/scripts/release.py build "$GITHUB_WORKSPACE/app"
       - uses: actions/upload-artifact@v4
+        if: needs.prepare.outputs.repair_pr == ''
         with:
-          name: Zed-aarch64.dmg
-          path: zed/target/aarch64-apple-darwin/release/Zed-aarch64.dmg
+          name: reviewed-${{ needs.prepare.outputs.sha }}
+          path: release/*
           if-no-files-found: error
+          retention-days: 7
 
-      - name: Package debug symbols
-        run: |
-          version="${TAG#v}"
-          target_dir="zed/target/aarch64-apple-darwin/release"
-          symbols_archive="zed-${version}-titlebarless-debug-symbols-macos-aarch64.tar.gz"
-          echo "SYMBOLS_ARCHIVE=$target_dir/$symbols_archive" >> "${GITHUB_ENV:-/dev/null}"
-
-          for dwarf in "$target_dir/zed.dwarf" "$target_dir/remote_server.dwarf"; do
-            if [ ! -f "$dwarf" ]; then
-              echo "Error: missing expected debug symbols file: $dwarf" >&2
-              exit 1
-            fi
-            if [ ! -s "$dwarf" ]; then
-              echo "Error: debug symbols file is empty: $dwarf" >&2
-              exit 1
-            fi
-            has_dwarf=false
-            while IFS= read -r line; do
-              if [[ "$line" == *"DW_TAG_compile_unit"* ]]; then
-                has_dwarf=true
-                break
-              fi
-            done < <(dwarfdump --debug-info "$dwarf" 2>/dev/null || true)
-
-            if [ "$has_dwarf" != true ]; then
-              echo "Error: $dwarf contains no DWARF debug info" >&2
-              exit 1
-            fi
-          done
-
-          (
-            cd "$target_dir"
-            dwarfdump -u zed.dwarf remote_server.dwarf > UUIDS.txt
-            cat UUIDS.txt
-            tar -czf "$symbols_archive" zed.dwarf remote_server.dwarf UUIDS.txt
-            ls -l zed.dwarf remote_server.dwarf "$symbols_archive"
-          )
-
-          archive_size=$(wc -c < "$target_dir/$symbols_archive")
-          max_bytes=$((2 * 1024 * 1024 * 1024))
-          if [ "$archive_size" -gt "$max_bytes" ]; then
-            echo "Error: symbols archive $symbols_archive ($archive_size bytes) exceeds GitHub 2 GiB per-asset limit" >&2
-            exit 1
-          fi
-
-      - name: Publish release
+  publish:
+    name: Recheck Review And Publish Without Restarting Editors
+    needs: [prepare, test]
+    if: needs.prepare.outputs.repair_pr == ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: reviewed-${{ needs.prepare.outputs.sha }}
+          path: release
+      - name: Publish Only This Verified Candidate
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          version="${TAG#v}"
-          cp zed/target/aarch64-apple-darwin/release/Zed-aarch64.dmg Zed.dmg
-          dmg="Zed.dmg"
-          symbols_archive="${SYMBOLS_ARCHIVE:-zed/target/aarch64-apple-darwin/release/zed-${version}-titlebarless-debug-symbols-macos-aarch64.tar.gz}"
-          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE/Zed.dmg"
-          printf '{"version":"%s","url":"%s"}\n' "$version" "$url" > latest.json
-          {
-            echo "Zed [$TAG](https://github.com/zed-industries/zed/releases/tag/$TAG) + [patches](https://github.com/$GITHUB_REPOSITORY/tree/$GITHUB_SHA/patches)."
-            echo
-            cat fork/RELEASE_NOTES.md
-          } > notes.md
+          CANDIDATE_SHA: ${{ needs.prepare.outputs.sha }}
+          CANDIDATE_PR: ${{ needs.prepare.outputs.pr }}
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream }}
+          PATCHSET_SHA256: ${{ needs.prepare.outputs.patchset }}
+          APP_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}
+        run: python3 scripts/release.py publish "$GITHUB_WORKSPACE/release"
 
-          ls -l "$dmg" latest.json "$symbols_archive"
+  land:
+    name: Adopt Only The Verified Repair And Restart Verification
+    needs: [prepare, policy-check, test]
+    if: >-
+      always() && needs.prepare.result == 'success' &&
+      needs.prepare.outputs.ready == 'true' &&
+      needs.prepare.outputs.repair_pr != '' &&
+      ((needs.prepare.outputs.mode == 'policy' && needs.policy-check.result == 'success') ||
+       (needs.prepare.outputs.mode == 'application' && needs.test.result == 'success'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Recheck Review, Adopt The Diff, And Dispatch A Fresh Cycle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPAIR_PR: ${{ needs.prepare.outputs.repair_pr }}
+          REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}
+          CANDIDATE_PR: ${{ needs.prepare.outputs.pr }}
+          CANDIDATE_SHA: ${{ needs.prepare.outputs.sha }}
+          CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+        run: python3 scripts/release.py land "$RUNNER_TEMP/zed-land"
 
-          max_bytes=$((2 * 1024 * 1024 * 1024))
-          for asset in "$dmg" "$symbols_archive"; do
-            size=$(wc -c < "$asset")
-            if [ "$size" -gt "$max_bytes" ]; then
-              echo "Error: asset $asset ($size bytes) exceeds GitHub 2 GiB per-asset limit" >&2
-              exit 1
-            fi
-          done
-
-          if gh release view "$RELEASE" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            gh release delete "$RELEASE" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
-          fi
-          gh release create "$RELEASE" "$dmg" latest.json "$symbols_archive" \
-            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "Zed $version titlebarless (macOS arm64)" --notes-file notes.md
+  repair:
+    name: Request Native Codex Repair Or Escalate Explicitly
+    needs: [prepare, policy-check, test, publish, land]
+    if: always() && (contains(needs.*.result, 'failure') || needs.prepare.outputs.followup == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Repair The Actual Failure Without Publishing Or Disrupting Editors
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream }}
+          CANDIDATE_PR: ${{ needs.prepare.outputs.pr }}
+          CANDIDATE_SHA: ${{ needs.prepare.outputs.sha }}
+          REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}
+          NONBLOCKING_FOLLOWUP: ${{ !contains(needs.*.result, 'failure') && needs.prepare.outputs.followup == 'true' }}
+        run: python3 scripts/release.py repair "$RUNNER_TEMP/zed-repair"

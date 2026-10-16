@@ -6,12 +6,17 @@ release maintenance.
 
 ## Scope and branches
 
-- Keep exactly two repository branches: `main` is an unmodified mirror of upstream
-  `main`; `downstream` contains the ordered patches, release workflow, and fork
+- Keep two permanent branches: `main` is an unmodified mirror of upstream `main`;
+  `downstream` contains the ordered patches, release workflow, and fork
   documentation. Keep `downstream` as the default branch so scheduled maintenance
-  runs from it.
-- Do not publish release, review, backup, or temporary integration branches.
-  Reconstruct patched sources in disposable detached worktrees when needed.
+  runs from it. Update the mirror only by an ordinary fast-forward.
+- Native GitHub/Codex review and repair use temporary `review-base/`, `review/`
+  and `repair/` PR branches, as in the other maintained downstreams. Their exact
+  commits are review evidence, not additional product branches or installation
+  sources. Close the PR after verified publication or selective adoption; never
+  merge repair-context files into `downstream`. Do not create release/backup
+  branches or a queue of intermediate upstream integrations. Reconstruct sources
+  in disposable detached worktrees.
 - Preserve the requested downstream behavior, necessary fixes, compatibility, and
   regression tests. Do not add unsolicited features or develop the fork for its
   own sake.
@@ -41,6 +46,9 @@ release maintenance.
    where appropriate. Review and run the relevant checks against the new exact
    SHA. Test the intended success and the defined failure behavior. An agent
    report, reaction, previous approval, or test of another revision is not proof.
+   Upstream contribution procedures requiring a README banner and manual author
+   confirmation do not apply to this downstream cycle. Do not copy those banners
+   into patches: independent exact-SHA Codex review is the required review gate.
 4. Build the verified candidate in GitHub Actions. Verify the version, platform,
    exact upstream and patch revisions, artifact checksums, and relevant platform
    identifiers. Match debug symbols to the shipped binary, not merely to a

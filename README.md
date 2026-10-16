@@ -44,7 +44,7 @@ Without any setting:
 - The threads sidebar minimum width is halved (200 → 100 px). The clamp also applies to `agent.threads_sidebar.default_width`, so its valid range now starts at 100.
 - Single-line editors (such as the threads sidebar search) reserve one em instead of two after the text.
 - A flat light theme, Mono Light, is bundled. It only appears in the theme picker (`"theme": "Mono Light"`); the default theme is unchanged.
-- Auto-update comes from this repository's releases. SSH remoting still downloads the official remote server, since the version matches upstream.
+- Auto-update uses this repository's immutable releases. Same-version fixes use the native GitHub `release.id` without changing Zed's upstream version; SSH remoting still downloads the official remote server. Already-installed clients learn this comparison on a one-time install or their next ordinary higher-upstream-version update.
 - Managed terminal threads created or restored in the agent panel keep their shell in a [shpool](https://github.com/shell-pool/shpool) session when `shpool` is on the host's `PATH`, so they survive restarts and dropped SSH connections; closing one with its × button removes its session. Ordinary terminal tabs dragged into the agent panel remain non-persistent and close when their process exits. Without shpool, managed threads run a plain shell as before. Probe errors are surfaced instead of silently falling back to a plain shell; a probe that does not complete times out after 17 seconds.
 - Manual and automatic SSH reconnect stop retrying after a password prompt is canceled or unavailable, or after an authentication failure is verified. A retry action remains available with the actual disconnect reason; transient failures continue retrying with backoff.
 - On macOS `--user-data-dir` also holds the logs, as documented, so a second instance no longer writes into the default instance's `Zed.log`.
@@ -90,10 +90,11 @@ See [Known limitations](RELEASE_NOTES.md#known-limitations).
 
 ## How it's built
 
-- [`patches/`](patches) holds the changes on top of upstream stable: one patch per commit of the fork, twelve in total, written against `v1.24.2` and applied in file name order.
-- [`.github/workflows/release.yml`](.github/workflows/release.yml) checks for a new upstream stable release every 6 hours, applies the patches, builds the DMG on a GitHub macOS runner and publishes a release with `latest.json` for auto-update and `zed-<version>-titlebarless-debug-symbols-macos-aarch64.tar.gz` containing debug symbols.
-- Maintain two branches: `main` mirrors upstream without downstream changes; `downstream` holds the patches, workflow, and documentation and remains the default branch for scheduled maintenance.
-- If a patch stops applying or a required check fails, agents repair the cause, review the new exact revision, and repeat the affected checks before release.
+- [`patches/`](patches) holds the minimal ordered patch series (currently thirteen patches) on one supported upstream snapshot. The workflow selects an exact stable source SHA, applies the patches in filename order, and records the resulting patch-set digest.
+- [`.github/workflows/release.yml`](.github/workflows/release.yml) runs the maintenance cycle: exact-source Codex review, preserved Rust regressions, macOS Apple Silicon build and artifact inspection, then checksum/provenance validation for one immutable five-asset release. Ordinary failures request native Codex repair; only reviewed repairs are selectively adopted, and bounded attempts end in explicit escalation.
+- Keep two permanent branches: `main` is an unmodified upstream mirror; `downstream` is the default branch holding patches, workflow and documentation. Native Codex repair PRs use temporary branches and are reviewed and selectively adopted by the workflow.
+- The five release assets are `Zed.dmg`, `latest.json`, `provenance.json`, `SHA256SUMS`, and the versioned debug-symbol archive. Same-version fixes advance the native GitHub release ID while preserving the official Zed version and SSH remote-server compatibility.
+- Publication is not live installation. This workflow does not restart an editor or remote session; installation and validation of a running version are separate steps.
 - [AGENTS.md](AGENTS.md) defines the maintenance, verification, recovery, and cleanup contract. The presence of a workflow does not by itself prove that the entire cycle is automated.
 
 ### Debug symbols

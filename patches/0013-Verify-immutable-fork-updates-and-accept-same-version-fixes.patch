@@ -1,0 +1,1153 @@
+From abc06c6b6959272a8ebdfb5c623ee9478def3f1b Mon Sep 17 00:00:00 2001
+From: Zed Patch Preparation Bot <zed-patch-preparation-bot@localhost>
+Date: Fri, 16 Oct 2026 20:23:53 +0000
+Subject: [PATCH] Verify immutable fork releases and accept same-version fixes
+
+---
+ Cargo.lock                            |    1 +
+ crates/auto_update/Cargo.toml         |    1 +
+ crates/auto_update/src/auto_update.rs | 1001 ++++++++++++++++++++++++-
+ 3 files changed, 964 insertions(+), 39 deletions(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 7e8f3a1..dfb964f 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1394,6 +1394,7 @@ dependencies = [
+  "serde",
+  "serde_json",
+  "settings",
++ "sha2",
+  "smol",
+  "tempfile",
+  "util",
+diff --git a/crates/auto_update/Cargo.toml b/crates/auto_update/Cargo.toml
+index 47b4f7a..cf92e47 100644
+--- a/crates/auto_update/Cargo.toml
++++ b/crates/auto_update/Cargo.toml
+@@ -26,6 +26,7 @@ semver.workspace = true
+ serde.workspace = true
+ serde_json.workspace = true
+ settings.workspace = true
++sha2.workspace = true
+ smol.workspace = true
+ tempfile.workspace = true
+ util.workspace = true
+diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs
+index 6afd897..80c6250 100644
+--- a/crates/auto_update/src/auto_update.rs
++++ b/crates/auto_update/src/auto_update.rs
+@@ -10,8 +10,9 @@ use http_client::{HttpClient, HttpClientWithUrl};
+ use paths::remote_servers_dir;
+ use release_channel::{AppCommitSha, ReleaseChannel};
+ use semver::Version;
+-use serde::{Deserialize, Serialize};
++use serde::{de::DeserializeOwned, Deserialize, Serialize};
+ use settings::{RegisterSetting, Settings, SettingsStore};
++use sha2::{Digest, Sha256};
+ use smol::fs::File;
+ use smol::{
+     fs,
+@@ -181,6 +182,7 @@ pub enum AutoUpdateEvent {
+ pub struct AutoUpdater {
+     status: AutoUpdateStatus,
+     current_version: Version,
++    cached_fork_release: Option<(u64, Version)>,
+     client: Arc<Client>,
+     pending_poll: Option<Task<Option<()>>>,
+     quit_subscription: Option<gpui::Subscription>,
+@@ -195,6 +197,26 @@ pub struct ReleaseAsset {
+     pub url: String,
+ }
+ 
++#[derive(Clone, Debug)]
++struct ForkUpdateConfig {
++    manifest_url: String,
++    release_id: u64,
++}
++
++#[derive(Clone, Debug, Deserialize)]
++struct ForkReleaseAsset {
++    #[serde(flatten)]
++    release: ReleaseAsset,
++    schema: u32,
++    release_id: u64,
++    platform: String,
++    candidate_sha: String,
++    upstream_sha: String,
++    patchset_sha256: String,
++    sha256: String,
++    size: u64,
++}
++
+ struct MacOsUnmounter<'a> {
+     mount_path: PathBuf,
+     background_executor: &'a BackgroundExecutor,
+@@ -462,6 +484,7 @@ impl AutoUpdater {
+         Self {
+             status: AutoUpdateStatus::Idle,
+             current_version,
++            cached_fork_release: None,
+             client,
+             pending_poll: None,
+             quit_subscription,
+@@ -471,6 +494,56 @@ impl AutoUpdater {
+         }
+     }
+ 
++    fn fork_update_config(_cx: &mut AsyncApp) -> Result<Option<ForkUpdateConfig>> {
++        #[cfg(test)]
++        if let Some(config) = _cx
++            .try_read_global::<tests::ForkUpdateConfigOverride, _>(|global, _| {
++                global.0.clone()
++            })
++        {
++            validate_fork_update_config(&config)?;
++            return Ok(Some(config));
++        }
++
++        fork_update_config_from_environment(
++            option_env!("ZED_UPDATE_MANIFEST_URL"),
++            option_env!("ZED_DOWNSTREAM_RELEASE_ID"),
++        )
++    }
++
++    fn check_fork_release_is_newer(
++        installed_version: &Version,
++        running_release_id: u64,
++        cached_release: Option<&(u64, Version)>,
++        release: &ForkReleaseAsset,
++        config: &ForkUpdateConfig,
++    ) -> Result<Option<Version>> {
++        let fetched_version = validate_fork_release(release, config)?;
++        let mut installed_version = installed_version.clone();
++        installed_version.pre = semver::Prerelease::EMPTY;
++        installed_version.build = semver::BuildMetadata::EMPTY;
++        let cached_version = cached_release.map(|(_, version)| {
++            let mut version = version.clone();
++            version.pre = semver::Prerelease::EMPTY;
++            version.build = semver::BuildMetadata::EMPTY;
++            version
++        });
++
++        if fetched_version < installed_version
++            || release.release_id <= running_release_id
++            || cached_release.is_some_and(|(cached_release_id, _)| {
++                release.release_id <= *cached_release_id
++            })
++            || cached_version
++                .as_ref()
++                .is_some_and(|cached_version| fetched_version < *cached_version)
++        {
++            return Ok(None);
++        }
++
++        Ok(Some(fetched_version))
++    }
++
+     fn restart_after_wake(&mut self, cx: &mut Context<Self>) {
+         // Only network phases can be safely restarted. `Installing` is a local
+         // operation (mounting a dmg, rsync, etc.) that must not be interrupted.
+@@ -721,13 +794,20 @@ impl AutoUpdater {
+     }
+ 
+     async fn update(this: Entity<Self>, cx: &mut AsyncApp) -> Result<()> {
+-        let (client, installed_version, previous_status, release_channel) =
++        let (
++            client,
++            installed_version,
++            previous_status,
++            release_channel,
++            cached_fork_release,
++        ) =
+             this.read_with(cx, |this, cx| {
+                 (
+                     this.client.http_client(),
+                     this.current_version.clone(),
+                     this.status.clone(),
+                     ReleaseChannel::try_global(cx).unwrap_or(ReleaseChannel::Stable),
++                    this.cached_fork_release.clone(),
+                 )
+             });
+ 
+@@ -739,25 +819,42 @@ impl AutoUpdater {
+             cx.notify();
+         });
+ 
+-        // Fork builds point this at their own release manifest; the remote server keeps
+-        // coming from zed.dev because its version matches the upstream release.
+-        let fetched_release_data = match option_env!("ZED_UPDATE_MANIFEST_URL") {
+-            Some(manifest_url) => {
+-                fetch_release_json(&client, manifest_url, "release manifest").await?
++        let fork_config = Self::fork_update_config(cx)?;
++        let (fetched_release_data, fork_release, newer_version) = match fork_config {
++            Some(config) => {
++                let fork_release: ForkReleaseAsset =
++                    fetch_release_json(&client, &config.manifest_url, "fork release manifest")
++                        .await?;
++                let newer_version = Self::check_fork_release_is_newer(
++                    &installed_version,
++                    config.release_id,
++                    cached_fork_release.as_ref(),
++                    &fork_release,
++                    &config,
++                )?;
++                (
++                    fork_release.release.clone(),
++                    Some(fork_release),
++                    newer_version,
++                )
+             }
+             None => {
+-                Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx).await?
++                let fetched_release_data =
++                    Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx)
++                        .await?;
++                let fetched_version = fetched_release_data.version.clone();
++                let app_commit_sha =
++                    Ok(cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full())));
++                let newer_version = Self::check_if_fetched_version_is_newer(
++                    release_channel,
++                    app_commit_sha,
++                    installed_version,
++                    fetched_version,
++                    previous_status.clone(),
++                )?;
++                (fetched_release_data, None, newer_version)
+             }
+         };
+-        let fetched_version = fetched_release_data.clone().version;
+-        let app_commit_sha = Ok(cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full())));
+-        let newer_version = Self::check_if_fetched_version_is_newer(
+-            release_channel,
+-            app_commit_sha,
+-            installed_version,
+-            fetched_version,
+-            previous_status.clone(),
+-        )?;
+ 
+         let Some(newer_version) = newer_version else {
+             this.update(cx, |this, cx| {
+@@ -787,27 +884,27 @@ impl AutoUpdater {
+             .await
+             .context("Failed to create installer dir")?;
+         let target_path = Self::target_path(&installer_dir).await?;
++        let fork_release_id = fork_release.as_ref().map(|release| release.release_id);
+         let progress_entity = this.clone();
+         let mut progress_cx = cx.clone();
+-        download_release(
+-            &target_path,
+-            fetched_release_data,
+-            client,
+-            move |progress| {
+-                progress_entity.update(&mut progress_cx, |this, cx| {
+-                    if let AutoUpdateStatus::Downloading {
+-                        progress: current_progress,
+-                        ..
+-                    } = &mut this.status
+-                    {
+-                        *current_progress = progress;
+-                        cx.notify();
+-                    }
+-                });
+-            },
+-        )
+-        .await
+-        .with_context(|| format!("Failed to download update to {}", target_path.display()))?;
++        let on_progress = move |progress| {
++            progress_entity.update(&mut progress_cx, |this, cx| {
++                if let AutoUpdateStatus::Downloading {
++                    progress: current_progress,
++                    ..
++                } = &mut this.status
++                {
++                    *current_progress = progress;
++                    cx.notify();
++                }
++            });
++        };
++        let download = if let Some(fork_release) = fork_release {
++            download_fork_release(&target_path, &fork_release, client, on_progress).await
++        } else {
++            download_release(&target_path, fetched_release_data, client, on_progress).await
++        };
++        download.with_context(|| format!("Failed to download update to {}", target_path.display()))?;
+ 
+         this.update(cx, |this, cx| {
+             this.status = AutoUpdateStatus::Installing {
+@@ -848,6 +945,9 @@ impl AutoUpdater {
+         this.update(cx, |this, cx| {
+             this.set_should_show_update_notification(true, cx)
+                 .detach_and_log_err(cx);
++            if let Some(release_id) = fork_release_id {
++                this.cached_fork_release = Some((release_id, newer_version.clone()));
++            }
+             this.status = AutoUpdateStatus::Updated {
+                 version: newer_version,
+             };
+@@ -1064,11 +1164,131 @@ async fn cleanup_remote_server_cache(
+     Ok(())
+ }
+ 
+-async fn fetch_release_json(
++fn fork_update_config_from_environment(
++    manifest_url: Option<&str>,
++    release_id: Option<&str>,
++) -> Result<Option<ForkUpdateConfig>> {
++    let Some(manifest_url) = manifest_url else {
++        return Ok(None);
++    };
++    let release_id = release_id
++        .context("ZED_DOWNSTREAM_RELEASE_ID is required with ZED_UPDATE_MANIFEST_URL")?
++        .parse::<u64>()
++        .context("ZED_DOWNSTREAM_RELEASE_ID must be a positive integer")?;
++    let config = ForkUpdateConfig {
++        manifest_url: manifest_url.to_string(),
++        release_id,
++    };
++    validate_fork_update_config(&config)?;
++    Ok(Some(config))
++}
++
++fn validate_fork_update_config(config: &ForkUpdateConfig) -> Result<()> {
++    anyhow::ensure!(
++        config.release_id > 0,
++        "ZED_DOWNSTREAM_RELEASE_ID must be a positive integer"
++    );
++    github_repository_from_manifest_url(&config.manifest_url)?;
++    Ok(())
++}
++
++fn github_repository_from_manifest_url(manifest_url: &str) -> Result<String> {
++    let path = manifest_url
++        .strip_prefix("https://github.com/")
++        .context("fork manifest URL must use https://github.com")?;
++    let segments: Vec<_> = path.split('/').collect();
++    anyhow::ensure!(
++        segments.len() == 6
++            && segments[2] == "releases"
++            && segments[3] == "latest"
++            && segments[4] == "download"
++            && segments[5] == "latest.json",
++        "fork manifest URL must end with /releases/latest/download/latest.json"
++    );
++    let owner = segments[0];
++    let repository = segments[1];
++    let is_valid_component = |component: &str| {
++        !component.is_empty()
++            && component != "."
++            && component != ".."
++            && component.bytes().all(|byte| {
++                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
++            })
++    };
++    anyhow::ensure!(
++        is_valid_component(owner) && is_valid_component(repository),
++        "fork manifest URL must identify a GitHub owner and repository"
++    );
++    Ok(format!("https://github.com/{owner}/{repository}"))
++}
++
++fn is_lowercase_hex(value: &str, length: usize) -> bool {
++    value.len() == length
++        && value
++            .bytes()
++            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
++}
++
++fn validate_fork_release(
++    release: &ForkReleaseAsset,
++    config: &ForkUpdateConfig,
++) -> Result<Version> {
++    validate_fork_update_config(config)?;
++    anyhow::ensure!(release.schema == 1, "unsupported fork manifest schema");
++    anyhow::ensure!(release.release_id > 0, "fork release ID must be positive");
++    anyhow::ensure!(
++        release.platform == "macos/aarch64",
++        "unsupported fork release platform: {}",
++        release.platform
++    );
++    let version = Version::parse(&release.release.version)?;
++    anyhow::ensure!(
++        version.pre.is_empty()
++            && version.build.is_empty()
++            && version.to_string() == release.release.version,
++        "fork release version must be a canonical stable version"
++    );
++    anyhow::ensure!(
++        is_lowercase_hex(&release.candidate_sha, 40),
++        "fork candidate SHA must be 40 lowercase hex characters"
++    );
++    anyhow::ensure!(
++        is_lowercase_hex(&release.upstream_sha, 40),
++        "fork upstream SHA must be 40 lowercase hex characters"
++    );
++    anyhow::ensure!(
++        is_lowercase_hex(&release.patchset_sha256, 64),
++        "fork patchset SHA-256 must be 64 lowercase hex characters"
++    );
++    anyhow::ensure!(
++        is_lowercase_hex(&release.sha256, 64),
++        "fork archive SHA-256 must be 64 lowercase hex characters"
++    );
++    anyhow::ensure!(
++        release.size > 0 && release.size < 2_147_483_648,
++        "fork archive size is outside the allowed range"
++    );
++
++    let repository = github_repository_from_manifest_url(&config.manifest_url)?;
++    let expected_url = format!(
++        "{repository}/releases/download/build-{}-{}-{}/Zed.dmg",
++        release.release.version,
++        &release.upstream_sha[..12],
++        &release.patchset_sha256[..12],
++    );
++    anyhow::ensure!(
++        release.release.url == expected_url,
++        "fork release asset URL does not match its repository and provenance"
++    );
++
++    Ok(version)
++}
++
++async fn fetch_release_json<T: DeserializeOwned>(
+     client: &HttpClientWithUrl,
+     url: &str,
+     description: &str,
+-) -> Result<ReleaseAsset> {
++) -> Result<T> {
+     let mut response = client.get(url, Default::default(), true).await?;
+     let mut body = Vec::new();
+     response.body_mut().read_to_end(&mut body).await?;
+@@ -1142,6 +1362,58 @@ async fn download_release(
+     Ok(())
+ }
+ 
++async fn download_fork_release(
++    target_path: &Path,
++    release: &ForkReleaseAsset,
++    client: Arc<HttpClientWithUrl>,
++    on_progress: impl FnMut(Option<f32>),
++) -> Result<()> {
++    download_release(
++        target_path,
++        release.release.clone(),
++        client,
++        on_progress,
++    )
++    .await?;
++    verify_downloaded_fork_asset(target_path, release.size, &release.sha256).await
++}
++
++async fn verify_downloaded_fork_asset(
++    target_path: &Path,
++    expected_size: u64,
++    expected_sha256: &str,
++) -> Result<()> {
++    let metadata = fs::metadata(target_path).await?;
++    anyhow::ensure!(
++        metadata.len() == expected_size,
++        "downloaded fork asset size does not match manifest: expected {expected_size}, got {}",
++        metadata.len()
++    );
++
++    let mut file = File::open(target_path).await?;
++    let mut hasher = Sha256::new();
++    let mut downloaded_bytes = 0u64;
++    let mut buffer = [0u8; 8192];
++    loop {
++        let bytes_read = file.read(&mut buffer).await?;
++        if bytes_read == 0 {
++            break;
++        }
++        downloaded_bytes += bytes_read as u64;
++        hasher.update(&buffer[..bytes_read]);
++    }
++    anyhow::ensure!(
++        downloaded_bytes == expected_size,
++        "downloaded fork asset length changed while hashing: expected {expected_size}, got {downloaded_bytes}"
++    );
++    let actual_sha256 = format!("{:x}", hasher.finalize());
++    anyhow::ensure!(
++        actual_sha256 == expected_sha256,
++        "downloaded fork asset SHA-256 does not match manifest"
++    );
++    Ok(())
++}
++
+ async fn install_release_linux(
+     temp_dir: &InstallerDir,
+     downloaded_tar_gz: &Path,
+@@ -1384,7 +1656,7 @@ mod tests {
+         rc::Rc,
+         sync::{
+             Arc,
+-            atomic::{self, AtomicBool},
++            atomic::{self, AtomicBool, AtomicUsize},
+         },
+     };
+     use tempfile::tempdir;
+@@ -1396,9 +1668,660 @@ mod tests {
+ 
+     use super::*;
+ 
++    #[derive(Clone)]
++    pub(super) struct ForkUpdateConfigOverride(pub(super) ForkUpdateConfig);
++    impl Global for ForkUpdateConfigOverride {}
++
+     pub(super) struct InstallOverride(pub Rc<dyn Fn(&Path, &AsyncApp) -> Result<Option<PathBuf>>>);
+     impl Global for InstallOverride {}
+ 
++    const TEST_FORK_MANIFEST_URL: &str =
++        "https://github.com/example/zed/releases/latest/download/latest.json";
++    const TEST_FORK_CANDIDATE_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
++    const TEST_FORK_UPSTREAM_SHA: &str = "89abcdef0123456789abcdef0123456789abcdef";
++    const TEST_FORK_PATCHSET_SHA256: &str =
++        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
++    const TEST_FORK_ARCHIVE_SHA256: &str =
++        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
++
++    fn test_fork_config(release_id: u64) -> ForkUpdateConfig {
++        ForkUpdateConfig {
++            manifest_url: TEST_FORK_MANIFEST_URL.to_string(),
++            release_id,
++        }
++    }
++
++    fn test_fork_manifest(
++        version: &str,
++        release_id: u64,
++        platform: &str,
++        size: u64,
++        candidate_sha: &str,
++        upstream_sha: &str,
++        patchset_sha256: &str,
++        sha256: &str,
++        url: Option<&str>,
++    ) -> serde_json::Value {
++        let default_url = format!(
++            "https://github.com/example/zed/releases/download/build-{version}-{}-{}/Zed.dmg",
++            &upstream_sha[..12],
++            &patchset_sha256[..12]
++        );
++        serde_json::json!({
++            "version": version,
++            "url": url.unwrap_or(&default_url),
++            "schema": 1,
++            "release_id": release_id,
++            "platform": platform,
++            "candidate_sha": candidate_sha,
++            "upstream_sha": upstream_sha,
++            "patchset_sha256": patchset_sha256,
++            "sha256": sha256,
++            "size": size,
++        })
++    }
++
++    fn parse_test_fork_manifest(value: serde_json::Value) -> ForkReleaseAsset {
++        serde_json::from_value(value).expect("test fork manifest should deserialize")
++    }
++
++    fn test_fork_http_client(
++        manifest_body: Vec<u8>,
++        asset_path: String,
++        asset_body: Vec<u8>,
++        manifest_requests: Arc<AtomicUsize>,
++        asset_requests: Arc<AtomicUsize>,
++    ) -> FakeHttpClient {
++        FakeHttpClient::create(move |request| {
++            let manifest_body = manifest_body.clone();
++            let asset_path = asset_path.clone();
++            let asset_body = asset_body.clone();
++            let manifest_requests = manifest_requests.clone();
++            let asset_requests = asset_requests.clone();
++            async move {
++                if request.uri().path() == "/example/zed/releases/latest/download/latest.json" {
++                    manifest_requests.fetch_add(1, atomic::Ordering::SeqCst);
++                    return Ok(Response::builder()
++                        .status(200)
++                        .body(manifest_body.into())
++                        .expect("build test manifest response"));
++                }
++                if request.uri().path() == asset_path {
++                    asset_requests.fetch_add(1, atomic::Ordering::SeqCst);
++                    return Ok(Response::builder()
++                        .status(200)
++                        .body(asset_body.into())
++                        .expect("build test asset response"));
++                }
++                Ok(Response::builder()
++                    .status(404)
++                    .body(Vec::<u8>::new().into())
++                    .expect("build not-found response"))
++            }
++        })
++    }
++
++    fn create_fork_test_updater(
++        cx: &mut TestAppContext,
++        current_version: Version,
++        fake_http_client: FakeHttpClient,
++        config: ForkUpdateConfig,
++        install_override: Rc<dyn Fn(&Path, &AsyncApp) -> Result<Option<PathBuf>>>,
++    ) -> Entity<AutoUpdater> {
++        cx.update(|cx| {
++            settings::init(cx);
++            let mut store = SettingsStore::new(cx, &settings::default_settings());
++            store
++                .set_default_settings(&default_settings(), cx)
++                .expect("set default update settings");
++            store
++                .set_user_settings(r#"{"auto_update":false}"#, cx)
++                .expect("disable background polling in fork test");
++            cx.set_global(store);
++            release_channel::init_test(current_version.clone(), ReleaseChannel::Stable, cx);
++            cx.set_global(ForkUpdateConfigOverride(config));
++            cx.set_global(InstallOverride(install_override));
++            let client = Client::new(Arc::new(FakeSystemClock::new()), fake_http_client, cx);
++            crate::init(client, cx);
++            AutoUpdater::get(cx).expect("auto updater should exist")
++        })
++    }
++
++    fn start_manual_fork_check(updater: &Entity<AutoUpdater>, cx: &mut TestAppContext) {
++        cx.update(|cx| {
++            updater.update(cx, |updater, cx| updater.poll(UpdateCheckType::Manual, cx));
++        });
++    }
++
++    fn validate_test_fork_manifest(
++        value: serde_json::Value,
++        config: &ForkUpdateConfig,
++    ) -> Result<Version> {
++        let release = serde_json::from_value::<ForkReleaseAsset>(value)?;
++        validate_fork_release(&release, config)
++    }
++
++    #[gpui::test]
++    async fn test_fork_same_version_installs_once_and_preserves_updated_status(
++        cx: &mut TestAppContext,
++    ) {
++        cx.background_executor.allow_parking();
++        let config = test_fork_config(41);
++        let manifest = test_fork_manifest(
++            "1.24.2",
++            42,
++            "macos/aarch64",
++            3,
++            TEST_FORK_CANDIDATE_SHA,
++            TEST_FORK_UPSTREAM_SHA,
++            TEST_FORK_PATCHSET_SHA256,
++            TEST_FORK_ARCHIVE_SHA256,
++            None,
++        );
++        let manifest_body = serde_json::to_vec(&manifest).expect("serialize test manifest");
++        let asset_path = manifest["url"]
++            .as_str()
++            .expect("test manifest URL")
++            .strip_prefix("https://github.com")
++            .expect("test URL uses GitHub")
++            .to_string();
++        let manifest_requests = Arc::new(AtomicUsize::new(0));
++        let asset_requests = Arc::new(AtomicUsize::new(0));
++        let fake_http_client = test_fork_http_client(
++            manifest_body,
++            asset_path,
++            b"abc".to_vec(),
++            manifest_requests.clone(),
++            asset_requests.clone(),
++        );
++        let install_calls = Arc::new(AtomicUsize::new(0));
++        let install_override: Rc<dyn Fn(&Path, &AsyncApp) -> Result<Option<PathBuf>>> = {
++            let install_calls = install_calls.clone();
++            Rc::new(move |target_path, _cx| {
++                anyhow::ensure!(
++                    std::fs::read(target_path)? == b"abc",
++                    "installer received unexpected fork asset bytes"
++                );
++                install_calls.fetch_add(1, atomic::Ordering::SeqCst);
++                Ok(None)
++            })
++        };
++        let updater = create_fork_test_updater(
++            cx,
++            Version::parse("1.24.2+stable.abcdef").expect("installed version"),
++            fake_http_client,
++            config,
++            install_override,
++        );
++
++        start_manual_fork_check(&updater, cx);
++        cx.condition(&updater, |updater, _| updater.pending_poll.is_none())
++            .await;
++        assert_eq!(
++            updater.read_with(cx, |updater, _| updater.status()),
++            AutoUpdateStatus::Updated {
++                version: Version::new(1, 24, 2)
++            }
++        );
++        assert_eq!(
++            updater.read_with(cx, |updater, _| updater.cached_fork_release.clone()),
++            Some((42, Version::new(1, 24, 2)))
++        );
++        assert_eq!(install_calls.load(atomic::Ordering::SeqCst), 1);
++        assert_eq!(asset_requests.load(atomic::Ordering::SeqCst), 1);
++
++        start_manual_fork_check(&updater, cx);
++        cx.condition(&updater, |updater, _| updater.pending_poll.is_none())
++            .await;
++        assert_eq!(
++            updater.read_with(cx, |updater, _| updater.status()),
++            AutoUpdateStatus::Updated {
++                version: Version::new(1, 24, 2)
++            }
++        );
++        assert_eq!(install_calls.load(atomic::Ordering::SeqCst), 1);
++        assert_eq!(asset_requests.load(atomic::Ordering::SeqCst), 1);
++        assert_eq!(manifest_requests.load(atomic::Ordering::SeqCst), 2);
++        let notification = updater.read_with(cx, |updater, cx| {
++            updater.should_show_update_notification(cx)
++        });
++        assert!(notification.await.expect("read update notification"));
++    }
++
++    #[gpui::test]
++    async fn test_fork_corrupt_dmg_never_invokes_installer(cx: &mut TestAppContext) {
++        cx.background_executor.allow_parking();
++        let config = test_fork_config(41);
++        let manifest = test_fork_manifest(
++            "1.24.2",
++            42,
++            "macos/aarch64",
++            3,
++            TEST_FORK_CANDIDATE_SHA,
++            TEST_FORK_UPSTREAM_SHA,
++            TEST_FORK_PATCHSET_SHA256,
++            TEST_FORK_ARCHIVE_SHA256,
++            None,
++        );
++        let manifest_body = serde_json::to_vec(&manifest).expect("serialize test manifest");
++        let asset_path = manifest["url"]
++            .as_str()
++            .expect("test manifest URL")
++            .strip_prefix("https://github.com")
++            .expect("test URL uses GitHub")
++            .to_string();
++        let manifest_requests = Arc::new(AtomicUsize::new(0));
++        let asset_requests = Arc::new(AtomicUsize::new(0));
++        let fake_http_client = test_fork_http_client(
++            manifest_body,
++            asset_path,
++            b"abd".to_vec(),
++            manifest_requests,
++            asset_requests.clone(),
++        );
++        let install_calls = Arc::new(AtomicUsize::new(0));
++        let install_override: Rc<dyn Fn(&Path, &AsyncApp) -> Result<Option<PathBuf>>> = {
++            let install_calls = install_calls.clone();
++            Rc::new(move |_target_path, _cx| {
++                install_calls.fetch_add(1, atomic::Ordering::SeqCst);
++                Ok(None)
++            })
++        };
++        let updater = create_fork_test_updater(
++            cx,
++            Version::parse("1.24.2+stable.abcdef").expect("installed version"),
++            fake_http_client,
++            config,
++            install_override,
++        );
++
++        start_manual_fork_check(&updater, cx);
++        cx.condition(&updater, |updater, _| updater.pending_poll.is_none())
++            .await;
++        assert!(matches!(
++            updater.read_with(cx, |updater, _| updater.status()),
++            AutoUpdateStatus::Errored { .. }
++        ));
++        assert!(asset_requests.load(atomic::Ordering::SeqCst) >= 1);
++        assert_eq!(install_calls.load(atomic::Ordering::SeqCst), 0);
++        assert_eq!(
++            updater.read_with(cx, |updater, _| updater.cached_fork_release.clone()),
++            None
++        );
++    }
++
++    #[gpui::test]
++    async fn test_fork_failed_install_does_not_advance_cached_release(cx: &mut TestAppContext) {
++        cx.background_executor.allow_parking();
++        let config = test_fork_config(41);
++        let manifest = test_fork_manifest(
++            "1.25.1",
++            43,
++            "macos/aarch64",
++            3,
++            TEST_FORK_CANDIDATE_SHA,
++            TEST_FORK_UPSTREAM_SHA,
++            TEST_FORK_PATCHSET_SHA256,
++            TEST_FORK_ARCHIVE_SHA256,
++            None,
++        );
++        let manifest_body = serde_json::to_vec(&manifest).expect("serialize test manifest");
++        let asset_path = manifest["url"]
++            .as_str()
++            .expect("test manifest URL")
++            .strip_prefix("https://github.com")
++            .expect("test URL uses GitHub")
++            .to_string();
++        let fake_http_client = test_fork_http_client(
++            manifest_body,
++            asset_path,
++            b"abc".to_vec(),
++            Arc::new(AtomicUsize::new(0)),
++            Arc::new(AtomicUsize::new(0)),
++        );
++        let install_calls = Arc::new(AtomicUsize::new(0));
++        let install_override: Rc<dyn Fn(&Path, &AsyncApp) -> Result<Option<PathBuf>>> = {
++            let install_calls = install_calls.clone();
++            Rc::new(move |_target_path, _cx| {
++                install_calls.fetch_add(1, atomic::Ordering::SeqCst);
++                Err(anyhow::anyhow!("simulated install failure"))
++            })
++        };
++        let updater = create_fork_test_updater(
++            cx,
++            Version::parse("1.24.2+stable.abcdef").expect("installed version"),
++            fake_http_client,
++            config,
++            install_override,
++        );
++        let cached_release = (42, Version::new(1, 25, 0));
++        cx.update(|cx| {
++            updater.update(cx, |updater, _| {
++                updater.cached_fork_release = Some(cached_release.clone());
++            });
++        });
++
++        start_manual_fork_check(&updater, cx);
++        cx.condition(&updater, |updater, _| updater.pending_poll.is_none())
++            .await;
++
++        assert!(matches!(
++            updater.read_with(cx, |updater, _| updater.status()),
++            AutoUpdateStatus::Errored { .. }
++        ));
++        assert_eq!(install_calls.load(atomic::Ordering::SeqCst), 1);
++        assert_eq!(
++            updater.read_with(cx, |updater, _| updater.cached_fork_release.clone()),
++            Some(cached_release)
++        );
++    }
++
++    #[test]
++    fn test_fork_config_requires_a_positive_native_release_id() {
++        assert!(matches!(
++            fork_update_config_from_environment(None, Some("42")),
++            Ok(None)
++        ));
++        assert!(
++            fork_update_config_from_environment(Some(TEST_FORK_MANIFEST_URL), None).is_err()
++        );
++        assert!(
++            fork_update_config_from_environment(Some(TEST_FORK_MANIFEST_URL), Some("invalid"))
++                .is_err()
++        );
++        assert!(
++            fork_update_config_from_environment(Some(TEST_FORK_MANIFEST_URL), Some("0")).is_err()
++        );
++        assert_eq!(
++            fork_update_config_from_environment(Some(TEST_FORK_MANIFEST_URL), Some("42"))
++                .expect("valid fork configuration should parse")
++                .expect("manifest URL selects fork mode")
++                .release_id,
++            42
++        );
++    }
++
++    #[test]
++    fn test_fork_same_version_with_newer_release_id_updates_stable_binary() {
++        let config = test_fork_config(41);
++        let release = parse_test_fork_manifest(test_fork_manifest(
++            "1.24.2",
++            42,
++            "macos/aarch64",
++            3,
++            TEST_FORK_CANDIDATE_SHA,
++            TEST_FORK_UPSTREAM_SHA,
++            TEST_FORK_PATCHSET_SHA256,
++            TEST_FORK_ARCHIVE_SHA256,
++            None,
++        ));
++        let installed_version =
++            Version::parse("1.24.2+stable.abcdef").expect("installed version is valid");
++
++        let update = AutoUpdater::check_fork_release_is_newer(
++            &installed_version,
++            config.release_id,
++            None,
++            &release,
++            &config,
++        )
++        .expect("valid same-version fork release should be considered");
++
++        assert_eq!(update, Some(Version::new(1, 24, 2)));
++    }
++
++    #[test]
++    fn test_fork_release_id_and_version_downgrades_are_rejected() {
++        let installed_version =
++            Version::parse("1.24.2+stable.abcdef").expect("installed version is valid");
++        let same_version_release = |release_id| {
++            parse_test_fork_manifest(test_fork_manifest(
++                "1.24.2",
++                release_id,
++                "macos/aarch64",
++                3,
++                TEST_FORK_CANDIDATE_SHA,
++                TEST_FORK_UPSTREAM_SHA,
++                TEST_FORK_PATCHSET_SHA256,
++                TEST_FORK_ARCHIVE_SHA256,
++                None,
++            ))
++        };
++        let cached_release_42 = (42, Version::new(1, 24, 2));
++        let cached_release_43 = (43, Version::new(1, 24, 2));
++        for (running_release_id, cached_release, candidate_release_id) in [
++            (42, None, 42),
++            (43, None, 42),
++            (41, Some(&cached_release_42), 42),
++            (41, Some(&cached_release_43), 42),
++        ]
++        {
++            let config = test_fork_config(running_release_id);
++            let release = same_version_release(candidate_release_id);
++            assert_eq!(
++                AutoUpdater::check_fork_release_is_newer(
++                    &installed_version,
++                    running_release_id,
++                    cached_release,
++                    &release,
++                    &config,
++                )
++                .expect("valid fork release metadata"),
++                None
++            );
++        }
++
++        let config = test_fork_config(41);
++        let older_version = parse_test_fork_manifest(test_fork_manifest(
++            "1.24.1",
++            43,
++            "macos/aarch64",
++            3,
++            TEST_FORK_CANDIDATE_SHA,
++            TEST_FORK_UPSTREAM_SHA,
++            TEST_FORK_PATCHSET_SHA256,
++            TEST_FORK_ARCHIVE_SHA256,
++            None,
++        ));
++        let newer_version_with_old_id = parse_test_fork_manifest(test_fork_manifest(
++            "1.24.3",
++            40,
++            "macos/aarch64",
++            3,
++            TEST_FORK_CANDIDATE_SHA,
++            TEST_FORK_UPSTREAM_SHA,
++            TEST_FORK_PATCHSET_SHA256,
++            TEST_FORK_ARCHIVE_SHA256,
++            None,
++        ));
++        let both_newer = parse_test_fork_manifest(test_fork_manifest(
++            "1.24.3",
++            42,
++            "macos/aarch64",
++            3,
++            TEST_FORK_CANDIDATE_SHA,
++            TEST_FORK_UPSTREAM_SHA,
++            TEST_FORK_PATCHSET_SHA256,
++            TEST_FORK_ARCHIVE_SHA256,
++            None,
++        ));
++
++        assert_eq!(
++            AutoUpdater::check_fork_release_is_newer(
++                &installed_version,
++                config.release_id,
++                None,
++                &older_version,
++                &config,
++            )
++            .expect("older upstream version is valid"),
++            None
++        );
++        assert_eq!(
++            AutoUpdater::check_fork_release_is_newer(
++                &installed_version,
++                config.release_id,
++                None,
++                &newer_version_with_old_id,
++                &config,
++            )
++            .expect("newer version with an old release ID is valid"),
++            None
++        );
++        assert_eq!(
++            AutoUpdater::check_fork_release_is_newer(
++                &installed_version,
++                config.release_id,
++                None,
++                &both_newer,
++                &config,
++            )
++            .expect("newer version and release ID are valid"),
++            Some(Version::new(1, 24, 3))
++        );
++    }
++
++    #[test]
++    fn test_fork_cached_installed_version_blocks_downgrade_before_restart() {
++        let installed_version =
++            Version::parse("1.24.2+stable.abcdef").expect("installed version is valid");
++        let cached_release = (42, Version::new(1, 25, 0));
++        let config = test_fork_config(41);
++        let release_for = |version, release_id| {
++            parse_test_fork_manifest(test_fork_manifest(
++                version,
++                release_id,
++                "macos/aarch64",
++                3,
++                TEST_FORK_CANDIDATE_SHA,
++                TEST_FORK_UPSTREAM_SHA,
++                TEST_FORK_PATCHSET_SHA256,
++                TEST_FORK_ARCHIVE_SHA256,
++                None,
++            ))
++        };
++        for (version, expected) in [
++            ("1.24.3", None),
++            ("1.25.0", Some(Version::new(1, 25, 0))),
++            ("1.25.1", Some(Version::new(1, 25, 1))),
++        ] {
++            let release = release_for(version, 43);
++            assert_eq!(
++                AutoUpdater::check_fork_release_is_newer(
++                    &installed_version,
++                    config.release_id,
++                    Some(&cached_release),
++                    &release,
++                    &config,
++                )
++                .expect("valid fork release metadata"),
++                expected
++            );
++        }
++    }
++
++    #[test]
++    fn test_fork_manifest_requires_the_exact_release_contract() {
++        let config = test_fork_config(41);
++        let valid_manifest = test_fork_manifest(
++            "1.24.2",
++            42,
++            "macos/aarch64",
++            3,
++            TEST_FORK_CANDIDATE_SHA,
++            TEST_FORK_UPSTREAM_SHA,
++            TEST_FORK_PATCHSET_SHA256,
++            TEST_FORK_ARCHIVE_SHA256,
++            None,
++        );
++        let parsed = parse_test_fork_manifest(valid_manifest.clone());
++        assert_eq!(
++            validate_fork_release(&parsed, &config).expect("valid fork manifest"),
++            Version::new(1, 24, 2)
++        );
++
++        let invalid_manifests = [
++            ("schema", serde_json::json!(2)),
++            ("platform", serde_json::json!("macos/x86_64")),
++            ("release_id", serde_json::json!(0)),
++            ("size", serde_json::json!(0)),
++            ("size", serde_json::json!(2_147_483_648u64)),
++            ("candidate_sha", serde_json::json!("ABCDEF")),
++            ("upstream_sha", serde_json::json!("g".repeat(40))),
++            ("patchset_sha256", serde_json::json!("a".repeat(63))),
++            ("sha256", serde_json::json!("A".repeat(64))),
++            ("version", serde_json::json!("1.24.2-rc.1")),
++            ("version", serde_json::json!("1.24.2+build.1")),
++            ("version", serde_json::json!("01.24.2")),
++            ("url", serde_json::json!("not-a-url")),
++            (
++                "url",
++                serde_json::json!(
++                    "https://example.com/example/zed/releases/download/build-1.24.2-89abcdef0123-0123456789ab/Zed.dmg"
++                ),
++            ),
++            (
++                "url",
++                serde_json::json!(
++                    "https://github.com/example/zed/releases/download/../latest/Zed.dmg"
++                ),
++            ),
++        ];
++        for (field, invalid_value) in invalid_manifests {
++            let mut manifest = valid_manifest.clone();
++            manifest[field] = invalid_value;
++            assert!(
++                validate_test_fork_manifest(manifest, &config).is_err(),
++                "invalid {field} must be rejected"
++            );
++        }
++
++        let mut missing_field = valid_manifest;
++        missing_field.as_object_mut().expect("manifest is an object").remove("sha256");
++        assert!(
++            validate_test_fork_manifest(missing_field, &config).is_err(),
++            "missing required checksum must be rejected"
++        );
++
++        let foreign_manifest_url = ForkUpdateConfig {
++            manifest_url: "https://evil.example/owner/repo/releases/latest/download/latest.json"
++                .to_string(),
++            release_id: 41,
++        };
++        assert!(validate_fork_update_config(&foreign_manifest_url).is_err());
++        let traversing_manifest_url = ForkUpdateConfig {
++            manifest_url: "https://github.com/example/../repo/releases/latest/download/latest.json"
++                .to_string(),
++            release_id: 41,
++        };
++        assert!(validate_fork_update_config(&traversing_manifest_url).is_err());
++    }
++
++    #[gpui::test]
++    async fn test_fork_download_verifies_size_and_streaming_sha256(_cx: &mut TestAppContext) {
++        let temp_dir = tempdir().expect("temporary directory");
++        let target_path = temp_dir.path().join("Zed.dmg");
++        std::fs::write(&target_path, b"abc").expect("write test asset");
++
++        verify_downloaded_fork_asset(&target_path, 3, TEST_FORK_ARCHIVE_SHA256)
++            .await
++            .expect("matching size and digest should pass");
++        assert!(
++            verify_downloaded_fork_asset(&target_path, 2, TEST_FORK_ARCHIVE_SHA256)
++                .await
++                .is_err(),
++            "wrong manifest size must fail"
++        );
++
++        std::fs::write(&target_path, b"abd").expect("overwrite test asset");
++        assert!(
++            verify_downloaded_fork_asset(&target_path, 3, TEST_FORK_ARCHIVE_SHA256)
++                .await
++                .is_err(),
++            "corrupt downloaded bytes must fail"
++        );
++    }
++
+     #[gpui::test]
+     fn test_auto_update_defaults_to_true(cx: &mut TestAppContext) {
+         cx.update(|cx| {
+-- 
+2.43.0
+
