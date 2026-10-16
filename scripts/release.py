@@ -34,10 +34,11 @@ MAX_FIX_ATTEMPTS = 3
 REVIEW_WAIT_SECONDS = 7200
 MACOS_JOB_TIMEOUT_MINUTES = 355
 MAX_REPAIR_SECONDS = MAX_FIX_ATTEMPTS * (REVIEW_WAIT_SECONDS + MACOS_JOB_TIMEOUT_MINUTES * 60)
+RUST_TEST_NAME = r"[A-Za-z_][A-Za-z0-9_]*"
 TEST_FUNCTION = re.compile(
     r"(?m)^[ \t]*#\[(?:test|gpui::test)(?:\([^\]]*\))?\][ \t]*\n"
     r"(?:[ \t]*#\[[^\]]*\][ \t]*\n)*"
-    r"[ \t]*(?:async[ \t]+)?fn[ \t]+(test_[A-Za-z0-9_]+)[ \t]*\("
+    rf"[ \t]*(?:async[ \t]+)?fn[ \t]+({RUST_TEST_NAME})[ \t]*\("
 )
 CRATE_FILE = re.compile(r"^\+\+\+ b/crates/([A-Za-z0-9_-]+)/.+\.rs$")
 
@@ -1392,7 +1393,7 @@ def manifest_cases(manifest):
             if (not isinstance(case, list) or len(case) != 2
                     or not all(isinstance(item, str) for item in case)
                     or not re.fullmatch(r"[A-Za-z0-9_-]+", case[0])
-                    or not re.fullmatch(r"test_[A-Za-z0-9_]+", case[1])):
+                    or not re.fullmatch(RUST_TEST_NAME, case[1])):
                 raise ValueError("Invalid preserved Rust regression identity")
             cases.add(tuple(case))
     if not cases:

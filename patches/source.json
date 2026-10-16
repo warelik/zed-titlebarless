@@ -126,6 +126,22 @@
       "test_worktree_paths_not_overwritten_by_empty"
     ],
     [
+      "askpass",
+      "ask_password_preserves_cancelled_by_user"
+    ],
+    [
+      "askpass",
+      "ask_password_preserves_prompt_unavailable"
+    ],
+    [
+      "askpass",
+      "askpass_result_preserves_prompt_failure_reason"
+    ],
+    [
+      "askpass",
+      "askpass_run_propagates_injected_reason_at_channel_boundary"
+    ],
+    [
       "paths",
       "test_set_custom_data_dir_panics_if_logs_dir_initialized"
     ],
@@ -220,6 +236,14 @@
     [
       "remote",
       "test_ssh_non_authentication_errors_remain_retryable"
+    ],
+    [
+      "remote_connection",
+      "background_delegate_answers_prompt_unavailable"
+    ],
+    [
+      "remote_connection",
+      "dropped_prompt_ui_answers_prompt_unavailable"
     ],
     [
       "sidebar",

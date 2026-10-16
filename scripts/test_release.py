@@ -180,17 +180,50 @@ class ApplicationRegressionExtractorTests(unittest.TestCase):
         diff = """diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs
 --- a/crates/auto_update/src/auto_update.rs
 +++ b/crates/auto_update/src/auto_update.rs
-@@ -0,0 +1,5 @@
+@@ -1,2 +1,10 @@
+ #[test]
+ fn unchanged_upstream_case() {}
 +fn test_fork_manifest_helper() {}
 +#[test]
 +fn test_fork_added_case() {}
-+#[gpui::test]
-+async fn test_fork_added_gpui_case(cx: &mut TestAppContext) {}
++#[test]
++fn added_without_prefix() {}
++#[gpui::test(iterations = 10)]
++async fn added_gpui_without_prefix(cx: &mut TestAppContext) {}
 """
         self.assertEqual(
             release.added_cases(diff),
             {
                 ("auto_update", "test_fork_added_case"),
-                ("auto_update", "test_fork_added_gpui_case"),
+                ("auto_update", "added_without_prefix"),
+                ("auto_update", "added_gpui_without_prefix"),
             },
         )
+
+    def test_manifest_accepts_rust_names_and_rejects_malformed_identities(self):
+        self.assertEqual(
+            release.manifest_cases({"test_cases": [["askpass", "preserves_reason"]]}),
+            {("askpass", "preserves_reason")},
+        )
+        invalid = ("has space", "1leading", "has-dash", "has::separator", "")
+        for name in invalid:
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "Invalid preserved"):
+                release.manifest_cases({"test_cases": [["askpass", name]]})
+        for case in ("askpass::preserves_reason", ["askpass"], ["askpass", "valid", "extra"],
+                     ["askpass", 1]):
+            with self.subTest(case=case), self.assertRaisesRegex(ValueError, "Invalid preserved"):
+                release.manifest_cases({"test_cases": [case]})
+
+    def test_baseline_manifest_preserves_nonprefixed_cases_and_metadata(self):
+        manifest = json.loads((Path(__file__).parents[1] / "patches/source.json").read_text())
+        self.assertEqual(manifest["baseline_tag"], "v1.24.2")
+        self.assertEqual(manifest["baseline_upstream"], "fb69067729cb16a7f6135e2c1600c26a28c59659")
+        self.assertEqual(manifest["baseline_config"], "12726e69aa18e2674099e36a5092c78f1f6ebf3d")
+        self.assertTrue({
+            ("askpass", "ask_password_preserves_cancelled_by_user"),
+            ("askpass", "ask_password_preserves_prompt_unavailable"),
+            ("askpass", "askpass_result_preserves_prompt_failure_reason"),
+            ("askpass", "askpass_run_propagates_injected_reason_at_channel_boundary"),
+            ("remote_connection", "background_delegate_answers_prompt_unavailable"),
+            ("remote_connection", "dropped_prompt_ui_answers_prompt_unavailable"),
+        }.issubset(release.manifest_cases(manifest)))

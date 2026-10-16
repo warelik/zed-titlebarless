@@ -951,14 +951,17 @@ class RustRegressionRunnerTests(unittest.TestCase):
             diff = """diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs
 --- a/crates/auto_update/src/auto_update.rs
 +++ b/crates/auto_update/src/auto_update.rs
-@@ -0,0 +1,2 @@
+@@ -0,0 +1,4 @@
 +#[test]
 +fn test_added() {}
++#[gpui::test]
++async fn added_without_prefix() {}
 """
             listing = listing or (
                 "tests::test_historical: test\n"
                 "tests::test_preserved: test\n"
                 "tests::test_added: test\n"
+                "tests::added_without_prefix: test\n"
             )
             injected = {
                 "CARGO_HOME": "/toolchain-cache/cargo",
@@ -1026,8 +1029,12 @@ class RustRegressionRunnerTests(unittest.TestCase):
         self.assertIn("auto_update", cargo_command)
         self.assertEqual(
             {command[2] for command in test_runs},
-            {"tests::test_historical", "tests::test_preserved", "tests::test_added"},
+            {"tests::test_historical", "tests::test_preserved", "tests::test_added",
+             "tests::added_without_prefix"},
         )
+        nonprefixed = next(command for command in test_runs
+                           if command[2] == "tests::added_without_prefix")
+        self.assertEqual(nonprefixed[1:], ["--exact", "tests::added_without_prefix", "--nocapture"])
         self.assertTrue(all("--exact" in command for command in test_runs))
 
     def test_missing_package_case_and_out_of_source_binary_fail_closed(self):
