@@ -759,7 +759,7 @@ class AdoptedRepairBudgetTests(unittest.TestCase):
     CYCLE = "e" * 64
     ADOPTED = "f" * 40
 
-    def previous_pull(self, state="closed"):
+    def previous_pull(self, state="closed", number=1):
         identity = {
             "schema": 1,
             "config": CONFIG,
@@ -769,31 +769,38 @@ class AdoptedRepairBudgetTests(unittest.TestCase):
             "nonblocking": False,
         }
         return {
-            "number": 1,
+            "number": number,
             "state": state,
             "user": {"login": REPO.split("/")[0], "type": "User"},
-            "head": {"repo": {"full_name": REPO}, "ref": "repair/previous"},
+            "head": {"repo": {"full_name": REPO}, "ref": f"repair/previous-{number}"},
             "body": "<!-- zed-repair:v1 " + json.dumps(identity) + " -->",
         }
 
-    def previous_requests(self):
+    def previous_requests(self, attempts=(1, 2, 3), number=1, timestamps=None):
         owner = {"login": REPO.split("/")[0], "type": "User"}
+        heads = {1: SEED, 2: UPSTREAM, 3: CONFIG}
+        timestamps = timestamps or {}
         requests = []
-        for attempt, head in enumerate((SEED, UPSTREAM, CONFIG), 1):
-            comment = request(head, attempt, age=4 - attempt)
+        for attempt in attempts:
+            comment = request(heads[attempt], attempt, age=4 - attempt)
+            comment["created_at"] = timestamps.get(
+                attempt, f"2026-01-01T00:0{attempt}:00Z")
             comment["user"] = owner
-            comment["html_url"] = f"https://github.com/{REPO}/pull/1#issuecomment-{attempt}"
+            comment["html_url"] = f"https://github.com/{REPO}/pull/{number}#issuecomment-{attempt}"
             requests.append(comment)
         return requests
 
-    def adoption_comment(self, user=None):
-        return {
+    def adoption_comment(self, user=None, created_at="2026-01-01T01:00:00Z"):
+        comment = {
             "user": user or {"login": REPO.split("/")[0], "type": "User"},
             "body": (
                 f"Verified repair adopted as `{self.ADOPTED}`; "
                 "source-context files were not merged."
             ),
         }
+        if created_at is not None:
+            comment["created_at"] = created_at
+        return comment
 
     def collect_requests(
         self,
@@ -801,6 +808,7 @@ class AdoptedRepairBudgetTests(unittest.TestCase):
         previous_state="closed",
         include_adoption=True,
         adoption_user=None,
+        adoption_created_at="2026-01-01T01:00:00Z",
         comparison=None,
         compare_error=False,
         current_requests=None,
@@ -810,7 +818,7 @@ class AdoptedRepairBudgetTests(unittest.TestCase):
         previous_requests = self.previous_requests()
         previous_comments = list(previous_requests)
         if include_adoption:
-            previous_comments.append(self.adoption_comment(adoption_user))
+            previous_comments.append(self.adoption_comment(adoption_user, adoption_created_at))
         current_requests = current_requests or []
         compare_path = f"repos/{REPO}/compare/{self.ADOPTED}...{CONFIG}"
 
@@ -840,6 +848,7 @@ class AdoptedRepairBudgetTests(unittest.TestCase):
     def test_verified_closed_adoption_excludes_only_previous_attempts(self):
         current = request(HEAD, 1)
         current["user"] = {"login": REPO.split("/")[0], "type": "User"}
+        current["created_at"] = "2026-01-01T00:59:00Z"
         for status in ("ahead", "identical"):
             with self.subTest(status=status):
                 actual, previous = self.collect_requests(
@@ -882,11 +891,69 @@ class AdoptedRepairBudgetTests(unittest.TestCase):
                 self.assertEqual(len(previous), 3)
                 self.assertEqual(actual, previous)
 
+    def test_missing_malformed_or_naive_adoption_time_keeps_attempts(self):
+        cases = (
+            ("missing", None),
+            ("malformed", "not-a-timestamp"),
+            ("naive", "2026-01-01T01:00:00"),
+        )
+        for name, created_at in cases:
+            with self.subTest(case=name):
+                actual, previous = self.collect_requests(
+                    adoption_created_at=created_at,
+                    comparison={
+                        "status": "ahead",
+                        "merge_base_commit": {"sha": self.ADOPTED},
+                    },
+                )
+                self.assertEqual(len(previous), 3)
+                self.assertEqual(actual, previous)
+
+    def test_later_historical_request_counts_after_offset_adoption_cutoff(self):
+        state = {**STATE, "cycle": self.CYCLE, "number": 5}
+        previous_one = self.previous_pull(number=1)
+        previous_three = self.previous_pull(number=3)
+        previous_four = self.previous_pull(number=4)
+        attempts_one = self.previous_requests((1, 2), number=1)
+        attempt_three = self.previous_requests((3,), number=3)
+        later_request = self.previous_requests(
+            (1,), number=4, timestamps={1: "2026-01-01T01:01:00Z"})
+        adoption = self.adoption_comment(created_at="2026-01-01T03:00:00+02:00")
+        compare_path = f"repos/{REPO}/compare/{self.ADOPTED}...{CONFIG}"
+
+        def pages(path):
+            if path == f"repos/{REPO}/issues/{state['number']}/comments":
+                return []
+            if path == f"repos/{REPO}/pulls?state=all&base=downstream":
+                return [previous_one, previous_three, previous_four]
+            if path == f"repos/{REPO}/issues/{previous_one['number']}/comments":
+                return attempts_one
+            if path == f"repos/{REPO}/issues/{previous_three['number']}/comments":
+                return [*attempt_three, adoption]
+            if path == f"repos/{REPO}/issues/{previous_four['number']}/comments":
+                return later_request
+            raise AssertionError(path)
+
+        def api(path, **_kwargs):
+            if path == compare_path:
+                return {
+                    "status": "ahead",
+                    "merge_base_commit": {"sha": self.ADOPTED},
+                }
+            raise AssertionError(path)
+
+        with (patch.object(release, "pages", side_effect=pages),
+              patch.object(release, "api", side_effect=api)):
+            actual = release.repair_requests(REPO, state)
+        self.assertEqual(actual, later_request)
+
     def test_request_repair_starts_at_attempt_one_after_verified_adoption(self):
-        state = {**STATE, "cycle": self.CYCLE}
-        previous = self.previous_pull()
-        previous_requests = self.previous_requests()
-        previous_comments = [*previous_requests, self.adoption_comment()]
+        state = {**STATE, "cycle": self.CYCLE, "number": 5}
+        previous_one = self.previous_pull(number=1)
+        previous_three = self.previous_pull(number=3)
+        attempts_one = self.previous_requests((1, 2), number=1)
+        attempt_three = self.previous_requests((3,), number=3)
+        previous_comments = [*attempt_three, self.adoption_comment()]
         pages_calls = []
         api_calls = []
         request_body = []
@@ -897,8 +964,10 @@ class AdoptedRepairBudgetTests(unittest.TestCase):
             if path == f"repos/{REPO}/issues/{state['number']}/comments":
                 return []
             if path == f"repos/{REPO}/pulls?state=all&base=downstream":
-                return [previous]
-            if path == f"repos/{REPO}/issues/{previous['number']}/comments":
+                return [previous_one, previous_three]
+            if path == f"repos/{REPO}/issues/{previous_one['number']}/comments":
+                return attempts_one
+            if path == f"repos/{REPO}/issues/{previous_three['number']}/comments":
                 return previous_comments
             raise AssertionError(path)
 
@@ -927,13 +996,14 @@ class AdoptedRepairBudgetTests(unittest.TestCase):
             release.request_repair(Path("/unused"))
 
         owner_token.assert_called_once_with(REPO)
-        self.assertEqual(len(previous_requests), 3)
+        self.assertEqual(len(attempts_one) + len(attempt_three), 3)
         self.assertEqual(len(request_body), 1)
         self.assertIn(f"Attempt 1/{release.MAX_FIX_ATTEMPTS}.", request_body[0])
         self.assertIn(f"<!-- zed-fix:{HEAD}:1 -->", request_body[0])
         self.assertIn("actual fixture failure", request_body[0])
         self.assertIn(f"repos/{REPO}/pulls?state=all&base=downstream", pages_calls)
-        self.assertIn(f"repos/{REPO}/issues/{previous['number']}/comments", pages_calls)
+        self.assertIn(f"repos/{REPO}/issues/{previous_one['number']}/comments", pages_calls)
+        self.assertIn(f"repos/{REPO}/issues/{previous_three['number']}/comments", pages_calls)
         self.assertTrue(any(
             path == compare_path and method == "GET"
             for path, method, _, _ in api_calls
