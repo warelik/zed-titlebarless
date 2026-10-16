@@ -630,7 +630,6 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("ref: ${{ needs.prepare.outputs.sha }}", self.workflow)
         self.assertIn("fetch-depth: ${{ needs.prepare.outputs.source_depth }}", self.workflow)
         self.assertIn("persist-credentials: false", self.workflow)
-
     def test_macos_job_is_read_only_and_has_no_write_or_codex_credentials(self):
         application_job = self.workflow.split("\n  test:\n", 1)[1].split("\n  publish:\n", 1)[0]
         self.assertIn("timeout-minutes: 355", application_job)
@@ -667,6 +666,36 @@ class WorkflowContractTests(unittest.TestCase):
             release.MAX_REPAIR_SECONDS,
             3 * (release.REVIEW_WAIT_SECONDS + release.MACOS_JOB_TIMEOUT_MINUTES * 60),
         )
+
+
+class ReviewRefPublicationTests(unittest.TestCase):
+    def test_exact_upstream_base_is_created_before_pushing_patched_head(self):
+        calls = []
+        repo, upstream, head = "maintainer/zed-fork", "b" * 40, "a" * 40
+
+        def api(path, *, method="GET", data=None, token=None):
+            calls.append(("api", path, method, data))
+            return {"ref": f"refs/heads/review-base/{upstream}",
+                    "object": {"sha": upstream}}
+
+        def run(*args, cwd=None, env=None):
+            calls.append(("run", args))
+            if args[:3] == ("git", "ls-remote", "--refs"):
+                return ""
+            return ""
+
+        with (patch.object(release, "api", side_effect=api),
+              patch.object(release, "run", side_effect=run)):
+            release.push_review_refs(
+                repo, Path("app"), "https://example.invalid/repo.git",
+                f"review-base/{upstream}", upstream, "review/candidate", head)
+
+        creation = next(index for index, call in enumerate(calls) if call[0] == "api")
+        push = next(index for index, call in enumerate(calls)
+                    if call[0] == "run" and call[1][:2] == ("git", "push"))
+        self.assertLess(creation, push)
+        self.assertEqual(calls[push][1][-1], f"{head}:refs/heads/review/candidate")
+        self.assertNotIn(upstream, calls[push][1][-1])
 
 
 class RepairPromptContractTests(unittest.TestCase):

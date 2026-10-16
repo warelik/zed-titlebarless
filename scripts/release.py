@@ -205,6 +205,23 @@ def output(**values):
                 raise ValueError("Invalid workflow output")
             stream.write(f"{name}={text}\n")
 
+def push_review_refs(repo, app, remote, base, upstream, head, sha):
+    """Create the exact upstream base before pushing its patched descendant."""
+    current = run("git", "ls-remote", "--refs", remote,
+                  f"refs/heads/{base}", f"refs/heads/{head}", cwd=app)
+    refs = {name.removeprefix("refs/heads/"): value
+            for value, name in (line.split() for line in current.splitlines())}
+    for branch, expected in ((base, upstream), (head, sha)):
+        if branch in refs and refs[branch] != expected:
+            raise ValueError(f"Review branch changed: {branch}; refusing to overwrite it")
+    if base not in refs:
+        created = api(f"repos/{repo}/git/refs", method="POST",
+                      data={"ref": f"refs/heads/{base}", "sha": upstream})
+        if (created.get("ref") != f"refs/heads/{base}"
+                or (created.get("object") or {}).get("sha") != upstream):
+            raise ValueError("GitHub did not create the exact review base")
+    run("git", "push", remote, f"{sha}:refs/heads/{head}", cwd=app)
+
 def cleanup_closed_pull_refs(repo, number, head_sha, *, upstream=None):
     """Atomically retire verified workflow-owned refs for a closed pull request."""
     if not SHA.fullmatch(head_sha):
@@ -789,11 +806,7 @@ def prepare(app):
         raise ValueError("Published source has no matching exact-SHA review PR")
     run("gh", "auth", "setup-git")
     remote = f"https://github.com/{repo}.git"
-    for branch, expected in ((base, upstream), (head, sha)):
-        current = run("git", "ls-remote", "--refs", remote, f"refs/heads/{branch}", cwd=app)
-        if current and current.split()[0] != expected:
-            raise ValueError(f"Review branch changed: {branch}; refusing to overwrite it")
-    run("git", "push", remote, f"{upstream}:refs/heads/{base}", f"{sha}:refs/heads/{head}", cwd=app)
+    push_review_refs(repo, app, remote, base, upstream, head, sha)
     query = urlencode({"state": "all", "head": f"{repo.split('/')[0]}:{head}", "base": base})
     pulls = pages(f"repos/{repo}/pulls?{query}")
     pull = pulls[0] if pulls else api(f"repos/{repo}/pulls", method="POST", data={
