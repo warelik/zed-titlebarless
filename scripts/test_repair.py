@@ -502,16 +502,139 @@ class NativeTaskTests(unittest.TestCase):
             release.request_repair(Path("/unused"))
 
     def test_failure_evidence_reads_the_jobs_object_and_exact_review_findings(self):
-        finding = {"user": {"login": release.BOT, "type": "Bot"}, "commit_id": HEAD,
-                   "path": "open-sse/utils/example.js", "line": 3, "body": "[P2] Restore custom call type"}
+        formal_p1 = {
+            "user": {"login": release.BOT, "type": "Bot"},
+            "commit_id": HEAD,
+            "path": "crates/agent/src/threads.rs",
+            "line": 8,
+            "body": "[P1] Formal exact-SHA finding",
+        }
+        inline_p2 = {
+            "user": {"login": release.BOT, "type": "Bot"},
+            "commit_id": SEED,
+            "original_commit_id": HEAD,
+            "path": "open-sse/utils/example.js",
+            "line": 3,
+            "body": "[P2] Restore custom call type",
+        }
+        native_state = {
+            "code_review": {
+                "commit_sha": HEAD,
+                "status": "completed",
+            }
+        }
+        native_p2 = {
+            "user": {"login": release.BOT, "type": "Bot"},
+            "performed_via_github_app": {"slug": release.APP},
+            "path": "crates/agent/src/threads.rs",
+            "line": 12,
+            "body": (
+                "[P2] Native issue finding\n"
+                f"<!-- codex-review-state:v1 {json.dumps(native_state)} -->"
+            ),
+        }
+        stale_original = {
+            **inline_p2,
+            "commit_id": SEED,
+            "original_commit_id": SEED,
+            "body": "[P1] Stale original commit finding",
+        }
+        spoofed_actor = {
+            **formal_p1,
+            "user": {"login": "somebody", "type": "User"},
+            "body": "[P1] Spoofed actor finding",
+        }
+        wrong_app = {
+            **native_p2,
+            "performed_via_github_app": {"slug": "another-app"},
+            "body": (
+                "[P1] Wrong application finding\n"
+                f"<!-- codex-review-state:v1 {json.dumps(native_state)} -->"
+            ),
+        }
         jobs = {"total_count": 1, "jobs": [{"id": 9, "conclusion": "failure",
                 "name": "Regression", "html_url": "https://github.com/example"}]}
-        with (patch.dict(os.environ, ENV), patch.object(release, "api", return_value=jobs),
-              patch.object(release, "pages", return_value=[finding]),
+
+        def api(path, **_kwargs):
+            if path == f"repos/{REPO}/actions/runs/{ENV['GITHUB_RUN_ID']}/jobs?per_page=100":
+                return jobs
+            raise AssertionError(path)
+
+        def pages(path):
+            if path == f"repos/{REPO}/pulls/1/reviews":
+                return [formal_p1, spoofed_actor]
+            if path == f"repos/{REPO}/pulls/1/comments":
+                return [inline_p2, stale_original]
+            if path == f"repos/{REPO}/issues/1/comments":
+                return [native_p2, wrong_app]
+            raise AssertionError(path)
+
+        with (patch.dict(os.environ, ENV), patch.object(release, "api", side_effect=api),
+              patch.object(release, "pages", side_effect=pages),
               patch.object(release, "run", return_value="Actual assertion failed")):
             evidence = release.failure_evidence(REPO)
+        self.assertIn("Failed job: Regression", evidence)
         self.assertIn("Actual assertion failed", evidence)
+        self.assertIn("open-sse/utils/example.js:3", evidence)
+        self.assertIn("[P1] Formal exact-SHA finding", evidence)
         self.assertIn("[P2] Restore custom call type", evidence)
+        self.assertIn("[P2] Native issue finding", evidence)
+        self.assertNotIn("[P1] Stale original commit finding", evidence)
+        self.assertNotIn("[P1] Spoofed actor finding", evidence)
+        self.assertNotIn("[P1] Wrong application finding", evidence)
+
+    def test_failure_evidence_keeps_exact_review_body_with_a_healthy_job(self):
+        native_state = {"code_review": {"commit_sha": HEAD, "status": "completed"}}
+        finding = {
+            "user": {"login": release.BOT, "type": "Bot"},
+            "performed_via_github_app": {"slug": release.APP},
+            "body": f"[P2] Healthy-job finding\n<!-- codex-review-state:v1 {json.dumps(native_state)} -->",
+        }
+        jobs = {"total_count": 1, "jobs": [{"id": 10, "conclusion": "success",
+                                             "name": "Regression", "html_url": "https://github.com/example"}]}
+        with (
+            patch.dict(os.environ, ENV),
+            patch.object(release, "api", return_value=jobs),
+            patch.object(
+                release,
+                "pages",
+                side_effect=lambda path: [finding] if path.endswith("/issues/1/comments") else [],
+            ),
+            patch.object(release, "run", side_effect=AssertionError("healthy job has no logs")),
+        ):
+            evidence = release.failure_evidence(REPO)
+        self.assertIn(f"https://github.com/{REPO}/pull/1 at {HEAD}", evidence)
+        self.assertIn("[P2] Healthy-job finding", evidence)
+        self.assertNotIn("Failed job:", evidence)
+
+    def test_blocked_policy_proposal_exports_pr_and_exact_head(self):
+        state = {**STATE, "head": HEAD, "seed": SEED}
+        policy_request = {
+            "user": {"login": REPO.split("/")[0], "type": "User"},
+            "created_at": STATE["created_at"],
+            "body": f"@codex review\n\n<!-- zed-policy:{HEAD} -->",
+        }
+
+        def pages(path):
+            if path == f"repos/{REPO}/issues/{state['number']}/comments":
+                return [policy_request]
+            raise AssertionError(path)
+
+        with (
+            patch.object(release, "repair_pull", return_value=state),
+            patch.object(release, "repair_changes", return_value=(["scripts/release.py"], True)),
+            patch.object(release, "pages", side_effect=pages),
+            patch.object(release, "policy_review", return_value=(False, "Exact-SHA review blocked")),
+            patch.object(release, "output") as output,
+            self.assertRaisesRegex(ValueError, "Exact-SHA review blocked"),
+        ):
+            release.proposal(REPO, CONFIG, Path("/unused"))
+
+        final_output = output.call_args.kwargs
+        self.assertFalse(final_output["ready"])
+        self.assertEqual(final_output["mode"], "policy")
+        self.assertEqual(final_output["pr"], state["number"])
+        self.assertEqual(final_output["sha"], state["head"])
 
     def test_p2_remains_nonblocking_but_gets_an_automatic_followup(self):
         bot = {"login": release.BOT, "type": "Bot"}

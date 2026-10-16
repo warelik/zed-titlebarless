@@ -420,6 +420,7 @@ def proposal(repo, config, directory):
         ready, reason = policy_review(repo, state, review_requests[0]["created_at"])
         output(ready=ready, mode="policy", reason=reason, repair_pr=state["number"],
                repair_head=state["head"], upstream=state["upstream"],
+               pr=state["number"], sha=state["head"],
                followup=ready and bool(minor_findings(repo, state["number"], state["head"])))
         if not ready and reason != WAITING_REVIEW:
             raise ValueError(reason)
@@ -445,7 +446,7 @@ def policy_review(repo, state, requested_at):
                        pages(f"repos/{repo}/pulls/{state['number']}/comments"),
                        pages(f"repos/{repo}/issues/{state['number']}/comments"), resolve)
 
-def minor_findings(repo, pr, sha):
+def review_records(repo, pr, sha):
     cache = {}
 
     def resolve(prefix):
@@ -460,7 +461,11 @@ def minor_findings(repo, pr, sha):
         sha, pages(f"repos/{repo}/pulls/{pr}/reviews"),
         pages(f"repos/{repo}/pulls/{pr}/comments"),
         pages(f"repos/{repo}/issues/{pr}/comments"), resolve)
-    return [finding for finding in evidence if MINOR_FINDING.search(finding.get("body") or "")]
+    return evidence
+
+def minor_findings(repo, pr, sha):
+    return [finding for finding in review_records(repo, pr, sha)
+            if MINOR_FINDING.search(finding.get("body") or "")]
 
 def close_recovered_repair(repo, config, *, state=None, has_minor=False, expected_head=None):
     if has_minor or api(f"repos/{repo}/commits/downstream")["sha"] != config:
@@ -523,9 +528,10 @@ def failure_evidence(repo):
                 lines.append(f"Log unavailable; inspect {job['html_url']}")
     pr, sha = os.environ.get("CANDIDATE_PR", ""), os.environ.get("CANDIDATE_SHA", "")
     if pr.isdigit() and SHA.fullmatch(sha):
-        for finding in pages(f"repos/{repo}/pulls/{pr}/comments"):
-            if actor(finding) and finding.get("commit_id") == sha:
-                lines.append(f"\n{finding.get('path')}:{finding.get('line')}\n{finding.get('body')}")
+        lines.append(f"\nExact review: https://github.com/{repo}/pull/{pr} at {sha}")
+        for finding in review_records(repo, pr, sha):
+            if finding.get("body"):
+                lines.append(f"\n{finding.get('path')}:{finding.get('line')}\n{finding['body']}")
     return "\n".join(lines)[-24000:]
 
 def check_policy(candidate):
