@@ -4,9 +4,7 @@
 
 Zed without the title bar: titlebarless, title-less, no titlebar, hidden or hide title bar, compact title bar — the title bar contents live in the status bar instead.
 
-I work from a single MacBook — small display, many desktops, yabai. Cursor looks clean and compact but is slow; Zed is fast but spends space on rows that are mostly empty. This fork closes that gap with small, opt-in changes. It starts with the title bar; whatever comes next depends on what turns out to waste space.
-
-Everything is offered upstream first. The fork carries only what upstream hasn't taken (yet).
+This fork keeps a small set of requested layout changes and fixes for terminal persistence and remote reconnection. It follows upstream rather than developing a separate editor.
 
 **Download:** [latest release](https://github.com/warelik/zed-titlebarless/releases/latest)
 
@@ -81,8 +79,6 @@ Every setting below defaults to stock Zed. None of them has a Settings UI entry:
 
 See [Known limitations](RELEASE_NOTES.md#known-limitations).
 
-Other changes will come later, if upstream rejects them.
-
 ## Install
 
 1. Open `Zed.dmg` and drag Zed to Applications. It replaces the official Zed.app: same bundle id, same settings and data.
@@ -96,7 +92,9 @@ Other changes will come later, if upstream rejects them.
 
 - [`patches/`](patches) holds the changes on top of upstream stable: one patch per commit of the fork, twelve in total, written against `v1.24.2` and applied in file name order.
 - [`.github/workflows/release.yml`](.github/workflows/release.yml) checks for a new upstream stable release every 6 hours, applies the patches, builds the DMG on a GitHub macOS runner and publishes a release with `latest.json` for auto-update and `zed-<version>-titlebarless-debug-symbols-macos-aarch64.tar.gz` containing debug symbols.
-- If a patch stops applying, the workflow fails. Regenerate the patches against the new tag and push.
+- Maintain two branches: `main` mirrors upstream without downstream changes; `downstream` holds the patches, workflow, and documentation and remains the default branch for scheduled maintenance.
+- If a patch stops applying or a required check fails, agents repair the cause, review the new exact revision, and repeat the affected checks before release.
+- [AGENTS.md](AGENTS.md) defines the maintenance, verification, recovery, and cleanup contract. The presence of a workflow does not by itself prove that the entire cycle is automated.
 
 ### Debug symbols
 
