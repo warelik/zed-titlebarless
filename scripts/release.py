@@ -74,12 +74,36 @@ def actor(record, *, completion=False):
             and (isinstance(app, dict) and app.get("slug") == APP
                  if completion or app is not None else True))
 
+def review_evidence(sha, reviews, inline, comments, resolve):
+    exact = [r for r in reviews if actor(r) and r.get("commit_id") == sha]
+    # GitHub reanchors commit_id; original_commit_id identifies the reviewed source.
+    evidence = exact + [
+        r for r in inline if actor(r)
+        and (r.get("original_commit_id") or r.get("commit_id")) == sha
+    ]
+    for comment in comments:
+        if not actor(comment, completion=True):
+            continue
+        relevant = False
+        for encoded in NATIVE_STATE.findall(comment.get("body") or ""):
+            try:
+                state = json.loads(encoded)["code_review"]
+            except (ValueError, KeyError, TypeError):
+                continue
+            if isinstance(state, dict) and state.get("commit_sha") == sha:
+                relevant = True
+        matches = REVIEWED.findall(comment.get("body") or "")
+        if len(matches) == 1 and resolve(matches[0]) == sha:
+            relevant = True
+        if relevant:
+            evidence.append(comment)
+    return exact, evidence
+
 def review_gate(sha, requested_at, reviews, inline, comments, resolve):
     """A reaction or a comment without an exact reviewed commit is not a review."""
     if not SHA.fullmatch(sha) or not requested_at:
         return False, "No exact-SHA review request"
-    exact = [r for r in reviews if actor(r) and r.get("commit_id") == sha]
-    evidence = exact + [r for r in inline if actor(r) and r.get("commit_id") == sha]
+    exact, evidence = review_evidence(sha, reviews, inline, comments, resolve)
     completions = []
     clean_states = []
     for comment in comments:
@@ -94,8 +118,6 @@ def review_gate(sha, requested_at, reviews, inline, comments, resolve):
                 continue
             if not isinstance(state, dict):
                 continue
-            if state.get("commit_sha") == sha:
-                evidence.append(comment)
             if (len(states) == 1 and state.get("commit_sha") == sha and state.get("status") == "completed"
                     and state.get("has_any_findings") is False
                     and state.get("has_unresolved_findings") is False
@@ -103,7 +125,6 @@ def review_gate(sha, requested_at, reviews, inline, comments, resolve):
                 clean_states.append(comment)
         matches = REVIEWED.findall(comment.get("body") or "")
         if len(matches) == 1 and resolve(matches[0]) == sha:
-            evidence.append(comment)
             if timestamp >= requested_at:
                 completions.append(comment)
     if any(SEVERITY.search(r.get("body") or "") for r in evidence):
@@ -424,9 +445,21 @@ def policy_review(repo, state, requested_at):
                        pages(f"repos/{repo}/issues/{state['number']}/comments"), resolve)
 
 def minor_findings(repo, pr, sha):
-    return [finding for finding in pages(f"repos/{repo}/pulls/{pr}/comments")
-            if actor(finding) and finding.get("commit_id") == sha
-            and MINOR_FINDING.search(finding.get("body") or "")]
+    cache = {}
+
+    def resolve(prefix):
+        if prefix not in cache:
+            try:
+                cache[prefix] = api(f"repos/{repo}/commits/{prefix}")["sha"]
+            except subprocess.CalledProcessError:
+                cache[prefix] = None
+        return cache[prefix]
+
+    _, evidence = review_evidence(
+        sha, pages(f"repos/{repo}/pulls/{pr}/reviews"),
+        pages(f"repos/{repo}/pulls/{pr}/comments"),
+        pages(f"repos/{repo}/issues/{pr}/comments"), resolve)
+    return [finding for finding in evidence if MINOR_FINDING.search(finding.get("body") or "")]
 
 def close_recovered_repair(repo, config, *, state=None, has_minor=False, expected_head=None):
     if has_minor or api(f"repos/{repo}/commits/downstream")["sha"] != config:

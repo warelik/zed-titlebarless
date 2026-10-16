@@ -514,12 +514,59 @@ class NativeTaskTests(unittest.TestCase):
         self.assertIn("[P2] Restore custom call type", evidence)
 
     def test_p2_remains_nonblocking_but_gets_an_automatic_followup(self):
-        finding = {"user": {"login": release.BOT, "type": "Bot"}, "commit_id": HEAD, "body": "[P2] Bug"}
-        with patch.object(release, "pages", return_value=[
-            finding, {**finding, "commit_id": CONFIG},
-            {**finding, "user": {"login": "somebody", "type": "User"}},
-        ]):
-            self.assertEqual(release.minor_findings(REPO, 1, HEAD), [finding])
+        bot = {"login": release.BOT, "type": "Bot"}
+        app = {"slug": release.APP}
+        formal = {"id": 11, "user": bot, "commit_id": HEAD, "body": "[P2] Formal bug"}
+        inline = {"id": 12, "user": bot, "commit_id": CONFIG,
+                  "original_commit_id": HEAD, "path": "src/example.rs", "line": 7,
+                  "body": "[P3] Inline bug"}
+        native = {"id": 13, "user": bot, "performed_via_github_app": app,
+                  "body": f"[P2] Native bug\n**Reviewed commit:** `{HEAD[:10]}`"}
+        duplicate = {"id": 14, "user": bot, "performed_via_github_app": app,
+                     "body": ("[P2] One result\n"
+                              f"<!-- codex-review-state:v1 {json.dumps({'code_review': {'commit_sha': HEAD}})} -->\n"
+                              f"**Reviewed commit:** `{HEAD}`")}
+        excluded_reviews = [
+            {**formal, "id": 20, "commit_id": CONFIG},
+            {**formal, "id": 21, "user": {"login": "human", "type": "User"}},
+            {**formal, "id": 22, "user": {"login": release.BOT, "type": "User"}},
+        ]
+        excluded_inline = [
+            {**inline, "id": 23, "original_commit_id": CONFIG},
+            {**inline, "id": 24, "user": {"login": "human", "type": "User"}},
+        ]
+        excluded_comments = [
+            {**native, "id": 25, "performed_via_github_app": None},
+            {**native, "id": 26, "performed_via_github_app": {"slug": "other"}},
+            {**native, "id": 27, "user": {"login": "human", "type": "User"}},
+            {**native, "id": 28, "body": "[P2] unrelated"},
+            {**native, "id": 29, "body": "[P2] **Reviewed commit:** `malformed`"},
+            {**native, "id": 30, "body": (f"[P2] **Reviewed commit:** `{HEAD}`\n"
+                                             f"**Reviewed commit:** `{CONFIG}`")},
+            {**native, "id": 31, "body": f"[P2] **Reviewed commit:** `{CONFIG[:10]}`"},
+        ]
+
+        def pages(path):
+            if path.endswith("/reviews"):
+                return [formal, *excluded_reviews]
+            if path.endswith("/pulls/1/comments"):
+                return [inline, *excluded_inline]
+            if path.endswith("/issues/1/comments"):
+                return [native, duplicate, *excluded_comments]
+            raise AssertionError(path)
+
+        def api(path, **_kwargs):
+            prefix = path.rsplit("/", 1)[-1]
+            if prefix in {HEAD, HEAD[:10]}:
+                return {"sha": HEAD}
+            if prefix == CONFIG[:10]:
+                return {"sha": CONFIG}
+            raise subprocess.CalledProcessError(1, path)
+
+        with (patch.object(release, "pages", side_effect=pages),
+              patch.object(release, "api", side_effect=api)):
+            self.assertEqual(release.minor_findings(REPO, 1, HEAD),
+                             [formal, inline, native, duplicate])
         self.assertIsNone(release.SEVERITY.search("[P2] Bug"))
 
     def test_policy_configuration_changes_do_not_reset_the_repair_budget(self):

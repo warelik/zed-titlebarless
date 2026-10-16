@@ -100,6 +100,20 @@ class ReviewPolicyTests(unittest.TestCase):
         finding = {"user": BOT, "commit_id": HEAD, "body": "**[P1]** Broken request"}
         self.assertFalse(self.gate(inline=[finding], comments=[native_state(), receipt()]))
 
+    def test_reanchored_old_inline_p1_does_not_block_current_review(self):
+        finding = {"user": BOT, "commit_id": HEAD, "original_commit_id": OTHER,
+                   "body": "**[P1]** Broken old request"}
+        self.assertTrue(self.gate(inline=[finding], comments=[receipt()]))
+
+    def test_original_current_inline_p1_blocks_even_when_display_is_reanchored(self):
+        finding = {"user": BOT, "commit_id": OTHER, "original_commit_id": HEAD,
+                   "body": "**[P1]** Broken current request"}
+        self.assertFalse(self.gate(inline=[finding], comments=[receipt()]))
+
+    def test_legacy_inline_p1_without_original_commit_still_blocks(self):
+        finding = {"user": BOT, "commit_id": HEAD, "body": "**[P1]** Broken request"}
+        self.assertFalse(self.gate(inline=[finding], comments=[receipt()]))
+
     def test_p0_p1_in_structured_summary_cannot_bypass_severity_gate(self):
         for severity in ("P0", "P1"):
             with self.subTest(severity=severity):
