@@ -669,33 +669,27 @@ class WorkflowContractTests(unittest.TestCase):
 
 
 class ReviewRefPublicationTests(unittest.TestCase):
-    def test_patched_head_exposes_upstream_commit_before_base_creation(self):
+    def test_exact_base_and_patched_head_are_published_atomically(self):
         calls = []
         repo, upstream, head = "maintainer/zed-fork", "b" * 40, "a" * 40
 
-        def api(path, *, method="GET", data=None, token=None):
-            calls.append(("api", path, method, data))
-            return {"ref": f"refs/heads/review-base/{upstream}",
-                    "object": {"sha": upstream}}
-
         def run(*args, cwd=None, env=None):
-            calls.append(("run", args))
+            calls.append(args)
             if args[:3] == ("git", "ls-remote", "--refs"):
                 return ""
             return ""
 
-        with (patch.object(release, "api", side_effect=api),
-              patch.object(release, "run", side_effect=run)):
+        with patch.object(release, "run", side_effect=run):
             release.push_review_refs(
                 repo, Path("app"), "https://example.invalid/repo.git",
                 f"review-base/{upstream}", upstream, "review/candidate", head)
 
-        push = next(index for index, call in enumerate(calls)
-                    if call[0] == "run" and call[1][:2] == ("git", "push"))
-        creation = next(index for index, call in enumerate(calls) if call[0] == "api")
-        self.assertLess(push, creation)
-        self.assertEqual(calls[push][1][-1], f"{head}:refs/heads/review/candidate")
-        self.assertNotIn(upstream, calls[push][1][-1])
+        push = next(call for call in calls if call[:2] == ("git", "push"))
+        self.assertEqual(push, (
+            "git", "push", "--atomic", "https://example.invalid/repo.git",
+            f"{upstream}:refs/heads/review-base/{upstream}",
+            f"{head}:refs/heads/review/candidate",
+        ))
 
 
 class RepairPromptContractTests(unittest.TestCase):
