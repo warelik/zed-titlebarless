@@ -386,9 +386,43 @@ def repair_comments(repo, number):
             if c.get("user", {}).get("login") == repo.split("/")[0]
             and c.get("user", {}).get("type") == "User"]
 
+def adoption_time(repo, pull, config):
+    """Return the latest authenticated, source-bound successful adoption time."""
+    if pull.get("state") != "closed":
+        return None
+    latest = None
+    for comment in pages(f"repos/{repo}/issues/{pull['number']}/comments"):
+        user = comment.get("user") or {}
+        if not ((user.get("login") == repo.split("/")[0] and user.get("type") == "User")
+                or (user.get("login") == "github-actions[bot]" and user.get("type") == "Bot")):
+            continue
+        match = re.fullmatch(
+            r"Verified repair adopted as `([0-9a-f]{40})`; source-context files were not merged\.",
+            (comment.get("body") or "").strip())
+        if not match:
+            continue
+        try:
+            created = datetime.fromisoformat(str(comment.get("created_at", "")).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if created.tzinfo is None:
+            continue
+        adopted = match[1]
+        try:
+            comparison = api(f"repos/{repo}/compare/{adopted}...{config}")
+        except subprocess.CalledProcessError:
+            continue
+        if (comparison.get("status") in {"ahead", "identical"}
+                and (comparison.get("merge_base_commit") or {}).get("sha") == adopted):
+            created = created.astimezone(timezone.utc)
+            latest = max(latest, created) if latest else created
+    return latest
+
+
 def repair_requests(repo, state):
     records = [c for c in repair_comments(repo, state["number"])
                if FIX_REQUEST.search(c.get("body") or "")]
+    historical, cutoff = [], None
     if state.get("cycle"):
         for pull in pages(f"repos/{repo}/pulls?state=all&base=downstream"):
             if (pull["number"] == state["number"]
@@ -398,8 +432,21 @@ def repair_requests(repo, state):
                 continue
             markers = REPAIR_STATE.findall(pull.get("body") or "")
             if len(markers) == 1 and json.loads(markers[0]).get("cycle") == state["cycle"]:
-                records.extend(c for c in repair_comments(repo, pull["number"])
-                               if FIX_REQUEST.search(c.get("body") or ""))
+                adopted = adoption_time(repo, pull, state["config"])
+                if adopted is not None:
+                    cutoff = max(cutoff, adopted) if cutoff else adopted
+                historical.extend(c for c in repair_comments(repo, pull["number"])
+                                  if FIX_REQUEST.search(c.get("body") or ""))
+    for comment in historical:
+        if cutoff is not None:
+            try:
+                requested = datetime.fromisoformat(
+                    str(comment.get("created_at", "")).replace("Z", "+00:00"))
+            except ValueError:
+                requested = None
+            if requested is not None and requested.tzinfo is not None and requested <= cutoff:
+                continue
+        records.append(comment)
     return sorted(records, key=lambda c: c["created_at"])
 
 def proposal(repo, config, directory):
