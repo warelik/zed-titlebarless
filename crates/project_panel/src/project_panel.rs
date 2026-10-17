@@ -6104,8 +6104,11 @@ impl ProjectPanel {
                     .into_owned()
             });
 
+        let row_height = workspace::panel_row_height(cx);
+
         div()
             .id(id.clone())
+            .when_some(row_height, |this, height| this.h(height))
             .relative()
             .group(GROUP_NAME)
             .when_some(
@@ -6482,6 +6485,7 @@ impl ProjectPanel {
             )
             .child(
                 ListItem::new(id)
+                    .when(row_height.is_some(), |this| this.height(relative(1.)))
                     .indent_level(depth)
                     .indent_step_size(px(settings.indent_size))
                     .spacing(match settings.entry_spacing {
@@ -7300,6 +7304,7 @@ impl ProjectPanel {
         // already checked if non empty above
         let last_item_index = sticky_parents.len() - 1;
         let marked_selections: Arc<[SelectedEntry]> = Arc::from(self.marked_entries.clone());
+        let shadow_enabled = ThemeSettings::get_global(cx).shadows.project_panel;
         sticky_parents
             .iter()
             .enumerate()
@@ -7328,7 +7333,7 @@ impl ProjectPanel {
                     window,
                     cx,
                 )
-                .when(index == last_item_index, |this| {
+                .when(index == last_item_index && shadow_enabled, |this| {
                     let shadow_color_top = hsla(0.0, 0.0, 0.0, 0.1);
                     let shadow_color_bottom = hsla(0.0, 0.0, 0.0, 0.);
                     let sticky_shadow = div()
