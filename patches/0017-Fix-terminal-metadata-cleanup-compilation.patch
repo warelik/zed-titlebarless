@@ -1,0 +1,22 @@
+From 3d4ce956e11008318a8ecd216ec6847335ad4b18 Mon Sep 17 00:00:00 2001
+From: Codex Repair <codex-repair@example.invalid>
+Date: Sat, 17 Oct 2026 01:54:49 +0000
+Subject: [PATCH] Fix terminal metadata cleanup compilation
+
+---
+ crates/agent_ui/src/agent_panel.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index e2c812b..c2b198a 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -161,7 +161,7 @@ fn kill_persistent_terminal_session_and_delete_metadata(
+             if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+                 store.update(cx, |store, cx| store.delete(terminal_id, cx));
+             }
+-        })?;
++        });
+         anyhow::Ok(())
+     })
+     .detach_and_log_err(cx);
