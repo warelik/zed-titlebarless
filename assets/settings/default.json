@@ -12,6 +12,9 @@
     "dark": "One Dark",
   },
   "icon_theme": "Zed (Default)",
+  // Whether rows in the project, git and outline panels take the tab bar height,
+  // so they line up with the tab bar and the sticky rows of the project panel.
+  "panel_rows_tab_height": false,
   // The name of a base set of key bindings to use.
   // This setting can take the following values:
   //
@@ -69,6 +72,13 @@
   "ui_font_weight": 400,
   // The default font size for text in the UI
   "ui_font_size": 16,
+  // Toggles for individual UI shadows.
+  "shadows": {
+    // Whether to paint the shadow under the sticky folder rows of the project panel.
+    "project_panel": true,
+    // Whether to paint the shadow around the minimap.
+    "minimap": true,
+  },
   // The font family for agent responses in the agent panel. Falls back to the UI font family if unset.
   "agent_ui_font_family": null,
   // The default font size for agent responses in the agent panel. Falls back to the UI font size if unset.
@@ -600,6 +610,8 @@
     "agent_review": true,
     // Whether to show code action buttons in the editor toolbar.
     "code_actions": false,
+    // Whether to shrink the pane toolbar to the height of the tab bar.
+    "compact": false,
   },
   // Whether to allow windows to tab together based on the user's tabbing preference (macOS only).
   "use_system_window_tabs": false,
@@ -611,6 +623,9 @@
   //    on notched displays, the area around the notch.
   //     "simple"
   "fullscreen_mode": "native",
+  // Whether to hide the title bar and show its contents in the status bar instead.
+  // macOS only: other platforms draw their window controls in the title bar, so it stays.
+  "title_bar_to_status_bar": false,
   // Titlebar related settings
   "title_bar": {
     // Whether to show git status indicators on the branch icon in the titlebar.
@@ -1186,6 +1201,11 @@
       "default_width": 300,
       // Automatically open the Threads Sidebar when opening a folder in an existing window.
       "auto_open": true,
+      // Show each thread on a single line at the height of the tab bar, with its details on hover.
+      "compact": false,
+      // Show the projects, threads and terminals as two rows of tabs at the top of the agent panel
+      // instead of in the sidebar.
+      "in_agent_panel": false,
     },
     // Default fixed width when the agent panel is docked to the left or right and
     // `flexible` is false.
@@ -1474,6 +1494,10 @@
     // When enabled, pinned tabs appear in a top row and unpinned tabs in a bottom row.
     // When disabled, all tabs appear in a single row (default behavior).
     "show_pinned_tabs_in_separate_row": false,
+    // Whether to render pinned tabs as compact borderless chips.
+    "pinned_tab_chips": false,
+    // Whether to render unpinned tabs as compact borderless chips.
+    "unpinned_tab_chips": false,
   },
   // Settings related to the editor's tabs
   "tabs": {
@@ -1513,6 +1537,10 @@
     // 3. Mark files with errors and warnings:
     //    "all"
     "show_diagnostics": "off",
+    // Minimum width of a tab in pixels; null keeps tabs as wide as their title.
+    "min_width": null,
+    // Maximum width of a tab in pixels; longer titles are truncated in the middle.
+    "max_width": null,
   },
   // Settings related to preview tabs.
   "preview_tabs": {
