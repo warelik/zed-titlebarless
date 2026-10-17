@@ -5186,7 +5186,31 @@ impl Sidebar {
             return;
         }
 
+        self.finish_close_terminal(metadata, workspace, window, cx);
+    }
+
+    fn finish_close_terminal(
+        &mut self,
+        metadata: &TerminalThreadMetadata,
+        workspace: &ThreadEntryWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let terminal_id = metadata.terminal_id;
+        let project = match workspace {
+            ThreadEntryWorkspace::Open(workspace) => Some(workspace.read(cx).project().clone()),
+            ThreadEntryWorkspace::Closed { .. } => {
+                self.find_project_for_remote_connection(metadata.remote_connection.as_ref(), cx)
+            }
+        };
+        let Some(project) = project else {
+            log::warn!(
+                "no open project available to kill persistent terminal session for terminal {terminal_id}"
+            );
+            self.show_terminal_close_error(terminal_id, cx);
+            return;
+        };
+
         let is_active = self
             .active_entry
             .as_ref()
@@ -5212,7 +5236,6 @@ impl Sidebar {
             Some(terminal_id),
             cx,
         );
-
         let workspace_to_remove = self.linked_worktree_workspace_to_remove(
             &terminal_folder_paths,
             metadata.remote_connection.as_ref(),
@@ -5221,38 +5244,128 @@ impl Sidebar {
             &roots_to_archive,
             cx,
         );
-
         let mut workspaces_to_remove: Vec<Entity<Workspace>> =
             workspace_to_remove.into_iter().collect();
-        let close_item_tasks = self.close_items_for_archived_worktrees(
-            &roots_to_archive,
-            &mut workspaces_to_remove,
-            window,
-            cx,
-        );
-
+        let mixed_workspaces =
+            self.plan_archived_worktree_cleanup(&roots_to_archive, &mut workspaces_to_remove, cx);
         let terminal_workspace_removed = matches!(
             workspace,
             ThreadEntryWorkspace::Open(workspace) if workspaces_to_remove.contains(workspace)
         );
         let metadata = metadata.clone();
         let workspace = workspace.clone();
+        let roots_to_archive = roots_to_archive.clone();
 
+        if workspaces_to_remove.is_empty() {
+            cx.spawn_in(window, async move |this, cx| {
+                let kill = project.update(cx, |project, cx| {
+                    project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
+                });
+                if let Err(error) = kill.await {
+                    log::error!(
+                        "failed to kill persistent terminal session for terminal {terminal_id}: {error:#}"
+                    );
+                    this.update(cx, |this, cx| this.show_terminal_close_error(terminal_id, cx))?;
+                    return anyhow::Ok(());
+                }
+                this.update_in(cx, |this, window, cx| {
+                    this.complete_terminal_close(
+                        &metadata,
+                        &workspace,
+                        is_active,
+                        neighbor.as_ref(),
+                        terminal_workspace_removed,
+                        roots_to_archive,
+                        mixed_workspaces,
+                        window,
+                        cx,
+                    );
+                })?;
+                anyhow::Ok(())
+            })
+            .detach_and_log_err(cx);
+            return;
+        }
+
+        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
+            return;
+        };
+        let sidebar = cx.weak_entity();
+        let remove_task = multi_workspace.update(cx, |multi_workspace, cx| {
+            multi_workspace.remove_with_pre_remove(
+                workspaces_to_remove,
+                RemovalIntent::KeepProject,
+                async move |cx| {
+                    let kill = project.update(cx, |project, cx| {
+                        project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
+                    });
+                    if let Err(error) = kill.await {
+                        log::error!(
+                            "failed to kill persistent terminal session for terminal {terminal_id}: {error:#}"
+                        );
+                        sidebar.update(cx, |this, cx| {
+                            this.show_terminal_close_error(terminal_id, cx)
+                        })?;
+                        return Err(error);
+                    }
+                    Ok(())
+                },
+                window,
+                cx,
+            )
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if !remove_task.await? {
+                return anyhow::Ok(());
+            }
+            this.update_in(cx, |this, window, cx| {
+                this.complete_terminal_close(
+                    &metadata,
+                    &workspace,
+                    is_active,
+                    neighbor.as_ref(),
+                    terminal_workspace_removed,
+                    roots_to_archive,
+                    mixed_workspaces,
+                    window,
+                    cx,
+                );
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn complete_terminal_close(
+        &mut self,
+        metadata: &TerminalThreadMetadata,
+        workspace: &ThreadEntryWorkspace,
+        is_active: bool,
+        neighbor: Option<&ActivatableEntry>,
+        terminal_workspace_removed: bool,
+        roots_to_archive: Vec<thread_worktree_archive::RootPlan>,
+        mixed_workspaces: Vec<(Entity<Workspace>, Vec<WorktreeId>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if terminal_workspace_removed {
+            self.delete_empty_drafts_for_archive_paths(
+                metadata.folder_paths(),
+                metadata.remote_connection.as_ref(),
+                cx,
+            );
+        }
+        let close_item_tasks =
+            self.start_archived_worktree_item_cleanup(mixed_workspaces, window, cx);
+        let metadata = metadata.clone();
+        let workspace = workspace.clone();
+        let neighbor = neighbor.cloned();
         self.remove_workspaces_then(
-            workspaces_to_remove,
+            Vec::new(),
             close_item_tasks,
             window,
             cx,
             move |this, window, cx| {
-                if terminal_workspace_removed {
-                    this.delete_empty_drafts_for_archive_paths(
-                        metadata.folder_paths(),
-                        metadata.remote_connection.as_ref(),
-                        cx,
-                    );
-                }
-                // If the terminal's workspace has already been removed, don't
-                // synthesize a fallback draft in the detached AgentPanel.
                 this.close_terminal_entry(
                     &metadata,
                     &workspace,
@@ -5286,6 +5399,26 @@ impl Sidebar {
         .map(|workspace| workspace.read(cx).project().clone())
     }
 
+    fn show_terminal_close_error(&self, terminal_id: TerminalId, cx: &mut App) {
+        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
+            return;
+        };
+        let workspace = multi_workspace.read(cx).workspace().clone();
+        workspace.update(cx, |workspace, cx| {
+            struct CloseTerminalErrorToast;
+            workspace.show_toast(
+                Toast::new(
+                    NotificationId::unique::<CloseTerminalErrorToast>(),
+                    format!(
+                        "Failed to stop terminal session {terminal_id}; close it again to retry"
+                    ),
+                )
+                .autohide(),
+                cx,
+            );
+        });
+    }
+
     fn close_terminal_entry(
         &mut self,
         metadata: &TerminalThreadMetadata,
@@ -5307,38 +5440,16 @@ impl Sidebar {
                     closed_via_panel = true;
                     panel.update(cx, |panel, cx| {
                         if defer_draft_activation || !activate_panel_draft {
-                            panel.close_terminal_without_activating_draft(terminal_id, window, cx);
+                            panel.close_terminal_after_session_kill(terminal_id, false, window, cx);
                         } else {
-                            panel.close_terminal(terminal_id, window, cx);
+                            panel.close_terminal_after_session_kill(terminal_id, true, window, cx);
                         }
                     });
                 }
             });
         }
-        if !closed_via_panel {
-            let session_name = terminal_id.session_name();
-            let project = match workspace {
-                ThreadEntryWorkspace::Open(workspace) => Some(workspace.read(cx).project().clone()),
-                ThreadEntryWorkspace::Closed { .. } => {
-                    self.find_project_for_remote_connection(metadata.remote_connection.as_ref(), cx)
-                }
-            };
-            if let Some(project) = project {
-                project
-                    .update(cx, |project, cx| {
-                        project.kill_persistent_terminal_session(session_name, cx)
-                    })
-                    .detach_and_log_err(cx);
-            } else {
-                log::warn!(
-                    "no open project available to kill persistent terminal session for terminal {terminal_id}"
-                );
-            }
-            if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
-                store.update(cx, |store, cx| {
-                    store.delete(terminal_id, cx);
-                });
-            }
+        if !closed_via_panel && let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+            store.update(cx, |store, cx| store.delete(terminal_id, cx));
         }
 
         self.start_detached_archive_worktree_task(roots_to_archive, cx);
@@ -5407,13 +5518,12 @@ impl Sidebar {
         .detach_and_log_err(cx);
     }
 
-    fn close_items_for_archived_worktrees(
+    fn plan_archived_worktree_cleanup(
         &self,
         roots_to_archive: &[thread_worktree_archive::RootPlan],
         workspaces_to_remove: &mut Vec<Entity<Workspace>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<Task<anyhow::Result<()>>> {
+        cx: &App,
+    ) -> Vec<(Entity<Workspace>, Vec<WorktreeId>)> {
         if roots_to_archive.is_empty() {
             return Vec::new();
         }
@@ -5457,6 +5567,15 @@ impl Sidebar {
             }
         }
 
+        mixed_workspaces
+    }
+
+    fn start_archived_worktree_item_cleanup(
+        &self,
+        mixed_workspaces: Vec<(Entity<Workspace>, Vec<WorktreeId>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<Task<anyhow::Result<()>>> {
         let mut close_item_tasks = Vec::new();
         for (workspace, archived_worktree_ids) in &mixed_workspaces {
             let panes: Vec<_> = workspace.read(cx).panes().to_vec();
@@ -5614,12 +5733,10 @@ impl Sidebar {
         // dropped without destroying the user's workspace layout.
         let mut workspaces_to_remove: Vec<Entity<Workspace>> =
             workspace_to_remove.into_iter().collect();
-        let close_item_tasks = self.close_items_for_archived_worktrees(
-            &roots_to_archive,
-            &mut workspaces_to_remove,
-            window,
-            cx,
-        );
+        let mixed_workspaces =
+            self.plan_archived_worktree_cleanup(&roots_to_archive, &mut workspaces_to_remove, cx);
+        let close_item_tasks =
+            self.start_archived_worktree_item_cleanup(mixed_workspaces, window, cx);
 
         let removed_workspace = !workspaces_to_remove.is_empty();
         let session_id = session_id.clone();
@@ -7062,12 +7179,10 @@ impl Sidebar {
         });
         let mut workspaces_to_remove: Vec<Entity<Workspace>> =
             workspace_to_remove.into_iter().collect();
-        let close_item_tasks = self.close_items_for_archived_worktrees(
-            &roots_to_archive,
-            &mut workspaces_to_remove,
-            window,
-            cx,
-        );
+        let mixed_workspaces =
+            self.plan_archived_worktree_cleanup(&roots_to_archive, &mut workspaces_to_remove, cx);
+        let close_item_tasks =
+            self.start_archived_worktree_item_cleanup(mixed_workspaces, window, cx);
 
         let draft_workspace_removed = matches!(
             workspace,

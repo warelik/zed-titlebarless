@@ -25,6 +25,7 @@ use std::{
     sync::Arc,
 };
 use util::{path_list::PathList, rel_path::rel_path};
+use workspace::item::test::TestItem;
 
 fn close_terminal_from_sidebar(
     sidebar: &Entity<Sidebar>,
@@ -2898,6 +2899,14 @@ async fn test_closing_terminal_on_archived_linked_worktree_removes_workspace(
         })
         .expect("test terminal should be inserted");
     cx.run_until_parked();
+    let fake = worktree_project.update(cx, |project, _| project.enable_fake_shpool(&[]));
+    let session_name = terminal_id.session_name();
+    fake.add_session(&session_name);
+    fake.state.lock().kill_error = Some("connection lost".into());
+    let dirty_item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
+    worktree_workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_item_to_active_pane(Box::new(dirty_item.clone()), None, true, window, cx);
+    });
 
     assert_eq!(
         multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace
@@ -2914,6 +2923,76 @@ async fn test_closing_terminal_on_archived_linked_worktree_removes_workspace(
         "expected linked worktree terminal before closing, got: {entries_before:?}"
     );
 
+    close_terminal_from_sidebar(&sidebar, terminal_id, cx);
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt());
+    assert!(
+        fake.kill_history().is_empty(),
+        "session kill must not start while close consent is pending"
+    );
+    assert!(fake.has_session(&session_name));
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(
+        fake.kill_history().is_empty(),
+        "cancelling close consent must not kill the persistent session"
+    );
+    assert!(fake.has_session(&session_name));
+    cx.update(|_, cx| {
+        assert!(
+            TerminalThreadMetadataStore::global(cx)
+                .read(cx)
+                .entry(terminal_id)
+                .is_some(),
+            "cancelled close must retain terminal metadata"
+        );
+    });
+    assert_eq!(
+        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace
+            .workspaces()
+            .count()),
+        2,
+        "cancelled close must retain the linked worktree workspace"
+    );
+    assert!(
+        fs.is_dir(Path::new("/worktrees/project/feature-a/project"))
+            .await,
+        "cancelled close must retain the linked worktree root"
+    );
+
+    dirty_item.update(cx, |item, cx| {
+        item.is_dirty = false;
+        cx.notify();
+    });
+    close_terminal_from_sidebar(&sidebar, terminal_id, cx);
+    for _ in 0..4 {
+        cx.run_until_parked();
+    }
+
+    assert!(fake.has_session(&session_name));
+    cx.update(|_, cx| {
+        assert!(
+            TerminalThreadMetadataStore::global(cx)
+                .read(cx)
+                .entry(terminal_id)
+                .is_some(),
+            "failed kill must retain terminal metadata"
+        );
+    });
+    assert_eq!(
+        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace
+            .workspaces()
+            .count()),
+        2,
+        "failed kill must retain the linked worktree workspace"
+    );
+    assert!(
+        fs.is_dir(Path::new("/worktrees/project/feature-a/project"))
+            .await,
+        "failed kill must not run the nonempty worktree archive plan"
+    );
+
+    fake.state.lock().kill_error = None;
     close_terminal_from_sidebar(&sidebar, terminal_id, cx);
     for _ in 0..4 {
         cx.run_until_parked();
@@ -4684,6 +4763,182 @@ async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes
                 .entry(terminal_id)
                 .is_none(),
             "metadata must be deleted after close on closed workspace"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_failed_close_terminal_entry_retains_metadata_until_session_kill_succeeds(
+    cx: &mut TestAppContext,
+) {
+    let main_project = init_test_project_with_agent_panel("/main-project", cx).await;
+    let fake = main_project.update(cx, |p, _| p.enable_fake_shpool(&[]));
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(main_project.clone(), window, cx));
+    let (sidebar, _panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+
+    let terminal_id = TerminalId::new();
+    let session_name = terminal_id.session_name();
+    fake.add_session(&session_name);
+    fake.state.lock().kill_error = Some("connection lost".into());
+
+    let main_paths = PathList::new(&[PathBuf::from("/main-project")]);
+    let closed_worktree_paths = PathList::new(&[PathBuf::from("/worktrees/feature-a")]);
+    let metadata = TerminalThreadMetadata {
+        terminal_id,
+        title: "Closed Project Terminal".into(),
+        custom_title: None,
+        created_at: chrono::Utc::now(),
+        worktree_paths: WorktreePaths::from_path_lists(
+            main_paths.clone(),
+            closed_worktree_paths.clone(),
+        )
+        .unwrap(),
+        remote_connection: None,
+        working_directory: None,
+    };
+    cx.update(|_, cx| {
+        TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.save(metadata.clone(), cx);
+        });
+    });
+    // Add an active thread on the closed worktree to prevent archive auto-load,
+    // ensuring close_terminal exercises the Closed workspace branch directly.
+    save_thread_metadata_with_main_paths(
+        "blocking-thread",
+        "Blocking Thread",
+        closed_worktree_paths,
+        main_paths,
+        chrono::Utc::now(),
+        cx,
+    );
+
+    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+    cx.run_until_parked();
+
+    let (terminal_metadata, terminal_workspace) = sidebar.read_with(cx, |sidebar, _cx| {
+        sidebar
+            .contents
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                ListEntry::Terminal(terminal) if terminal.metadata.terminal_id == terminal_id => {
+                    Some((terminal.metadata.clone(), terminal.workspace.clone()))
+                }
+                _ => None,
+            })
+            .expect("closed terminal should be visible in sidebar")
+    });
+
+    assert!(matches!(
+        terminal_workspace,
+        ThreadEntryWorkspace::Closed { .. }
+    ));
+
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.close_terminal(&terminal_metadata, &terminal_workspace, window, cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        fake.kill_history(),
+        vec![session_name.clone()],
+        "closing terminal on closed workspace must try to kill its persistent session"
+    );
+    assert!(fake.has_session(&session_name));
+    cx.update(|_, cx| {
+        assert!(
+            TerminalThreadMetadataStore::global(cx)
+                .read(cx)
+                .entry(terminal_id)
+                .is_some(),
+            "failed kill must retain metadata so closing can be retried"
+        );
+    });
+
+    fake.state.lock().kill_error = None;
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.close_terminal(&terminal_metadata, &terminal_workspace, window, cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        fake.kill_history(),
+        vec![session_name.clone(), session_name.clone()],
+        "retrying close must retry the persistent session kill"
+    );
+    assert!(!fake.has_session(&session_name));
+    cx.update(|_, cx| {
+        assert!(
+            TerminalThreadMetadataStore::global(cx)
+                .read(cx)
+                .entry(terminal_id)
+                .is_none(),
+            "metadata must be deleted only after the session kill succeeds"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_close_terminal_entry_without_matching_project_retains_metadata(
+    cx: &mut TestAppContext,
+) {
+    let main_project = init_test_project_with_agent_panel("/main-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(main_project, window, cx));
+    let (sidebar, _panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+
+    let terminal_id = TerminalId::new();
+    let main_paths = PathList::new(&[PathBuf::from("/remote-main")]);
+    let closed_paths = PathList::new(&[PathBuf::from("/remote-worktree")]);
+    let remote_connection =
+        remote::RemoteConnectionOptions::Mock(remote::MockConnectionOptions { id: 99 });
+    let metadata = TerminalThreadMetadata {
+        terminal_id,
+        title: "Unavailable Remote Terminal".into(),
+        custom_title: None,
+        created_at: chrono::Utc::now(),
+        worktree_paths: WorktreePaths::from_path_lists(main_paths.clone(), closed_paths.clone())
+            .unwrap(),
+        remote_connection: Some(remote_connection.clone()),
+        working_directory: None,
+    };
+    cx.update(|_, cx| {
+        TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.save(metadata.clone(), cx);
+        });
+    });
+    save_thread_metadata_with_main_paths(
+        "remote-blocking-thread",
+        "Remote Blocking Thread",
+        closed_paths,
+        main_paths.clone(),
+        chrono::Utc::now(),
+        cx,
+    );
+    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+    cx.run_until_parked();
+
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.close_terminal(
+            &metadata,
+            &ThreadEntryWorkspace::Closed {
+                folder_paths: metadata.folder_paths().clone(),
+                project_group_key: ProjectGroupKey::new(Some(remote_connection), main_paths),
+            },
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    cx.update(|_, cx| {
+        assert!(
+            TerminalThreadMetadataStore::global(cx)
+                .read(cx)
+                .entry(terminal_id)
+                .is_some(),
+            "missing project must refuse close and retain terminal metadata"
         );
     });
 }
