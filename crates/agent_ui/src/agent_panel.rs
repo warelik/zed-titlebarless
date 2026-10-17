@@ -147,6 +147,26 @@ fn reconnect_if_remote_disconnected(project: Entity<Project>, cx: &mut App) {
     }
 }
 
+fn kill_persistent_terminal_session_and_delete_metadata(
+    project: Entity<Project>,
+    terminal_id: TerminalId,
+    cx: &mut App,
+) {
+    let kill = project.update(cx, |project, cx| {
+        project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
+    });
+    cx.spawn(async move |cx| {
+        kill.await?;
+        cx.update(|cx| {
+            if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+                store.update(cx, |store, cx| store.delete(terminal_id, cx));
+            }
+        })?;
+        anyhow::Ok(())
+    })
+    .detach_and_log_err(cx);
+}
+
 fn is_known_terminal_agent_command(command: &str) -> bool {
     KNOWN_TERMINAL_AGENT_COMMANDS.contains(&command)
 }
@@ -2179,11 +2199,11 @@ impl AgentPanel {
                     this.update_in(cx, |this, window, cx| {
                         this.pending_terminal_spawns.remove(&terminal_id);
                         if this.closed_terminal_spawns.remove(&terminal_id) {
-                            if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
-                                store.update(cx, |store, cx| {
-                                    store.delete(terminal_id, cx);
-                                });
-                            }
+                            kill_persistent_terminal_session_and_delete_metadata(
+                                this.project.clone(),
+                                terminal_id,
+                                cx,
+                            );
                             return;
                         }
                         log::error!("failed to spawn agent panel terminal: {error:#}");
@@ -2276,15 +2296,16 @@ impl AgentPanel {
             this.update_in(cx, |this, window, cx| {
                 this.pending_terminal_spawns.remove(&terminal_id);
                 if this.closed_terminal_spawns.remove(&terminal_id) {
-                    this.project
-                        .update(cx, |project, cx| {
-                            project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
-                        })
-                        .detach_and_log_err(cx);
-                    if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
-                        store.update(cx, |store, cx| {
-                            store.delete(terminal_id, cx);
-                        });
+                    if session == PersistentSession::Unavailable {
+                        if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+                            store.update(cx, |store, cx| store.delete(terminal_id, cx));
+                        }
+                    } else {
+                        kill_persistent_terminal_session_and_delete_metadata(
+                            this.project.clone(),
+                            terminal_id,
+                            cx,
+                        );
                     }
                     return;
                 }
@@ -2303,7 +2324,7 @@ impl AgentPanel {
                     custom_title,
                     initial_title,
                     created_at,
-                    true,
+                    session != PersistentSession::Unavailable,
                     select_mode,
                     focus,
                     source,
@@ -2614,26 +2635,28 @@ impl AgentPanel {
             .get(&terminal_id)
             .map_or(true, |terminal| terminal.persistent);
 
-        if self.pending_terminal_spawns.remove(&terminal_id) {
+        let spawn_is_pending = self.pending_terminal_spawns.remove(&terminal_id)
+            || self.closed_terminal_spawns.contains(&terminal_id);
+        if spawn_is_pending {
             self.closed_terminal_spawns.insert(terminal_id);
         }
         self.pending_reconnect_restart.remove(&terminal_id);
         self.dismiss_terminal_notifications(terminal_id, cx);
         // Closing is the only way a terminal thread goes away, so its session
         // goes with it, also when the thread was not spawned in this run.
-        if should_kill_persistent_session {
-            self.project
-                .update(cx, |project, cx| {
-                    project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
-                })
-                .detach_and_log_err(cx);
+        if spawn_is_pending {
+            // The spawn outcome determines whether there is a persistent session
+            // to kill. Its completion resolves this tombstone.
+        } else if should_kill_persistent_session {
+            kill_persistent_terminal_session_and_delete_metadata(
+                self.project.clone(),
+                terminal_id,
+                cx,
+            );
+        } else if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+            store.update(cx, |store, cx| store.delete(terminal_id, cx));
         }
         self.terminals.remove(&terminal_id);
-        if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
-            store.update(cx, |store, cx| {
-                store.delete(terminal_id, cx);
-            });
-        }
         if was_active {
             self.base_view = BaseView::Uninitialized;
             self.refresh_base_view_subscriptions(window, cx);
@@ -16308,6 +16331,80 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_failed_session_kill_retains_metadata_for_retry(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            TerminalThreadMetadataStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            cx.new(|cx| AgentPanel::new(workspace, window, cx))
+        });
+
+        let terminal_id = TerminalId::new();
+        let metadata = TerminalThreadMetadata {
+            terminal_id,
+            title: "Unloaded".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from(
+                "/project",
+            )])),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx)
+                .update(cx, |store, cx| store.save(metadata, cx));
+        });
+        fake.add_session(terminal_id.session_name());
+        fake.state.lock().kill_error = Some("connection lost".into());
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.close_terminal(terminal_id, window, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert!(
+                TerminalThreadMetadataStore::global(cx)
+                    .read(cx)
+                    .entry(terminal_id)
+                    .is_some(),
+                "a failed kill must retain metadata so closing can be retried"
+            );
+        });
+        assert!(fake.has_session(&terminal_id.session_name()));
+
+        fake.state.lock().kill_error = None;
+        panel.update_in(cx, |panel, window, cx| {
+            panel.close_terminal(terminal_id, window, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert!(
+                TerminalThreadMetadataStore::global(cx)
+                    .read(cx)
+                    .entry(terminal_id)
+                    .is_none(),
+                "metadata must be deleted after a successful retry"
+            );
+        });
+        assert!(!fake.has_session(&terminal_id.session_name()));
+    }
+
+    #[gpui::test]
     async fn test_process_exited_keeps_thread_and_enter_restart(cx: &mut TestAppContext) {
         init_test(cx);
         cx.update(|cx| {
@@ -17058,23 +17155,30 @@ mod tests {
         });
         assert!(panel.read_with(&cx, |p, _| p.is_terminal_spawn_pending(terminal_id)));
 
-        // User clicks × while spawn is in flight:
-        panel.update_in(&mut cx, |panel, window, cx| {
-            panel.close_terminal(terminal_id, window, cx);
-        });
+        // Repeated close requests while the spawn is in flight must keep using
+        // the existing closed-spawn marker as the pending state.
+        for _ in 0..2 {
+            panel.update_in(&mut cx, |panel, window, cx| {
+                panel.close_terminal(terminal_id, window, cx);
+            });
+            cx.run_until_parked();
 
-        // Close-time kill occurred
-        assert_eq!(
-            fake.kill_history().len(),
-            1,
-            "close_terminal must kill session at close time"
-        );
+            assert!(
+                fake.kill_history().is_empty(),
+                "a pending spawn must not be killed before its outcome is known"
+            );
+            panel.read_with(&cx, |panel, cx| {
+                assert!(panel.closed_terminal_spawns.contains(&terminal_id));
+                assert!(
+                    TerminalThreadMetadataStore::global(cx)
+                        .read(cx)
+                        .entry(terminal_id)
+                        .is_some()
+                );
+            });
+        }
 
-        // Re-seed metadata in store to verify tombstone gate-path deletion
-        cx.update(|_, cx| {
-            TerminalThreadMetadataStore::global(cx)
-                .update(cx, |s, cx| s.save(metadata.clone(), cx));
-        });
+        fake.state.lock().kill_error = Some("connection lost".to_string());
 
         // Release the gate so spawn_terminal finishes and lands on tombstone
         release_tx
@@ -17091,21 +17195,78 @@ mod tests {
                 TerminalThreadMetadataStore::global(cx)
                     .read(cx)
                     .entry(terminal_id)
-                    .is_none(),
-                "tombstone must delete metadata"
+                    .is_some(),
+                "a failed post-spawn kill must retain metadata"
             );
         });
 
-        // Gate-path kill must have destroyed the session created by create_persistent_terminal_shell
-        assert!(
-            !fake.has_session(&terminal_id.session_name()),
-            "session created by in-flight attach must be killed on tombstone landing"
-        );
-        assert_eq!(
-            fake.kill_history().len(),
-            2,
-            "kill must be invoked twice: at close and when in-flight spawn lands"
-        );
+        assert!(fake.has_session(&terminal_id.session_name()));
+        assert_eq!(fake.kill_history(), vec![terminal_id.session_name()]);
+
+        fake.state.lock().kill_error = None;
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.close_terminal(terminal_id, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(!fake.has_session(&terminal_id.session_name()));
+        cx.update(|_, cx| {
+            assert!(
+                TerminalThreadMetadataStore::global(cx)
+                    .read(cx)
+                    .entry(terminal_id)
+                    .is_none()
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_close_loaded_unmanaged_terminal_does_not_kill_shpool(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        cx.update(|_, cx| TerminalThreadMetadataStore::init_global(cx));
+        let project = panel.read_with(&cx, |panel, _| panel.project.clone());
+        let fake = project.update(&mut cx, |project, _| project.enable_fake_shpool(&[]));
+        fake.state.lock().available = false;
+
+        let terminal_id = TerminalId::new();
+        let metadata = TerminalThreadMetadata {
+            terminal_id,
+            title: "Unmanaged".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::default(),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx)
+                .update(cx, |store, cx| store.save(metadata.clone(), cx));
+        });
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.restore_terminal(
+                metadata,
+                true,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(panel.read_with(&cx, |panel, _| panel.has_terminal(terminal_id)));
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.close_terminal(terminal_id, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(fake.kill_history().is_empty());
+        cx.update(|_, cx| {
+            assert!(
+                TerminalThreadMetadataStore::global(cx)
+                    .read(cx)
+                    .entry(terminal_id)
+                    .is_none()
+            );
+        });
     }
 
     #[gpui::test]
@@ -17135,6 +17296,8 @@ mod tests {
             remote_connection: None,
             working_directory: None,
         };
+        fake_shpool.add_session(terminal_id.session_name());
+        fake_shpool.state.lock().kill_error = Some("injected kill failure".to_string());
         cx.update(|_, cx| {
             TerminalThreadMetadataStore::global(cx)
                 .update(cx, |store, cx| store.save(metadata.clone(), cx));
@@ -17163,7 +17326,7 @@ mod tests {
         assert!(panel.read_with(&cx, |panel, _cx| {
             panel.closed_terminal_spawns.contains(&terminal_id)
         }));
-        assert_eq!(fake_shpool.kill_history(), vec![terminal_id.session_name()]);
+        assert!(fake_shpool.kill_history().is_empty());
 
         cx.update(|_, cx| {
             TerminalThreadMetadataStore::global(cx)
@@ -17181,7 +17344,7 @@ mod tests {
             assert!(!panel.closed_terminal_spawns.contains(&terminal_id));
             let store = TerminalThreadMetadataStore::global(cx);
             let store = store.read(cx);
-            assert!(store.entry(terminal_id).is_none());
+            assert!(store.entry(terminal_id).is_some());
             assert!(!store.has_deleted_terminal_id(terminal_id));
         });
         assert_eq!(
@@ -17190,9 +17353,26 @@ mod tests {
             "a closed spawn error should not add an error notification"
         );
         assert!(fake_shpool.attach_history().is_empty());
-        assert!(fake_shpool.sessions().is_empty());
+        assert!(fake_shpool.has_session(&terminal_id.session_name()));
         assert_eq!(fake_shpool.kill_history(), vec![terminal_id.session_name()]);
 
+        fake_shpool.state.lock().probe_error = None;
+        fake_shpool.state.lock().kill_error = None;
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.close_terminal(terminal_id, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(!fake_shpool.has_session(&terminal_id.session_name()));
+        cx.update(|_, cx| {
+            assert!(
+                TerminalThreadMetadataStore::global(cx)
+                    .read(cx)
+                    .entry(terminal_id)
+                    .is_none()
+            )
+        });
+
+        fake_shpool.state.lock().probe_error = Some("injected shpool probe failure".to_string());
         let open_terminal_id = TerminalId::new();
         let open_terminal_metadata = TerminalThreadMetadata {
             terminal_id: open_terminal_id,

@@ -70,6 +70,8 @@ pub struct FakeShpoolState {
     pub attach_history: Vec<String>,
     pub attach_args_history: Vec<(String, Vec<String>)>,
     pub kill_history: Vec<String>,
+    pub kill_error: Option<String>,
+    pub kill_delay: Option<Duration>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -635,8 +637,28 @@ impl Project {
     ) -> Task<Result<()>> {
         #[cfg(any(test, feature = "test-support"))]
         if let Some(fake) = &self.fake_shpool {
-            let mut state = fake.state.lock();
-            state.kill_history.push(session_name.clone());
+            let state = fake.state.clone();
+            let delay = {
+                let mut state = state.lock();
+                state.kill_history.push(session_name.clone());
+                state.kill_delay
+            };
+            if let Some(delay) = delay {
+                let executor = cx.background_executor().clone();
+                return cx.background_spawn(async move {
+                    executor.timer(delay).await;
+                    let mut state = state.lock();
+                    if let Some(error) = state.kill_error.clone() {
+                        return Err(anyhow::anyhow!(error));
+                    }
+                    state.sessions.remove(&session_name);
+                    Ok(())
+                });
+            }
+            let mut state = state.lock();
+            if let Some(error) = state.kill_error.clone() {
+                return Task::ready(Err(anyhow::anyhow!(error)));
+            }
             state.sessions.remove(&session_name);
             return Task::ready(Ok(()));
         }
