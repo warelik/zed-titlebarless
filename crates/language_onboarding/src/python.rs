@@ -2,7 +2,7 @@ use db::kvp::Dismissable;
 use editor::Editor;
 use gpui::{Context, EventEmitter, Subscription};
 use ui::{Banner, FluentBuilder as _, prelude::*};
-use workspace::{ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace};
+use workspace::{Toolbar, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace};
 
 pub struct BasedPyrightBanner {
     dismissed: bool,
@@ -66,6 +66,13 @@ impl Render for BasedPyrightBanner {
                                     cx.listener(|this, _, _, cx| {
                                         this.dismissed = true;
                                         Self::set_dismissed(true, cx);
+                                        // A dismissed banner renders nothing but keeps its
+                                        // location, which would leave an empty compact row.
+                                        if Toolbar::compact_row_height(cx).is_some() {
+                                            cx.emit(ToolbarItemEvent::ChangeLocation(
+                                                ToolbarItemLocation::Hidden,
+                                            ));
+                                        }
                                         cx.notify();
                                     }),
                                 ))
