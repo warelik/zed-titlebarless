@@ -718,6 +718,120 @@ async fn test_remove_fallback_via_find_or_create_skips_removed_workspaces(cx: &m
 }
 
 #[gpui::test]
+async fn test_remove_with_pre_remove_runs_guard_after_consent_before_detach(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "file.txt": "" })).await;
+    let project = Project::test(fs, ["/root".as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace =
+        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+    let dirty_item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_item_to_active_pane(Box::new(dirty_item.clone()), None, true, window, cx);
+    });
+
+    let guard_calls = Rc::new(Cell::new(0));
+    let remove_task = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        let guard_calls = guard_calls.clone();
+        multi_workspace.remove_with_pre_remove(
+            [workspace.clone()],
+            RemovalIntent::CloseProject,
+            async move |_| {
+                guard_calls.set(guard_calls.get() + 1);
+                Ok(true)
+            },
+            window,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt());
+    assert_eq!(guard_calls.get(), 0, "guard must wait for close consent");
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(!remove_task.await.expect("cancelled removal should succeed"));
+    assert_eq!(
+        guard_calls.get(),
+        0,
+        "cancelled consent must skip the guard"
+    );
+    assert!(multi_workspace.read_with(cx, |multi_workspace, _| {
+        multi_workspace
+            .workspaces()
+            .any(|candidate| candidate == &workspace)
+    }));
+
+    dirty_item.update(cx, |item, cx| {
+        item.is_dirty = false;
+        cx.notify();
+    });
+    let remove_task = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.remove_with_pre_remove(
+            [workspace.clone()],
+            RemovalIntent::CloseProject,
+            async |_| anyhow::bail!("guard refused removal"),
+            window,
+            cx,
+        )
+    });
+    assert!(remove_task.await.is_err());
+    assert!(multi_workspace.read_with(cx, |multi_workspace, _| {
+        multi_workspace
+            .workspaces()
+            .any(|candidate| candidate == &workspace)
+    }));
+
+    let remove_task = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.remove_with_pre_remove(
+            [workspace.clone()],
+            RemovalIntent::CloseProject,
+            async |_| Ok(false),
+            window,
+            cx,
+        )
+    });
+    assert!(!remove_task.await.expect("refused removal should succeed"));
+    assert!(multi_workspace.read_with(cx, |multi_workspace, _| {
+        multi_workspace
+            .workspaces()
+            .any(|candidate| candidate == &workspace)
+    }));
+
+    let guard_calls = Rc::new(Cell::new(0));
+    let weak_multi_workspace = multi_workspace.downgrade();
+    let guarded_workspace = workspace.clone();
+    let remove_task = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        let guard_calls = guard_calls.clone();
+        multi_workspace.remove_with_pre_remove(
+            [workspace.clone()],
+            RemovalIntent::CloseProject,
+            async move |cx| {
+                assert!(weak_multi_workspace.read_with(cx, |multi_workspace, _| {
+                    multi_workspace
+                        .workspaces()
+                        .any(|candidate| candidate == &guarded_workspace)
+                })?);
+                guard_calls.set(guard_calls.get() + 1);
+                Ok(true)
+            },
+            window,
+            cx,
+        )
+    });
+    assert!(remove_task.await.expect("guarded removal should succeed"));
+    assert_eq!(guard_calls.get(), 1);
+    assert!(!multi_workspace.read_with(cx, |multi_workspace, _| {
+        multi_workspace
+            .workspaces()
+            .any(|candidate| candidate == &workspace)
+    }));
+}
+
+#[gpui::test]
 async fn test_remove_keeping_the_project_does_not_switch_projects(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
@@ -1730,4 +1844,136 @@ async fn test_nearest_retained_workspace_skips_disconnected_workspace(cx: &mut T
             "a disconnected workspace should not be selected as a fallback"
         );
     });
+}
+
+#[gpui::test]
+async fn test_remove_with_pre_remove_keeps_edits_made_during_guard(cx: &mut TestAppContext) {
+    use crate::item::ItemEvent;
+    use futures::channel::oneshot;
+
+    init_test(cx);
+    cx.update(|cx| crate::register_serializable_item::<TestItem>(cx));
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/guard-root", json!({ "file.txt": "" }))
+        .await;
+    let project = Project::test(fs, ["/guard-root".as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace =
+        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+    let original_item = cx.new(|cx| {
+        TestItem::new(cx)
+            .with_dirty(true)
+            .with_serialize(|| Some(gpui::Task::ready(Ok(()))))
+    });
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_item_to_active_pane(Box::new(original_item.clone()), None, true, window, cx);
+    });
+
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let remove_task = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.remove_with_pre_remove(
+            [workspace.clone()],
+            RemovalIntent::CloseProject,
+            async move |_| {
+                let _ = started_tx.send(());
+                let _ = release_rx.await;
+                Ok(true)
+            },
+            window,
+            cx,
+        )
+    });
+    started_rx.await.expect("guard should start after consent");
+    assert!(original_item.read_with(cx, |item, _| item.is_dirty));
+
+    original_item.update(cx, |item, cx| {
+        item.state = "edited while terminal stopped".into();
+        item.is_dirty = true;
+        cx.emit(ItemEvent::Edit);
+    });
+    release_tx.send(()).expect("guard should still be waiting");
+
+    assert!(
+        !remove_task
+            .await
+            .expect("changed removal should be refused")
+    );
+    assert!(multi_workspace.read_with(cx, |multi_workspace, _| {
+        multi_workspace
+            .workspaces()
+            .any(|candidate| candidate == &workspace)
+    }));
+    original_item.read_with(cx, |item, _| {
+        assert_eq!(item.state, "edited while terminal stopped");
+        assert!(item.is_dirty);
+    });
+    workspace.read_with(cx, |workspace, cx| {
+        let item_ids = workspace
+            .panes()
+            .iter()
+            .flat_map(|pane| pane.read(cx).items().map(|item| item.item_id()))
+            .collect::<Vec<_>>();
+        assert!(item_ids.contains(&original_item.entity_id()));
+    });
+    assert!(
+        !cx.has_pending_prompt(),
+        "changed state must not prompt again"
+    );
+
+    // Exercise membership changes independently so the edit event above cannot
+    // mask a failure to notice a newly opened item.
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/membership-root", json!({ "file.txt": "" }))
+        .await;
+    let project = Project::test(fs, ["/membership-root".as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace =
+        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+    let original_item = cx.new(|cx| TestItem::new(cx));
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_item_to_active_pane(Box::new(original_item.clone()), None, true, window, cx);
+    });
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let remove_task = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.remove_with_pre_remove(
+            [workspace.clone()],
+            RemovalIntent::CloseProject,
+            async move |_| {
+                let _ = started_tx.send(());
+                let _ = release_rx.await;
+                Ok(true)
+            },
+            window,
+            cx,
+        )
+    });
+    started_rx.await.expect("guard should start after consent");
+    let new_item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_item_to_active_pane(Box::new(new_item.clone()), None, true, window, cx);
+    });
+    release_tx.send(()).expect("guard should still be waiting");
+    assert!(!remove_task.await.expect("new item should refuse removal"));
+    assert!(multi_workspace.read_with(cx, |multi_workspace, _| {
+        multi_workspace
+            .workspaces()
+            .any(|candidate| candidate == &workspace)
+    }));
+    workspace.read_with(cx, |workspace, cx| {
+        let item_ids = workspace
+            .panes()
+            .iter()
+            .flat_map(|pane| pane.read(cx).items().map(|item| item.item_id()))
+            .collect::<Vec<_>>();
+        assert!(item_ids.contains(&original_item.entity_id()));
+        assert!(item_ids.contains(&new_item.entity_id()));
+    });
+    assert!(
+        !cx.has_pending_prompt(),
+        "membership change must not prompt again"
+    );
 }
