@@ -169,6 +169,11 @@ pub struct WorkspaceSettingsContent {
     ///
     /// Default: client
     pub window_decorations: Option<WindowDecorations>,
+    /// Whether to hide the title bar and show its contents in the status bar instead (macOS only).
+    /// Other platforms draw their window controls in the title bar, so they ignore this setting.
+    ///
+    /// Default: false
+    pub title_bar_to_status_bar: Option<bool>,
     /// Whether the focused panel follows the mouse location
     /// Default: false
     pub focus_follows_mouse: Option<FocusFollowsMouse>,
@@ -202,6 +207,15 @@ pub struct ItemSettingsContent {
     ///
     /// Default: false
     pub show_close_button: Option<ShowCloseButton>,
+    /// Minimum width of a tab in pixels. `null` keeps tabs as wide as their title.
+    ///
+    /// Default: null
+    pub min_width: Option<crate::PixelSetting>,
+    /// Maximum width of a tab in pixels. Longer titles are truncated in the middle.
+    /// `null` keeps tabs as wide as their title.
+    ///
+    /// Default: null
+    pub max_width: Option<crate::PixelSetting>,
 }
 
 #[with_fallible_options]
@@ -551,6 +565,14 @@ pub struct TabBarSettingsContent {
     ///
     /// Default: false
     pub show_pinned_tabs_in_separate_row: Option<bool>,
+    /// Whether to render pinned tabs as compact borderless chips.
+    ///
+    /// Default: false
+    pub pinned_tab_chips: Option<bool>,
+    /// Whether to render unpinned tabs as compact borderless chips.
+    ///
+    /// Default: false
+    pub unpinned_tab_chips: Option<bool>,
 }
 
 #[with_fallible_options]
