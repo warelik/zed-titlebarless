@@ -1,16 +1,18 @@
-From fc83ea5aae9a039ab5ffadf15ddd15b3e1213c2e Mon Sep 17 00:00:00 2001
+From b53fa153824b3f152d453c3412c8206243edc448 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex-repair@example.invalid>
 Date: Sat, 17 Oct 2026 02:28:03 +0000
 Subject: [PATCH] Retain sidebar terminal metadata until session kill succeeds
 
 ---
  crates/agent_ui/src/agent_panel.rs            |  19 +-
- crates/sidebar/src/sidebar.rs                 | 326 +++++++++---
- crates/sidebar/src/sidebar_tests.rs           | 502 ++++++++++++++++++
- crates/workspace/src/multi_workspace.rs       |  15 +
- crates/workspace/src/multi_workspace_tests.rs | 114 ++++
+ crates/sidebar/src/sidebar.rs                 | 437 +++++++++++--
+ crates/sidebar/src/sidebar_tests.rs           | 581 ++++++++++++++++++
+ crates/workspace/src/item.rs                  |  53 +-
+ crates/workspace/src/multi_workspace.rs       |  64 +-
+ crates/workspace/src/multi_workspace_tests.rs | 190 ++++++
  crates/workspace/src/pane.rs                  |   4 +
- 6 files changed, 912 insertions(+), 68 deletions(-)
+ crates/workspace/src/workspace.rs             |   4 +-
+ 8 files changed, 1276 insertions(+), 76 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
 index 2e60981..8caca50 100644
@@ -70,24 +72,34 @@ index 2e60981..8caca50 100644
                  self.project.clone(),
                  terminal_id,
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 2bca37b..e8f3062 100644
+index 2bca37b..dadad98 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
-@@ -67,9 +67,10 @@ use util::ResultExt as _;
+@@ -49,6 +49,7 @@ use remote::{RemoteConnectionOptions, same_remote_connection_identity};
+ 
+ use serde::{Deserialize, Serialize};
+ use settings::{Settings as _, SettingsStore};
++use std::cell::{Cell, RefCell};
+ use std::cmp::Ordering;
+ use std::collections::{HashMap, HashSet};
+ use std::mem;
+@@ -66,10 +67,11 @@ use unicode_segmentation::UnicodeSegmentation as _;
+ use util::ResultExt as _;
  use util::path_list::PathList;
  use workspace::{
-     CloseWindow, FocusWorkspaceSidebar, MoveProjectDown, MoveProjectUp, MultiWorkspace,
+-    CloseWindow, FocusWorkspaceSidebar, MoveProjectDown, MoveProjectUp, MultiWorkspace,
 -    MultiWorkspaceEvent, NextProject, NextThread, Open, OpenMode, PreviousProject, PreviousThread,
 -    ProjectGroupKey, RemovalIntent, SaveIntent, Sidebar as WorkspaceSidebar, SidebarSide, Toast,
 -    ToggleWorkspaceSidebar, Workspace, notifications::NotificationId, sidebar_side_context_menu,
-+    MultiWorkspaceEvent, NextProject, NextThread, Open, OpenMode, Pane, PreviousProject,
-+    PreviousThread, ProjectGroupKey, RemovalIntent, SaveIntent, Sidebar as WorkspaceSidebar,
-+    SidebarSide, Toast, ToggleWorkspaceSidebar, Workspace, notifications::NotificationId,
-+    sidebar_side_context_menu,
++    CloseWindow, FocusWorkspaceSidebar, ItemCloseGuard, MoveProjectDown, MoveProjectUp,
++    MultiWorkspace, MultiWorkspaceEvent, NextProject, NextThread, Open, OpenMode, Pane,
++    PreviousProject, PreviousThread, ProjectGroupKey, RemovalIntent, SaveIntent,
++    Sidebar as WorkspaceSidebar, SidebarSide, Toast, ToggleWorkspaceSidebar, Workspace,
++    notifications::NotificationId, sidebar_side_context_menu,
  };
  
  use git_ui_core::worktree_service::{RemoteBranchName, worktree_create_targets};
-@@ -146,6 +147,8 @@ enum ArchiveWorktreeOutcome {
+@@ -146,6 +148,8 @@ enum ArchiveWorktreeOutcome {
      Cancelled,
  }
  
@@ -96,7 +108,7 @@ index 2bca37b..e8f3062 100644
  #[derive(Clone, Debug)]
  enum ActiveEntry {
      Thread {
-@@ -5186,7 +5189,31 @@ impl Sidebar {
+@@ -5186,7 +5190,31 @@ impl Sidebar {
              return;
          }
  
@@ -128,7 +140,7 @@ index 2bca37b..e8f3062 100644
          let is_active = self
              .active_entry
              .as_ref()
-@@ -5212,7 +5239,6 @@ impl Sidebar {
+@@ -5212,7 +5240,6 @@ impl Sidebar {
              Some(terminal_id),
              cx,
          );
@@ -136,7 +148,7 @@ index 2bca37b..e8f3062 100644
          let workspace_to_remove = self.linked_worktree_workspace_to_remove(
              &terminal_folder_paths,
              metadata.remote_connection.as_ref(),
-@@ -5221,38 +5247,138 @@ impl Sidebar {
+@@ -5221,38 +5248,182 @@ impl Sidebar {
              &roots_to_archive,
              cx,
          );
@@ -160,12 +172,15 @@ index 2bca37b..e8f3062 100644
          let metadata = metadata.clone();
          let workspace = workspace.clone();
 +        let roots_to_archive = roots_to_archive.clone();
-+
+ 
 +        if workspaces_to_remove.is_empty() {
 +            cx.spawn_in(window, async move |this, cx| {
 +                if !Self::consent_to_close_archived_worktree_items(&mixed_item_targets, cx).await? {
 +                    return anyhow::Ok(());
 +                }
++                let (guard, item_ids) = cx.update(|window, cx| {
++                    Self::guard_archived_worktree_items(&mixed_item_targets, window, cx)
++                })?;
 +                let kill = project.update(cx, |project, cx| {
 +                    project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
 +                });
@@ -177,14 +192,19 @@ index 2bca37b..e8f3062 100644
 +                    return anyhow::Ok(());
 +                }
 +                this.update_in(cx, |this, window, cx| {
++                    let cleanup_is_safe = !guard.changed(cx)
++                        && Self::archived_worktree_item_membership_matches(&item_ids, cx);
++                    if !cleanup_is_safe {
++                        this.show_terminal_workspace_edited_after_stop(cx);
++                    }
 +                    this.complete_terminal_close(
 +                        &metadata,
 +                        &workspace,
 +                        is_active,
 +                        neighbor.as_ref(),
-+                        terminal_workspace_removed,
-+                        roots_to_archive,
-+                        mixed_item_targets,
++                        cleanup_is_safe && terminal_workspace_removed,
++                        if cleanup_is_safe { roots_to_archive } else { Vec::new() },
++                        if cleanup_is_safe { mixed_item_targets } else { Vec::new() },
 +                        window,
 +                        cx,
 +                    );
@@ -194,12 +214,16 @@ index 2bca37b..e8f3062 100644
 +            .detach_and_log_err(cx);
 +            return;
 +        }
- 
++
 +        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
 +            return;
 +        };
 +        let sidebar = cx.weak_entity();
 +        let consent_targets = mixed_item_targets.clone();
++        let kill_succeeded = Rc::new(Cell::new(false));
++        let close_guard = Rc::new(RefCell::new(None));
++        let callback_kill_succeeded = kill_succeeded.clone();
++        let callback_close_guard = close_guard.clone();
 +        let remove_task = multi_workspace.update(cx, |multi_workspace, cx| {
 +            multi_workspace.remove_with_pre_remove(
 +                workspaces_to_remove,
@@ -210,6 +234,10 @@ index 2bca37b..e8f3062 100644
 +                    {
 +                        return Ok(false);
 +                    }
++                    let guard = cx.update(|window, cx| {
++                        Self::guard_archived_worktree_items(&consent_targets, window, cx)
++                    })?;
++                    *callback_close_guard.borrow_mut() = Some(guard);
 +                    let kill = project.update(cx, |project, cx| {
 +                        project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
 +                    });
@@ -222,25 +250,53 @@ index 2bca37b..e8f3062 100644
 +                        })?;
 +                        return Err(error);
 +                    }
-+                    Ok(true)
++                    callback_kill_succeeded.set(true);
++                    let cleanup_is_safe = cx.update(|_, cx| {
++                        let guard = callback_close_guard.borrow();
++                        let Some((guard, item_ids)) = guard.as_ref() else { return true };
++                        !guard.changed(cx)
++                            && Self::archived_worktree_item_membership_matches(item_ids, cx)
++                    })?;
++                    Ok(cleanup_is_safe)
 +                },
 +                window,
 +                cx,
 +            )
 +        });
 +        cx.spawn_in(window, async move |this, cx| {
-+            if !remove_task.await? {
++            let removed = remove_task.await?;
++            if !removed && !kill_succeeded.get() {
 +                return anyhow::Ok(());
 +            }
 +            this.update_in(cx, |this, window, cx| {
++                let mixed_cleanup_is_safe =
++                    close_guard
++                        .borrow()
++                        .as_ref()
++                        .is_none_or(|(guard, item_ids)| {
++                            !guard.changed(cx)
++                                && Self::archived_worktree_item_membership_matches(item_ids, cx)
++                        });
++                let cleanup_is_safe = removed && mixed_cleanup_is_safe;
++                if !cleanup_is_safe {
++                    this.show_terminal_workspace_edited_after_stop(cx);
++                }
 +                this.complete_terminal_close(
 +                    &metadata,
 +                    &workspace,
 +                    is_active,
 +                    neighbor.as_ref(),
-+                    terminal_workspace_removed,
-+                    roots_to_archive,
-+                    mixed_item_targets,
++                    cleanup_is_safe && terminal_workspace_removed,
++                    if cleanup_is_safe {
++                        roots_to_archive
++                    } else {
++                        Vec::new()
++                    },
++                    if cleanup_is_safe {
++                        mixed_item_targets
++                    } else {
++                        Vec::new()
++                    },
 +                    window,
 +                    cx,
 +                );
@@ -293,10 +349,28 @@ index 2bca37b..e8f3062 100644
                  this.close_terminal_entry(
                      &metadata,
                      &workspace,
-@@ -5286,6 +5412,26 @@ impl Sidebar {
+@@ -5286,6 +5457,44 @@ impl Sidebar {
          .map(|workspace| workspace.read(cx).project().clone())
      }
  
++    fn show_terminal_workspace_edited_after_stop(&self, cx: &mut App) {
++        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
++            return;
++        };
++        let workspace = multi_workspace.read(cx).workspace().clone();
++        workspace.update(cx, |workspace, cx| {
++            struct TerminalWorkspaceEditedToast;
++            workspace.show_toast(
++                Toast::new(
++                    NotificationId::unique::<TerminalWorkspaceEditedToast>(),
++                    "Terminal session stopped; edited workspaces remain open",
++                )
++                .autohide(),
++                cx,
++            );
++        });
++    }
++
 +    fn show_terminal_close_error(&self, terminal_id: TerminalId, cx: &mut App) {
 +        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
 +            return;
@@ -320,7 +394,7 @@ index 2bca37b..e8f3062 100644
      fn close_terminal_entry(
          &mut self,
          metadata: &TerminalThreadMetadata,
-@@ -5307,38 +5453,16 @@ impl Sidebar {
+@@ -5307,38 +5516,16 @@ impl Sidebar {
                      closed_via_panel = true;
                      panel.update(cx, |panel, cx| {
                          if defer_draft_activation || !activate_panel_draft {
@@ -363,7 +437,7 @@ index 2bca37b..e8f3062 100644
          }
  
          self.start_detached_archive_worktree_task(roots_to_archive, cx);
-@@ -5407,13 +5531,12 @@ impl Sidebar {
+@@ -5407,13 +5594,12 @@ impl Sidebar {
          .detach_and_log_err(cx);
      }
  
@@ -380,7 +454,7 @@ index 2bca37b..e8f3062 100644
          if roots_to_archive.is_empty() {
              return Vec::new();
          }
-@@ -5457,6 +5580,85 @@ impl Sidebar {
+@@ -5457,6 +5643,131 @@ impl Sidebar {
              }
          }
  
@@ -410,6 +484,52 @@ index 2bca37b..e8f3062 100644
 +            }
 +        }
 +        targets
++    }
++
++    fn guard_archived_worktree_items(
++        targets: &ArchivedWorktreeItemTargets,
++        window: &mut Window,
++        cx: &mut App,
++    ) -> (ItemCloseGuard, Vec<(Entity<Workspace>, Vec<EntityId>)>) {
++        let items = targets
++            .iter()
++            .flat_map(|(_, pane, item_ids)| {
++                pane.read(cx)
++                    .items()
++                    .filter(|item| item_ids.contains(&item.item_id()))
++                    .map(|item| item.boxed_clone())
++                    .collect::<Vec<_>>()
++            })
++            .collect();
++        let workspaces = targets
++            .iter()
++            .map(|(workspace, _, _)| workspace.clone())
++            .unique_by(|workspace| workspace.entity_id())
++            .map(|workspace| {
++                let item_ids = workspace
++                    .read(cx)
++                    .panes()
++                    .iter()
++                    .flat_map(|pane| pane.read(cx).items().map(|item| item.item_id()))
++                    .collect();
++                (workspace, item_ids)
++            })
++            .collect();
++        (ItemCloseGuard::new(items, window, cx), workspaces)
++    }
++
++    fn archived_worktree_item_membership_matches(
++        expected: &[(Entity<Workspace>, Vec<EntityId>)],
++        cx: &App,
++    ) -> bool {
++        expected.iter().all(|(workspace, expected_ids)| {
++            workspace
++                .read(cx)
++                .panes()
++                .iter()
++                .flat_map(|pane| pane.read(cx).items().map(|item| item.item_id()))
++                .eq(expected_ids.iter().copied())
++        })
 +    }
 +
 +    async fn consent_to_close_archived_worktree_items(
@@ -466,7 +586,7 @@ index 2bca37b..e8f3062 100644
          let mut close_item_tasks = Vec::new();
          for (workspace, archived_worktree_ids) in &mixed_workspaces {
              let panes: Vec<_> = workspace.read(cx).panes().to_vec();
-@@ -5614,12 +5816,10 @@ impl Sidebar {
+@@ -5614,12 +5925,10 @@ impl Sidebar {
          // dropped without destroying the user's workspace layout.
          let mut workspaces_to_remove: Vec<Entity<Workspace>> =
              workspace_to_remove.into_iter().collect();
@@ -483,7 +603,7 @@ index 2bca37b..e8f3062 100644
  
          let removed_workspace = !workspaces_to_remove.is_empty();
          let session_id = session_id.clone();
-@@ -7062,12 +7262,10 @@ impl Sidebar {
+@@ -7062,12 +7371,10 @@ impl Sidebar {
          });
          let mut workspaces_to_remove: Vec<Entity<Workspace>> =
              workspace_to_remove.into_iter().collect();
@@ -501,18 +621,21 @@ index 2bca37b..e8f3062 100644
          let draft_workspace_removed = matches!(
              workspace,
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 283219f..f3d576e 100644
+index 283219f..db084eb 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -25,6 +25,7 @@ use std::{
+@@ -23,8 +23,10 @@ use settings::{Settings, SettingsStore};
+ use std::{
+     path::{Path, PathBuf},
      sync::Arc,
++    time::Duration,
  };
  use util::{path_list::PathList, rel_path::rel_path};
 +use workspace::item::test::{TestItem, TestProjectItem};
  
  fn close_terminal_from_sidebar(
      sidebar: &Entity<Sidebar>,
-@@ -2898,6 +2899,14 @@ async fn test_closing_terminal_on_archived_linked_worktree_removes_workspace(
+@@ -2898,6 +2900,14 @@ async fn test_closing_terminal_on_archived_linked_worktree_removes_workspace(
          })
          .expect("test terminal should be inserted");
      cx.run_until_parked();
@@ -527,7 +650,7 @@ index 283219f..f3d576e 100644
  
      assert_eq!(
          multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace
-@@ -2914,6 +2923,76 @@ async fn test_closing_terminal_on_archived_linked_worktree_removes_workspace(
+@@ -2914,6 +2924,76 @@ async fn test_closing_terminal_on_archived_linked_worktree_removes_workspace(
          "expected linked worktree terminal before closing, got: {entries_before:?}"
      );
  
@@ -604,7 +727,7 @@ index 283219f..f3d576e 100644
      close_terminal_from_sidebar(&sidebar, terminal_id, cx);
      for _ in 0..4 {
          cx.run_until_parked();
-@@ -4688,6 +4767,182 @@ async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes
+@@ -4688,6 +4768,182 @@ async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes
      });
  }
  
@@ -787,7 +910,7 @@ index 283219f..f3d576e 100644
  #[gpui::test]
  async fn test_parallel_threads_shown_with_live_status(cx: &mut TestAppContext) {
      let project = init_test_project_with_agent_panel("/my-project", cx).await;
-@@ -14799,6 +15054,253 @@ async fn test_archive_removes_worktree_even_when_workspace_paths_diverge(cx: &mu
+@@ -14799,6 +15055,331 @@ async fn test_archive_removes_worktree_even_when_workspace_paths_diverge(cx: &mu
      );
  }
  
@@ -995,16 +1118,93 @@ index 283219f..f3d576e 100644
 +    });
 +
 +    fake.state.lock().kill_error = None;
++    fake.state.lock().kill_delay = Some(Duration::from_secs(1));
 +    close_terminal_from_sidebar(&sidebar, terminal_id, cx);
-+    for _ in 0..4 {
++    cx.run_until_parked();
++    if cx.has_pending_prompt() {
++        cx.simulate_prompt_answer("Don't Save");
 +        cx.run_until_parked();
 +    }
++    assert_eq!(fake.kill_history().len(), 2);
++    linked_item.update(cx, |item, cx| {
++        item.state = "edited during terminal stop".into();
++        item.is_dirty = true;
++        cx.emit(workspace::item::ItemEvent::Edit);
++    });
++    cx.executor().advance_clock(Duration::from_secs(1));
++    cx.run_until_parked();
 +    assert!(!fake.has_session(&session_name));
 +    cx.update(|_, cx| {
 +        assert!(
 +            TerminalThreadMetadataStore::global(cx)
 +                .read(cx)
 +                .entry(terminal_id)
++                .is_none()
++        )
++    });
++    assert!(items_are_attached(cx));
++    assert!(
++        fs.is_dir(Path::new("/worktrees/main-repo/feature-b/main-repo"))
++            .await
++    );
++    linked_item.read_with(cx, |item, _| {
++        assert_eq!(item.state, "edited during terminal stop");
++        assert!(item.is_dirty);
++    });
++    assert!(
++        !cx.has_pending_prompt(),
++        "post-kill edits must not prompt again"
++    );
++
++    // A fresh close observes only the linked-root target. Editing the unrelated
++    // existing item during the kill must not prevent the approved target cleanup.
++    let second_terminal_id = panel
++        .update_in(cx, |panel, window, cx| {
++            panel.insert_test_terminal("Second Feature Terminal", true, window, cx)
++        })
++        .unwrap();
++    let second_metadata = TerminalThreadMetadata {
++        terminal_id: second_terminal_id,
++        title: "Second Feature Terminal".into(),
++        custom_title: None,
++        created_at: Utc::now(),
++        worktree_paths: WorktreePaths::from_path_lists(
++            PathList::new(&[PathBuf::from("/main-repo")]),
++            PathList::new(&[PathBuf::from("/worktrees/main-repo/feature-b/main-repo")]),
++        )
++        .unwrap(),
++        remote_connection: None,
++        working_directory: None,
++    };
++    cx.update(|_, cx| {
++        TerminalThreadMetadataStore::global(cx)
++            .update(cx, |store, cx| store.save(second_metadata, cx));
++    });
++    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
++    cx.run_until_parked();
++    let second_session_name = second_terminal_id.session_name();
++    fake.add_session(&second_session_name);
++    close_terminal_from_sidebar(&sidebar, second_terminal_id, cx);
++    cx.run_until_parked();
++    if cx.has_pending_prompt() {
++        cx.simulate_prompt_answer("Don't Save");
++        cx.run_until_parked();
++    }
++    unrelated_item.update(cx, |item, cx| {
++        item.state = "unrelated edit during terminal stop".into();
++        item.is_dirty = true;
++        cx.emit(workspace::item::ItemEvent::Edit);
++    });
++    cx.executor().advance_clock(Duration::from_secs(1));
++    for _ in 0..4 {
++        cx.run_until_parked();
++    }
++    assert!(!fake.has_session(&second_session_name));
++    cx.update(|_, cx| {
++        assert!(
++            TerminalThreadMetadataStore::global(cx)
++                .read(cx)
++                .entry(second_terminal_id)
 +                .is_none()
 +        )
 +    });
@@ -1029,6 +1229,7 @@ index 283219f..f3d576e 100644
 +    });
 +    unrelated_item.read_with(cx, |item, _| {
 +        assert!(item.is_dirty);
++        assert_eq!(item.state, "unrelated edit during terminal stop");
 +        assert_eq!(item.save_count, 0);
 +    });
 +    assert!(project.read_with(cx, |project, cx| {
@@ -1041,10 +1242,99 @@ index 283219f..f3d576e 100644
  #[gpui::test]
  async fn test_archive_mixed_workspace_closes_only_archived_worktree_items(cx: &mut TestAppContext) {
      // When a workspace contains both a worktree being archived and other
+diff --git a/crates/workspace/src/item.rs b/crates/workspace/src/item.rs
+index 15cd5e1..908cddc 100644
+--- a/crates/workspace/src/item.rs
++++ b/crates/workspace/src/item.rs
+@@ -12,8 +12,8 @@ use client::{Client, proto};
+ use futures::channel::mpsc;
+ use gpui::{
+     Action, AnyElement, AnyEntity, AnyView, App, AppContext, Context, Entity, EntityId,
+-    EventEmitter, FocusHandle, Focusable, Font, Pixels, Point, Render, SharedString, Task, TaskExt,
+-    WeakEntity, Window,
++    EventEmitter, FocusHandle, Focusable, Font, Pixels, Point, Render, SharedString, Subscription,
++    Task, TaskExt, WeakEntity, Window,
+ };
+ use language::Capability;
+ pub use language::HighlightedText;
+@@ -25,7 +25,7 @@ pub use settings::{
+ use smallvec::SmallVec;
+ use std::{
+     any::{Any, TypeId},
+-    cell::RefCell,
++    cell::{Cell, RefCell},
+     path::Path,
+     rc::Rc,
+     sync::Arc,
+@@ -477,6 +477,53 @@ where
+     }
+ }
+ 
++pub struct ItemCloseGuard {
++    items: Vec<(Box<dyn ItemHandle>, bool)>,
++    changed: Rc<Cell<bool>>,
++    _subscriptions: Vec<Subscription>,
++}
++
++impl ItemCloseGuard {
++    pub fn new(items: Vec<Box<dyn ItemHandle>>, window: &mut Window, cx: &mut App) -> Self {
++        let changed = Rc::new(Cell::new(false));
++        let subscriptions = items
++            .iter()
++            .map(|item| {
++                let changed = changed.clone();
++                item.subscribe_to_item_events(
++                    window,
++                    cx,
++                    Box::new(move |event, _, _| {
++                        if event == ItemEvent::Edit {
++                            changed.set(true);
++                        }
++                    }),
++                )
++            })
++            .collect();
++        let items = items
++            .into_iter()
++            .map(|item| {
++                let dirty = item.is_dirty(cx);
++                (item, dirty)
++            })
++            .collect();
++        Self {
++            items,
++            changed,
++            _subscriptions: subscriptions,
++        }
++    }
++
++    pub fn changed(&self, cx: &App) -> bool {
++        self.changed.get()
++            || self
++                .items
++                .iter()
++                .any(|(item, was_dirty)| item.is_dirty(cx) != *was_dirty)
++    }
++}
++
+ pub trait ItemHandle: 'static + Send {
+     fn item_focus_handle(&self, cx: &App) -> FocusHandle;
+     fn subscribe_to_item_events(
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index aa0f0b5..8dc9909 100644
+index aa0f0b5..f2f1800 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
+@@ -27,8 +27,8 @@ const SIDEBAR_RESIZE_HANDLE_SIZE: Pixels = px(6.0);
+ 
+ use crate::open_remote_project_with_existing_connection;
+ use crate::{
+-    CloseIntent, CloseWindow, DockPosition, Event as WorkspaceEvent, Item, ModalView, OpenMode,
+-    Panel, Workspace, WorkspaceId, client_side_decorations,
++    CloseIntent, CloseWindow, DockPosition, Event as WorkspaceEvent, Item, ItemCloseGuard,
++    ModalView, OpenMode, Panel, Workspace, WorkspaceId, client_side_decorations,
+     persistence::model::MultiWorkspaceState,
+ };
+ 
 @@ -1854,6 +1854,17 @@ impl MultiWorkspace {
          intent: RemovalIntent,
          window: &mut Window,
@@ -1063,10 +1353,41 @@ index aa0f0b5..8dc9909 100644
      ) -> Task<Result<bool>> {
          let workspaces: Vec<_> = workspaces.into_iter().collect();
  
-@@ -1898,6 +1909,10 @@ impl MultiWorkspace {
+@@ -1898,9 +1909,58 @@ impl MultiWorkspace {
                  }
              }
  
++            let item_ids = workspaces
++                .iter()
++                .map(|workspace| {
++                    workspace.read_with(cx, |workspace, cx| {
++                        workspace
++                            .panes()
++                            .iter()
++                            .flat_map(|pane| pane.read(cx).items().map(|item| item.item_id()))
++                            .collect::<Vec<_>>()
++                    })
++                })
++                .collect::<Vec<_>>();
++            let items = workspaces
++                .iter()
++                .flat_map(|workspace| {
++                    workspace.read_with(cx, |workspace, cx| {
++                        workspace
++                            .panes()
++                            .iter()
++                            .flat_map(|pane| {
++                                pane.read(cx)
++                                    .items()
++                                    .map(|item| item.boxed_clone())
++                                    .collect::<Vec<_>>()
++                            })
++                            .collect::<Vec<_>>()
++                    })
++                })
++                .collect();
++            let guard = cx.update(|window, cx| ItemCloseGuard::new(items, window, cx))?;
++
 +            if !before_remove(cx).await? {
 +                return Ok(false);
 +            }
@@ -1074,8 +1395,25 @@ index aa0f0b5..8dc9909 100644
              // Edit phase: one synchronous update. Delete the rows, then pick
              // the replacement from the rows that actually remain.
              let (removed_any, reopen_key) = this.update_in(cx, |this, window, cx| {
++                let current_item_ids = workspaces
++                    .iter()
++                    .map(|workspace| {
++                        workspace
++                            .read(cx)
++                            .panes()
++                            .iter()
++                            .flat_map(|pane| pane.read(cx).items().map(|item| item.item_id()))
++                            .collect::<Vec<_>>()
++                    })
++                    .collect::<Vec<_>>();
++                if guard.changed(cx) || current_item_ids != item_ids {
++                    return (false, None);
++                }
+                 let mut removed_any = false;
+                 let displayed_workspace = this.workspace().clone();
+ 
 diff --git a/crates/workspace/src/multi_workspace_tests.rs b/crates/workspace/src/multi_workspace_tests.rs
-index 91abd7d..9bc9f3b 100644
+index 91abd7d..175d209 100644
 --- a/crates/workspace/src/multi_workspace_tests.rs
 +++ b/crates/workspace/src/multi_workspace_tests.rs
 @@ -717,6 +717,120 @@ async fn test_remove_fallback_via_find_or_create_skips_removed_workspaces(cx: &m
@@ -1199,6 +1537,86 @@ index 91abd7d..9bc9f3b 100644
  #[gpui::test]
  async fn test_remove_keeping_the_project_does_not_switch_projects(cx: &mut TestAppContext) {
      init_test(cx);
+@@ -1731,3 +1845,79 @@ async fn test_nearest_retained_workspace_skips_disconnected_workspace(cx: &mut T
+         );
+     });
+ }
++
++#[gpui::test]
++async fn test_remove_with_pre_remove_keeps_edits_made_during_guard(cx: &mut TestAppContext) {
++    use crate::item::ItemEvent;
++    use futures::channel::oneshot;
++
++    init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    fs.insert_tree("/guard-root", json!({ "file.txt": "" }))
++        .await;
++    let project = Project::test(fs, ["/guard-root".as_ref()], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    let workspace =
++        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
++    let original_item = cx.new(|cx| TestItem::new(cx));
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.add_item_to_active_pane(Box::new(original_item.clone()), None, true, window, cx);
++    });
++
++    let (started_tx, started_rx) = oneshot::channel();
++    let (release_tx, release_rx) = oneshot::channel();
++    let remove_task = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
++        multi_workspace.remove_with_pre_remove(
++            [workspace.clone()],
++            RemovalIntent::CloseProject,
++            async move |_| {
++                let _ = started_tx.send(());
++                let _ = release_rx.await;
++                Ok(true)
++            },
++            window,
++            cx,
++        )
++    });
++    started_rx.await.expect("guard should start after consent");
++
++    original_item.update(cx, |item, cx| {
++        item.state = "edited while terminal stopped".into();
++        item.is_dirty = true;
++        cx.emit(ItemEvent::Edit);
++    });
++    let new_item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.add_item_to_active_pane(Box::new(new_item.clone()), None, true, window, cx);
++    });
++    release_tx.send(()).expect("guard should still be waiting");
++
++    assert!(
++        !remove_task
++            .await
++            .expect("changed removal should be refused")
++    );
++    assert!(multi_workspace.read_with(cx, |multi_workspace, _| {
++        multi_workspace
++            .workspaces()
++            .any(|candidate| candidate == &workspace)
++    }));
++    original_item.read_with(cx, |item, _| {
++        assert_eq!(item.state, "edited while terminal stopped");
++        assert!(item.is_dirty);
++    });
++    workspace.read_with(cx, |workspace, cx| {
++        let item_ids = workspace
++            .panes()
++            .iter()
++            .flat_map(|pane| pane.read(cx).items().map(|item| item.item_id()))
++            .collect::<Vec<_>>();
++        assert!(item_ids.contains(&original_item.entity_id()));
++        assert!(item_ids.contains(&new_item.entity_id()));
++    });
++    assert!(
++        !cx.has_pending_prompt(),
++        "changed state must not prompt again"
++    );
++}
 diff --git a/crates/workspace/src/pane.rs b/crates/workspace/src/pane.rs
 index 40bc7bb..e7ef290 100644
 --- a/crates/workspace/src/pane.rs
@@ -1214,6 +1632,21 @@ index 40bc7bb..e7ef290 100644
      pub fn set_can_navigate(&mut self, can_navigate: bool, cx: &mut Context<Self>) {
          self.toolbar.update(cx, |toolbar, cx| {
              toolbar.set_can_navigate(can_navigate, cx);
+diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
+index d0e0c81..43d06fc 100644
+--- a/crates/workspace/src/workspace.rs
++++ b/crates/workspace/src/workspace.rs
+@@ -72,8 +72,8 @@ use gpui::{
+ };
+ pub use history_manager::*;
+ pub use item::{
+-    FollowableItem, FollowableItemHandle, Item, ItemHandle, ItemSettings, PreviewTabsSettings,
+-    ProjectItem, SerializableItem, SerializableItemHandle, WeakItemHandle,
++    FollowableItem, FollowableItemHandle, Item, ItemCloseGuard, ItemHandle, ItemSettings,
++    PreviewTabsSettings, ProjectItem, SerializableItem, SerializableItemHandle, WeakItemHandle,
+ };
+ use itertools::Itertools;
+ use language::{Buffer, LanguageRegistry, Rope, language_settings::all_language_settings};
 -- 
 2.43.0
 
