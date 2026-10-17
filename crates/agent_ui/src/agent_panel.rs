@@ -2603,7 +2603,7 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_terminal_internal(terminal_id, true, window, cx);
+        self.close_terminal_internal(terminal_id, true, true, window, cx);
     }
 
     pub fn close_terminal_without_activating_draft(
@@ -2612,13 +2612,24 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_terminal_internal(terminal_id, false, window, cx);
+        self.close_terminal_internal(terminal_id, false, true, window, cx);
+    }
+
+    pub fn close_terminal_after_session_kill(
+        &mut self,
+        terminal_id: TerminalId,
+        activate_draft_after_close: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_terminal_internal(terminal_id, activate_draft_after_close, false, window, cx);
     }
 
     fn close_terminal_internal(
         &mut self,
         terminal_id: TerminalId,
         activate_draft_after_close: bool,
+        kill_persistent_session: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2635,7 +2646,7 @@ impl AgentPanel {
         self.dismiss_terminal_notifications(terminal_id, cx);
         // Closing is the only way a terminal thread goes away, so its session
         // goes with it, also when the thread was not spawned in this run.
-        if should_kill_persistent_session {
+        if kill_persistent_session && should_kill_persistent_session {
             kill_persistent_terminal_session_and_delete_metadata(
                 self.project.clone(),
                 terminal_id,

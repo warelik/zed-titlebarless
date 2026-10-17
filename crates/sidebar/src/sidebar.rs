@@ -5187,6 +5187,51 @@ impl Sidebar {
         }
 
         let terminal_id = metadata.terminal_id;
+        let project = match workspace {
+            ThreadEntryWorkspace::Open(workspace) => Some(workspace.read(cx).project().clone()),
+            ThreadEntryWorkspace::Closed { .. } => {
+                self.find_project_for_remote_connection(metadata.remote_connection.as_ref(), cx)
+            }
+        };
+        let Some(project) = project else {
+            log::warn!(
+                "no open project available to kill persistent terminal session for terminal {terminal_id}"
+            );
+            self.show_terminal_close_error(terminal_id, cx);
+            return;
+        };
+
+        let kill = project.update(cx, |project, cx| {
+            project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
+        });
+        let metadata = metadata.clone();
+        let workspace = workspace.clone();
+        cx.spawn_in(window, async move |this, cx| match kill.await {
+            Ok(()) => {
+                this.update_in(cx, |this, window, cx| {
+                    this.finish_close_terminal(&metadata, &workspace, window, cx);
+                })?;
+            }
+            Err(error) => {
+                log::error!(
+                    "failed to kill persistent terminal session for terminal {terminal_id}: {error:#}"
+                );
+                this.update(cx, |this, cx| {
+                    this.show_terminal_close_error(terminal_id, cx);
+                })?;
+            }
+        })
+        .detach();
+    }
+
+    fn finish_close_terminal(
+        &mut self,
+        metadata: &TerminalThreadMetadata,
+        workspace: &ThreadEntryWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let terminal_id = metadata.terminal_id;
         let is_active = self
             .active_entry
             .as_ref()
@@ -5286,6 +5331,26 @@ impl Sidebar {
         .map(|workspace| workspace.read(cx).project().clone())
     }
 
+    fn show_terminal_close_error(&self, terminal_id: TerminalId, cx: &mut App) {
+        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
+            return;
+        };
+        let workspace = multi_workspace.read(cx).workspace().clone();
+        workspace.update(cx, |workspace, cx| {
+            struct CloseTerminalErrorToast;
+            workspace.show_toast(
+                Toast::new(
+                    NotificationId::unique::<CloseTerminalErrorToast>(),
+                    format!(
+                        "Failed to stop terminal session {terminal_id}; close it again to retry"
+                    ),
+                )
+                .autohide(),
+                cx,
+            );
+        });
+    }
+
     fn close_terminal_entry(
         &mut self,
         metadata: &TerminalThreadMetadata,
@@ -5307,38 +5372,16 @@ impl Sidebar {
                     closed_via_panel = true;
                     panel.update(cx, |panel, cx| {
                         if defer_draft_activation || !activate_panel_draft {
-                            panel.close_terminal_without_activating_draft(terminal_id, window, cx);
+                            panel.close_terminal_after_session_kill(terminal_id, false, window, cx);
                         } else {
-                            panel.close_terminal(terminal_id, window, cx);
+                            panel.close_terminal_after_session_kill(terminal_id, true, window, cx);
                         }
                     });
                 }
             });
         }
-        if !closed_via_panel {
-            let session_name = terminal_id.session_name();
-            let project = match workspace {
-                ThreadEntryWorkspace::Open(workspace) => Some(workspace.read(cx).project().clone()),
-                ThreadEntryWorkspace::Closed { .. } => {
-                    self.find_project_for_remote_connection(metadata.remote_connection.as_ref(), cx)
-                }
-            };
-            if let Some(project) = project {
-                project
-                    .update(cx, |project, cx| {
-                        project.kill_persistent_terminal_session(session_name, cx)
-                    })
-                    .detach_and_log_err(cx);
-            } else {
-                log::warn!(
-                    "no open project available to kill persistent terminal session for terminal {terminal_id}"
-                );
-            }
-            if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
-                store.update(cx, |store, cx| {
-                    store.delete(terminal_id, cx);
-                });
-            }
+        if !closed_via_panel && let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+            store.update(cx, |store, cx| store.delete(terminal_id, cx));
         }
 
         self.start_detached_archive_worktree_task(roots_to_archive, cx);
