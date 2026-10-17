@@ -2313,7 +2313,9 @@ async fn test_agent_panel_terminals_appear_in_sidebar_and_search(cx: &mut TestAp
 }
 
 #[gpui::test]
-async fn test_sidebar_shows_live_dragged_terminal_without_persisting_it(cx: &mut TestAppContext) {
+async fn test_sidebar_shows_live_dragged_terminal_without_persisting_it(
+    cx: &mut TestAppContext,
+) {
     let project = init_test_project_with_agent_panel("/my-project", cx).await;
     let fake_shpool = project.update(cx, |project, _cx| project.enable_fake_shpool(&[]));
     let (multi_workspace, visual_context) =
@@ -2483,8 +2485,15 @@ async fn test_sidebar_shows_live_dragged_terminal_without_persisting_it(cx: &mut
         );
     });
 
+    // This terminal was loaded without a persistent session. Closing it from
+    // the sidebar must not attempt a shpool kill, even if kills would fail.
+    fake_shpool.state.lock().kill_error = Some("shpool unavailable".into());
     close_terminal_from_sidebar(&sidebar, terminal_id, visual_context);
     visual_context.run_until_parked();
+    assert!(
+        fake_shpool.kill_history().is_empty(),
+        "a loaded nonpersistent terminal must not attempt a session kill"
+    );
     assert!(
         !visible_entries_as_strings(&sidebar, visual_context)
             .iter()
