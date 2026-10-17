@@ -1,21 +1,22 @@
-From 25dbf8ddef7290ea99b561ff54f11682d1897da6 Mon Sep 17 00:00:00 2001
+From 13be3e8e6d518b555c2ea44d7a4900d42d0ef4e1 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex-repair@example.invalid>
-Date: Sat, 17 Oct 2026 03:19:48 +0000
+Date: Sat, 17 Oct 2026 02:28:03 +0000
 Subject: [PATCH] Retain sidebar terminal metadata until session kill succeeds
 
 ---
  crates/agent_ui/src/agent_panel.rs            |  19 +-
- crates/sidebar/src/sidebar.rs                 | 237 +++++++++++-----
- crates/sidebar/src/sidebar_tests.rs           | 255 ++++++++++++++++++
- crates/workspace/src/multi_workspace.rs       |  13 +
- crates/workspace/src/multi_workspace_tests.rs |  98 +++++++
- 5 files changed, 557 insertions(+), 65 deletions(-)
+ crates/sidebar/src/sidebar.rs                 | 326 ++++++++++++++----
+ crates/sidebar/src/sidebar_tests.rs           | 255 ++++++++++++++
+ crates/workspace/src/multi_workspace.rs       |  15 +
+ crates/workspace/src/multi_workspace_tests.rs | 114 ++++++
+ crates/workspace/src/pane.rs                  |   4 +
+ 6 files changed, 665 insertions(+), 68 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index c2b198a..d7f4735 100644
+index 5848286..b767bcb 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -2519,7 +2519,7 @@ impl AgentPanel {
+@@ -2525,7 +2525,7 @@ impl AgentPanel {
                          cx.emit(AgentPanelEvent::EntryChanged);
                          cx.notify();
                      } else {
@@ -24,7 +25,7 @@ index c2b198a..d7f4735 100644
                      }
                  }
                  TerminalEvent::CloseTerminal
-@@ -2603,7 +2603,7 @@ impl AgentPanel {
+@@ -2609,7 +2609,7 @@ impl AgentPanel {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
@@ -33,7 +34,7 @@ index c2b198a..d7f4735 100644
      }
  
      pub fn close_terminal_without_activating_draft(
-@@ -2612,13 +2612,24 @@ impl AgentPanel {
+@@ -2618,13 +2618,24 @@ impl AgentPanel {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
@@ -59,20 +60,43 @@ index c2b198a..d7f4735 100644
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
-@@ -2635,7 +2646,7 @@ impl AgentPanel {
-         self.dismiss_terminal_notifications(terminal_id, cx);
-         // Closing is the only way a terminal thread goes away, so its session
-         // goes with it, also when the thread was not spawned in this run.
--        if should_kill_persistent_session {
-+        if kill_persistent_session && should_kill_persistent_session {
+@@ -2645,7 +2656,7 @@ impl AgentPanel {
+         if spawn_is_pending {
+             // The spawn outcome determines whether there is a persistent session
+             // to kill. Its completion resolves this tombstone.
+-        } else if should_kill_persistent_session {
++        } else if kill_persistent_session && should_kill_persistent_session {
              kill_persistent_terminal_session_and_delete_metadata(
                  self.project.clone(),
                  terminal_id,
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 2bca37b..6fffa2a 100644
+index 2bca37b..e8f3062 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
-@@ -5186,7 +5186,31 @@ impl Sidebar {
+@@ -67,9 +67,10 @@ use util::ResultExt as _;
+ use util::path_list::PathList;
+ use workspace::{
+     CloseWindow, FocusWorkspaceSidebar, MoveProjectDown, MoveProjectUp, MultiWorkspace,
+-    MultiWorkspaceEvent, NextProject, NextThread, Open, OpenMode, PreviousProject, PreviousThread,
+-    ProjectGroupKey, RemovalIntent, SaveIntent, Sidebar as WorkspaceSidebar, SidebarSide, Toast,
+-    ToggleWorkspaceSidebar, Workspace, notifications::NotificationId, sidebar_side_context_menu,
++    MultiWorkspaceEvent, NextProject, NextThread, Open, OpenMode, Pane, PreviousProject,
++    PreviousThread, ProjectGroupKey, RemovalIntent, SaveIntent, Sidebar as WorkspaceSidebar,
++    SidebarSide, Toast, ToggleWorkspaceSidebar, Workspace, notifications::NotificationId,
++    sidebar_side_context_menu,
+ };
+ 
+ use git_ui_core::worktree_service::{RemoteBranchName, worktree_create_targets};
+@@ -146,6 +147,8 @@ enum ArchiveWorktreeOutcome {
+     Cancelled,
+ }
+ 
++type ArchivedWorktreeItemTargets = Vec<(Entity<Workspace>, Entity<Pane>, Vec<EntityId>)>;
++
+ #[derive(Clone, Debug)]
+ enum ActiveEntry {
+     Thread {
+@@ -5186,7 +5189,31 @@ impl Sidebar {
              return;
          }
  
@@ -104,7 +128,7 @@ index 2bca37b..6fffa2a 100644
          let is_active = self
              .active_entry
              .as_ref()
-@@ -5212,7 +5236,6 @@ impl Sidebar {
+@@ -5212,7 +5239,6 @@ impl Sidebar {
              Some(terminal_id),
              cx,
          );
@@ -112,7 +136,7 @@ index 2bca37b..6fffa2a 100644
          let workspace_to_remove = self.linked_worktree_workspace_to_remove(
              &terminal_folder_paths,
              metadata.remote_connection.as_ref(),
-@@ -5221,38 +5244,128 @@ impl Sidebar {
+@@ -5221,38 +5247,138 @@ impl Sidebar {
              &roots_to_archive,
              cx,
          );
@@ -128,6 +152,7 @@ index 2bca37b..6fffa2a 100644
 -
 +        let mixed_workspaces =
 +            self.plan_archived_worktree_cleanup(&roots_to_archive, &mut workspaces_to_remove, cx);
++        let mixed_item_targets = self.archived_worktree_item_targets(&mixed_workspaces, cx);
          let terminal_workspace_removed = matches!(
              workspace,
              ThreadEntryWorkspace::Open(workspace) if workspaces_to_remove.contains(workspace)
@@ -135,9 +160,12 @@ index 2bca37b..6fffa2a 100644
          let metadata = metadata.clone();
          let workspace = workspace.clone();
 +        let roots_to_archive = roots_to_archive.clone();
- 
++
 +        if workspaces_to_remove.is_empty() {
 +            cx.spawn_in(window, async move |this, cx| {
++                if !Self::consent_to_close_archived_worktree_items(&mixed_item_targets, cx).await? {
++                    return anyhow::Ok(());
++                }
 +                let kill = project.update(cx, |project, cx| {
 +                    project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
 +                });
@@ -156,7 +184,7 @@ index 2bca37b..6fffa2a 100644
 +                        neighbor.as_ref(),
 +                        terminal_workspace_removed,
 +                        roots_to_archive,
-+                        mixed_workspaces,
++                        mixed_item_targets,
 +                        window,
 +                        cx,
 +                    );
@@ -166,16 +194,22 @@ index 2bca37b..6fffa2a 100644
 +            .detach_and_log_err(cx);
 +            return;
 +        }
-+
+ 
 +        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
 +            return;
 +        };
 +        let sidebar = cx.weak_entity();
++        let consent_targets = mixed_item_targets.clone();
 +        let remove_task = multi_workspace.update(cx, |multi_workspace, cx| {
 +            multi_workspace.remove_with_pre_remove(
 +                workspaces_to_remove,
 +                RemovalIntent::KeepProject,
 +                async move |cx| {
++                    if !Self::consent_to_close_archived_worktree_items(&consent_targets, cx)
++                        .await?
++                    {
++                        return Ok(false);
++                    }
 +                    let kill = project.update(cx, |project, cx| {
 +                        project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
 +                    });
@@ -188,7 +222,7 @@ index 2bca37b..6fffa2a 100644
 +                        })?;
 +                        return Err(error);
 +                    }
-+                    Ok(())
++                    Ok(true)
 +                },
 +                window,
 +                cx,
@@ -206,7 +240,7 @@ index 2bca37b..6fffa2a 100644
 +                    neighbor.as_ref(),
 +                    terminal_workspace_removed,
 +                    roots_to_archive,
-+                    mixed_workspaces,
++                    mixed_item_targets,
 +                    window,
 +                    cx,
 +                );
@@ -224,7 +258,7 @@ index 2bca37b..6fffa2a 100644
 +        neighbor: Option<&ActivatableEntry>,
 +        terminal_workspace_removed: bool,
 +        roots_to_archive: Vec<thread_worktree_archive::RootPlan>,
-+        mixed_workspaces: Vec<(Entity<Workspace>, Vec<WorktreeId>)>,
++        mixed_item_targets: ArchivedWorktreeItemTargets,
 +        window: &mut Window,
 +        cx: &mut Context<Self>,
 +    ) {
@@ -235,8 +269,8 @@ index 2bca37b..6fffa2a 100644
 +                cx,
 +            );
 +        }
-+        let close_item_tasks =
-+            self.start_archived_worktree_item_cleanup(mixed_workspaces, window, cx);
++        self.remove_archived_worktree_items(mixed_item_targets, window, cx);
++        let close_item_tasks = Vec::new();
 +        let metadata = metadata.clone();
 +        let workspace = workspace.clone();
 +        let neighbor = neighbor.cloned();
@@ -259,7 +293,7 @@ index 2bca37b..6fffa2a 100644
                  this.close_terminal_entry(
                      &metadata,
                      &workspace,
-@@ -5286,6 +5399,26 @@ impl Sidebar {
+@@ -5286,6 +5412,26 @@ impl Sidebar {
          .map(|workspace| workspace.read(cx).project().clone())
      }
  
@@ -286,7 +320,7 @@ index 2bca37b..6fffa2a 100644
      fn close_terminal_entry(
          &mut self,
          metadata: &TerminalThreadMetadata,
-@@ -5307,38 +5440,16 @@ impl Sidebar {
+@@ -5307,38 +5453,16 @@ impl Sidebar {
                      closed_via_panel = true;
                      panel.update(cx, |panel, cx| {
                          if defer_draft_activation || !activate_panel_draft {
@@ -329,7 +363,7 @@ index 2bca37b..6fffa2a 100644
          }
  
          self.start_detached_archive_worktree_task(roots_to_archive, cx);
-@@ -5407,13 +5518,12 @@ impl Sidebar {
+@@ -5407,13 +5531,12 @@ impl Sidebar {
          .detach_and_log_err(cx);
      }
  
@@ -346,11 +380,81 @@ index 2bca37b..6fffa2a 100644
          if roots_to_archive.is_empty() {
              return Vec::new();
          }
-@@ -5457,6 +5567,15 @@ impl Sidebar {
+@@ -5457,6 +5580,85 @@ impl Sidebar {
              }
          }
  
 +        mixed_workspaces
++    }
++
++    fn archived_worktree_item_targets(
++        &self,
++        mixed_workspaces: &[(Entity<Workspace>, Vec<WorktreeId>)],
++        cx: &App,
++    ) -> ArchivedWorktreeItemTargets {
++        let mut targets = Vec::new();
++        for (workspace, archived_worktree_ids) in mixed_workspaces {
++            for pane in workspace.read(cx).panes() {
++                let item_ids = pane
++                    .read(cx)
++                    .items()
++                    .filter(|item| {
++                        item.project_path(cx)
++                            .is_some_and(|path| archived_worktree_ids.contains(&path.worktree_id))
++                    })
++                    .map(|item| item.item_id())
++                    .collect::<Vec<_>>();
++                if !item_ids.is_empty() {
++                    targets.push((workspace.clone(), pane.clone(), item_ids));
++                }
++            }
++        }
++        targets
++    }
++
++    async fn consent_to_close_archived_worktree_items(
++        targets: &ArchivedWorktreeItemTargets,
++        cx: &mut gpui::AsyncWindowContext,
++    ) -> anyhow::Result<bool> {
++        for (workspace, pane, item_ids) in targets {
++            let project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
++            for item_id in item_ids {
++                let item = pane.read_with(cx, |pane, _| {
++                    pane.items()
++                        .find(|item| item.item_id() == *item_id)
++                        .map(|item| item.boxed_clone())
++                });
++                let Some(item) = item else { continue };
++                if !Pane::save_item(
++                    project.clone(),
++                    pane.clone(),
++                    item.as_ref(),
++                    SaveIntent::Close,
++                    cx,
++                )
++                .await?
++                {
++                    return Ok(false);
++                }
++            }
++        }
++        Ok(true)
++    }
++
++    fn remove_archived_worktree_items(
++        &self,
++        targets: ArchivedWorktreeItemTargets,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        for (_, pane, item_ids) in targets {
++            pane.update(cx, |pane, cx| {
++                let close_pane_if_empty = pane.close_pane_if_empty();
++                for item_id in item_ids {
++                    pane.remove_item(item_id, false, close_pane_if_empty, window, cx);
++                }
++            });
++        }
 +    }
 +
 +    fn start_archived_worktree_item_cleanup(
@@ -362,7 +466,7 @@ index 2bca37b..6fffa2a 100644
          let mut close_item_tasks = Vec::new();
          for (workspace, archived_worktree_ids) in &mixed_workspaces {
              let panes: Vec<_> = workspace.read(cx).panes().to_vec();
-@@ -5614,12 +5733,10 @@ impl Sidebar {
+@@ -5614,12 +5816,10 @@ impl Sidebar {
          // dropped without destroying the user's workspace layout.
          let mut workspaces_to_remove: Vec<Entity<Workspace>> =
              workspace_to_remove.into_iter().collect();
@@ -379,7 +483,7 @@ index 2bca37b..6fffa2a 100644
  
          let removed_workspace = !workspaces_to_remove.is_empty();
          let session_id = session_id.clone();
-@@ -7062,12 +7179,10 @@ impl Sidebar {
+@@ -7062,12 +7262,10 @@ impl Sidebar {
          });
          let mut workspaces_to_remove: Vec<Entity<Workspace>> =
              workspace_to_remove.into_iter().collect();
@@ -684,7 +788,7 @@ index 283219f..624627a 100644
  async fn test_parallel_threads_shown_with_live_status(cx: &mut TestAppContext) {
      let project = init_test_project_with_agent_panel("/my-project", cx).await;
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index aa0f0b5..ef6e31a 100644
+index aa0f0b5..8dc9909 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -1854,6 +1854,17 @@ impl MultiWorkspace {
@@ -692,33 +796,35 @@ index aa0f0b5..ef6e31a 100644
          window: &mut Window,
          cx: &mut Context<Self>,
 +    ) -> Task<Result<bool>> {
-+        self.remove_with_pre_remove(workspaces, intent, async |_| Ok(()), window, cx)
++        self.remove_with_pre_remove(workspaces, intent, async |_| Ok(true), window, cx)
 +    }
 +
 +    pub fn remove_with_pre_remove(
 +        &mut self,
 +        workspaces: impl IntoIterator<Item = Entity<Workspace>>,
 +        intent: RemovalIntent,
-+        before_remove: impl AsyncFnOnce(&mut gpui::AsyncWindowContext) -> Result<()> + 'static,
++        before_remove: impl AsyncFnOnce(&mut gpui::AsyncWindowContext) -> Result<bool> + 'static,
 +        window: &mut Window,
 +        cx: &mut Context<Self>,
      ) -> Task<Result<bool>> {
          let workspaces: Vec<_> = workspaces.into_iter().collect();
  
-@@ -1898,6 +1909,8 @@ impl MultiWorkspace {
+@@ -1898,6 +1909,10 @@ impl MultiWorkspace {
                  }
              }
  
-+            before_remove(cx).await?;
++            if !before_remove(cx).await? {
++                return Ok(false);
++            }
 +
              // Edit phase: one synchronous update. Delete the rows, then pick
              // the replacement from the rows that actually remain.
              let (removed_any, reopen_key) = this.update_in(cx, |this, window, cx| {
 diff --git a/crates/workspace/src/multi_workspace_tests.rs b/crates/workspace/src/multi_workspace_tests.rs
-index 91abd7d..2ecc240 100644
+index 91abd7d..9bc9f3b 100644
 --- a/crates/workspace/src/multi_workspace_tests.rs
 +++ b/crates/workspace/src/multi_workspace_tests.rs
-@@ -717,6 +717,104 @@ async fn test_remove_fallback_via_find_or_create_skips_removed_workspaces(cx: &m
+@@ -717,6 +717,120 @@ async fn test_remove_fallback_via_find_or_create_skips_removed_workspaces(cx: &m
      });
  }
  
@@ -747,7 +853,7 @@ index 91abd7d..2ecc240 100644
 +            RemovalIntent::CloseProject,
 +            async move |_| {
 +                guard_calls.set(guard_calls.get() + 1);
-+                Ok(())
++                Ok(true)
 +            },
 +            window,
 +            cx,
@@ -790,6 +896,22 @@ index 91abd7d..2ecc240 100644
 +            .any(|candidate| candidate == &workspace)
 +    }));
 +
++    let remove_task = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
++        multi_workspace.remove_with_pre_remove(
++            [workspace.clone()],
++            RemovalIntent::CloseProject,
++            async |_| Ok(false),
++            window,
++            cx,
++        )
++    });
++    assert!(!remove_task.await.expect("refused removal should succeed"));
++    assert!(multi_workspace.read_with(cx, |multi_workspace, _| {
++        multi_workspace
++            .workspaces()
++            .any(|candidate| candidate == &workspace)
++    }));
++
 +    let guard_calls = Rc::new(Cell::new(0));
 +    let weak_multi_workspace = multi_workspace.downgrade();
 +    let guarded_workspace = workspace.clone();
@@ -805,7 +927,7 @@ index 91abd7d..2ecc240 100644
 +                        .any(|candidate| candidate == &guarded_workspace)
 +                })?);
 +                guard_calls.set(guard_calls.get() + 1);
-+                Ok(())
++                Ok(true)
 +            },
 +            window,
 +            cx,
@@ -823,6 +945,21 @@ index 91abd7d..2ecc240 100644
  #[gpui::test]
  async fn test_remove_keeping_the_project_does_not_switch_projects(cx: &mut TestAppContext) {
      init_test(cx);
+diff --git a/crates/workspace/src/pane.rs b/crates/workspace/src/pane.rs
+index 40bc7bb..e7ef290 100644
+--- a/crates/workspace/src/pane.rs
++++ b/crates/workspace/src/pane.rs
+@@ -860,6 +860,10 @@ impl Pane {
+         cx.notify();
+     }
+ 
++    pub fn close_pane_if_empty(&self) -> bool {
++        self.close_pane_if_empty
++    }
++
+     pub fn set_can_navigate(&mut self, can_navigate: bool, cx: &mut Context<Self>) {
+         self.toolbar.update(cx, |toolbar, cx| {
+             toolbar.set_can_navigate(can_navigate, cx);
 -- 
 2.43.0
 
