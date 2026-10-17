@@ -860,6 +860,10 @@ impl Pane {
         cx.notify();
     }
 
+    pub fn close_pane_if_empty(&self) -> bool {
+        self.close_pane_if_empty
+    }
+
     pub fn set_can_navigate(&mut self, can_navigate: bool, cx: &mut Context<Self>) {
         self.toolbar.update(cx, |toolbar, cx| {
             toolbar.set_can_navigate(can_navigate, cx);
