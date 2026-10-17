@@ -45,7 +45,9 @@ pub struct WorkspaceSettings {
     pub fullscreen_mode: settings::FullscreenMode,
     pub zoomed_padding: bool,
     pub window_decorations: settings::WindowDecorations,
+    pub title_bar_to_status_bar: bool,
     pub focus_follows_mouse: FocusFollowsMouse,
+    pub compact_toolbar: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -91,6 +93,8 @@ pub struct TabBarSettings {
     pub show_nav_history_buttons: bool,
     pub show_tab_bar_buttons: bool,
     pub show_pinned_tabs_in_separate_row: bool,
+    pub pinned_tab_chips: bool,
+    pub unpinned_tab_chips: bool,
 }
 
 impl Settings for WorkspaceSettings {
@@ -150,6 +154,7 @@ impl Settings for WorkspaceSettings {
             fullscreen_mode: workspace.fullscreen_mode.unwrap(),
             zoomed_padding: workspace.zoomed_padding.unwrap(),
             window_decorations: workspace.window_decorations.unwrap(),
+            title_bar_to_status_bar: workspace.title_bar_to_status_bar.unwrap_or(false),
             focus_follows_mouse: FocusFollowsMouse {
                 enabled: workspace
                     .focus_follows_mouse
@@ -164,6 +169,12 @@ impl Settings for WorkspaceSettings {
                         .unwrap_or(250),
                 ),
             },
+            compact_toolbar: content
+                .editor
+                .toolbar
+                .as_ref()
+                .and_then(|toolbar| toolbar.compact)
+                .unwrap_or(false),
         }
     }
 }
@@ -209,6 +220,8 @@ impl Settings for TabBarSettings {
             show_nav_history_buttons: tab_bar.show_nav_history_buttons.unwrap(),
             show_tab_bar_buttons: tab_bar.show_tab_bar_buttons.unwrap(),
             show_pinned_tabs_in_separate_row: tab_bar.show_pinned_tabs_in_separate_row.unwrap(),
+            pinned_tab_chips: tab_bar.pinned_tab_chips.unwrap_or(false),
+            unpinned_tab_chips: tab_bar.unpinned_tab_chips.unwrap_or(false),
         }
     }
 }
@@ -236,5 +249,29 @@ impl Settings for StatusBarSettings {
             active_encoding_button: status_bar.active_encoding_button.unwrap(),
             pending_keystrokes_indicator: status_bar.pending_keystrokes_indicator.unwrap(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_workspace_settings_defaults_when_fields_none() {
+        let mut raw: settings::SettingsContent =
+            settings::parse_json_with_comments(&settings::default_settings()).unwrap();
+        raw.workspace.title_bar_to_status_bar = None;
+        raw.editor.toolbar = None;
+        if let Some(tab_bar) = raw.tab_bar.as_mut() {
+            tab_bar.pinned_tab_chips = None;
+            tab_bar.unpinned_tab_chips = None;
+        }
+
+        let settings = WorkspaceSettings::from_settings(&raw);
+        assert!(!settings.title_bar_to_status_bar);
+        assert!(!settings.compact_toolbar);
+        let tab_settings = TabBarSettings::from_settings(&raw);
+        assert!(!tab_settings.pinned_tab_chips);
+        assert!(!tab_settings.unpinned_tab_chips);
     }
 }
