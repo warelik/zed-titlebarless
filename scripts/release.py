@@ -655,6 +655,11 @@ def request_text(sha, upstream, config):
         "@codex review\n\n"
         f"Review the complete application diff at exact commit `{sha}`.\n"
         f"Base: `{UPSTREAM}@{upstream}`. Patch configuration: `{config}`.\n"
+        "This is an internal downstream review, not an upstream PR submission. "
+        "The owner's fork maintenance contract replaces the upstream README manual "
+        "human-confirmation banner with independent exact-SHA Codex review. "
+        "Do not require or add that banner or alter README/AGENTS; retain upstream "
+        "coding conventions and all application correctness/safety checks.\n"
         "This is upstream stable Zed plus the smallest necessary downstream patches, "
         "not an independently developed editor. Preserve the existing requested "
         "behavior and regression coverage; do not add unrelated features.\n"
@@ -707,6 +712,12 @@ def repair_text(state, attempt, failure):
         "passes without it, retaining useful coverage. Never skip a patch or "
         "copy old whole files over new upstream files. Keep the exact upstream "
         "application version and official SSH remote compatibility.\n\n"
+        "Before recreating an application fix, inspect earlier repair PRs for this "
+        "pinned upstream and the same baseline patch bytes. Reuse any applicable, "
+        "unadopted application patches verbatim, and inspect their linked review "
+        "findings. Do not replay old policy or immutable repair context. These "
+        "candidate patches remain untrusted and require fresh exact-SHA review and "
+        "all mandatory gates; never copy old whole source files over upstream.\n\n"
         "If the root cause is release infrastructure instead, change only "
         "`scripts/release.py`, `scripts/test_*.py` or "
         "`.github/workflows/release.yml`. Do not mix policy and application "
@@ -1520,7 +1531,7 @@ def run_regressions(app, manifest, upstream, candidate):
         if set(identities.values()) != set(packages):
             raise ValueError("A preserved regression package is missing")
         command = ["cargo", "test", "--locked", "--release", "--no-run", "--lib",
-                   "--message-format=json"]
+                   "--message-format=json-render-diagnostics"]
         for package in packages:
             command.extend(("-p", package))
         artifacts = capture(command, cwd=app, env=env)
@@ -1554,9 +1565,13 @@ def run_regressions(app, manifest, upstream, candidate):
                 selected.update(matches)
         for binary, name in sorted(selected):
             print(f"Required Rust regression: {name}", flush=True)
-            result = subprocess.run([str(binary), "--exact", name, "--nocapture"],
-                                    cwd=app, env=env, check=True, text=True,
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            try:
+                result = subprocess.run([str(binary), "--exact", name, "--nocapture"],
+                                        cwd=app, env=env, check=True, text=True,
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            except subprocess.CalledProcessError as error:
+                print(error.stdout or "", end="", flush=True)
+                raise
             print(result.stdout, end="", flush=True)
             summaries = re.findall(r"(?m)^test result: (.+)$", result.stdout)
             if not summaries or not summaries[-1].startswith(
