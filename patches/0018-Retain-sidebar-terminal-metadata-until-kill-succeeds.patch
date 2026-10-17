@@ -1,4 +1,4 @@
-From f38c613ddb18df23a51da59e3ebdf5900b39d198 Mon Sep 17 00:00:00 2001
+From 63c561d2f33286055923dcbb34f57c5f0e411d85 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex-repair@example.invalid>
 Date: Sat, 17 Oct 2026 02:28:03 +0000
 Subject: [PATCH] Retain sidebar terminal metadata until session kill succeeds
@@ -9,10 +9,10 @@ Subject: [PATCH] Retain sidebar terminal metadata until session kill succeeds
  crates/sidebar/src/sidebar_tests.rs           | 752 ++++++++++++++++++
  crates/workspace/src/item.rs                  |  53 +-
  crates/workspace/src/multi_workspace.rs       |  64 +-
- crates/workspace/src/multi_workspace_tests.rs | 240 ++++++
+ crates/workspace/src/multi_workspace_tests.rs | 246 ++++++
  crates/workspace/src/pane.rs                  |   4 +
  crates/workspace/src/workspace.rs             |   4 +-
- 8 files changed, 1509 insertions(+), 76 deletions(-)
+ 8 files changed, 1515 insertions(+), 76 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
 index 2e60981..8caca50 100644
@@ -1596,7 +1596,7 @@ index aa0f0b5..f2f1800 100644
                  let displayed_workspace = this.workspace().clone();
  
 diff --git a/crates/workspace/src/multi_workspace_tests.rs b/crates/workspace/src/multi_workspace_tests.rs
-index 91abd7d..87d4f61 100644
+index 91abd7d..db91d13 100644
 --- a/crates/workspace/src/multi_workspace_tests.rs
 +++ b/crates/workspace/src/multi_workspace_tests.rs
 @@ -717,6 +717,120 @@ async fn test_remove_fallback_via_find_or_create_skips_removed_workspaces(cx: &m
@@ -1720,7 +1720,7 @@ index 91abd7d..87d4f61 100644
  #[gpui::test]
  async fn test_remove_keeping_the_project_does_not_switch_projects(cx: &mut TestAppContext) {
      init_test(cx);
-@@ -1731,3 +1845,129 @@ async fn test_nearest_retained_workspace_skips_disconnected_workspace(cx: &mut T
+@@ -1731,3 +1845,135 @@ async fn test_nearest_retained_workspace_skips_disconnected_workspace(cx: &mut T
          );
      });
  }
@@ -1731,6 +1731,7 @@ index 91abd7d..87d4f61 100644
 +    use futures::channel::oneshot;
 +
 +    init_test(cx);
++    cx.update(|cx| crate::register_serializable_item::<TestItem>(cx));
 +    let fs = FakeFs::new(cx.executor());
 +    fs.insert_tree("/guard-root", json!({ "file.txt": "" }))
 +        .await;
@@ -1739,7 +1740,11 @@ index 91abd7d..87d4f61 100644
 +        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
 +    let workspace =
 +        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
-+    let original_item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
++    let original_item = cx.new(|cx| {
++        TestItem::new(cx)
++            .with_dirty(true)
++            .with_serialize(|| Some(gpui::Task::ready(Ok(()))))
++    });
 +    workspace.update_in(cx, |workspace, window, cx| {
 +        workspace.add_item_to_active_pane(Box::new(original_item.clone()), None, true, window, cx);
 +    });
@@ -1760,6 +1765,7 @@ index 91abd7d..87d4f61 100644
 +        )
 +    });
 +    started_rx.await.expect("guard should start after consent");
++    assert!(original_item.read_with(cx, |item, _| item.is_dirty));
 +
 +    original_item.update(cx, |item, cx| {
 +        item.state = "edited while terminal stopped".into();
