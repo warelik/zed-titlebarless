@@ -1,15 +1,15 @@
-From 9a58db26a4ea75cdbc9887bed60388c644f06d8b Mon Sep 17 00:00:00 2001
+From 9e9628d86984a4f8246ab20b46141cb9e4cc40b5 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex-repair@example.invalid>
 Date: Sat, 17 Oct 2026 00:00:38 +0000
 Subject: [PATCH] Retain terminal metadata when session kill fails
 
 ---
- crates/agent_ui/src/agent_panel.rs | 276 +++++++++++++++++++++++------
+ crates/agent_ui/src/agent_panel.rs | 294 +++++++++++++++++++++++------
  crates/project/src/terminals.rs    |   4 +
- 2 files changed, 229 insertions(+), 51 deletions(-)
+ 2 files changed, 241 insertions(+), 57 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index c868051..763d313 100644
+index c868051..01b3370 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
 @@ -147,6 +147,26 @@ fn reconnect_if_remote_disconnected(project: Entity<Project>, cx: &mut App) {
@@ -91,12 +91,13 @@ index c868051..763d313 100644
                      select_mode,
                      focus,
                      source,
-@@ -2613,26 +2634,27 @@ impl AgentPanel {
+@@ -2613,26 +2634,28 @@ impl AgentPanel {
              .get(&terminal_id)
              .map_or(true, |terminal| terminal.persistent);
  
 -        if self.pending_terminal_spawns.remove(&terminal_id) {
-+        let spawn_is_pending = self.pending_terminal_spawns.remove(&terminal_id);
++        let spawn_is_pending = self.pending_terminal_spawns.remove(&terminal_id)
++            || self.closed_terminal_spawns.contains(&terminal_id);
 +        if spawn_is_pending {
              self.closed_terminal_spawns.insert(terminal_id);
          }
@@ -131,7 +132,7 @@ index c868051..763d313 100644
          if was_active {
              self.base_view = BaseView::Uninitialized;
              self.refresh_base_view_subscriptions(window, cx);
-@@ -16261,6 +16283,80 @@ mod tests {
+@@ -16261,6 +16284,80 @@ mod tests {
          });
      }
  
@@ -212,38 +213,53 @@ index c868051..763d313 100644
      #[gpui::test]
      async fn test_process_exited_keeps_thread_and_enter_restart(cx: &mut TestAppContext) {
          init_test(cx);
-@@ -17017,19 +17113,21 @@ mod tests {
-             panel.close_terminal(terminal_id, window, cx);
+@@ -17012,23 +17109,30 @@ mod tests {
          });
+         assert!(panel.read_with(&cx, |p, _| p.is_terminal_spawn_pending(terminal_id)));
+ 
+-        // User clicks × while spawn is in flight:
+-        panel.update_in(&mut cx, |panel, window, cx| {
+-            panel.close_terminal(terminal_id, window, cx);
+-        });
++        // Repeated close requests while the spawn is in flight must keep using
++        // the existing closed-spawn marker as the pending state.
++        for _ in 0..2 {
++            panel.update_in(&mut cx, |panel, window, cx| {
++                panel.close_terminal(terminal_id, window, cx);
++            });
++            cx.run_until_parked();
  
 -        // Close-time kill occurred
 -        assert_eq!(
 -            fake.kill_history().len(),
 -            1,
 -            "close_terminal must kill session at close time"
-+        assert!(
-+            fake.kill_history().is_empty(),
-+            "a pending spawn must not be killed before its outcome is known"
-         );
--
+-        );
++            assert!(
++                fake.kill_history().is_empty(),
++                "a pending spawn must not be killed before its outcome is known"
++            );
++            panel.read_with(&cx, |panel, cx| {
++                assert!(panel.closed_terminal_spawns.contains(&terminal_id));
++                assert!(
++                    TerminalThreadMetadataStore::global(cx)
++                        .read(cx)
++                        .entry(terminal_id)
++                        .is_some()
++                );
++            });
++        }
+ 
 -        // Re-seed metadata in store to verify tombstone gate-path deletion
-         cx.update(|_, cx| {
+-        cx.update(|_, cx| {
 -            TerminalThreadMetadataStore::global(cx)
 -                .update(cx, |s, cx| s.save(metadata.clone(), cx));
-+            assert!(
-+                TerminalThreadMetadataStore::global(cx)
-+                    .read(cx)
-+                    .entry(terminal_id)
-+                    .is_some()
-+            );
-         });
- 
+-        });
 +        fake.state.lock().kill_error = Some("connection lost".to_string());
-+
+ 
          // Release the gate so spawn_terminal finishes and lands on tombstone
          release_tx
-             .send(())
-@@ -17045,21 +17143,78 @@ mod tests {
+@@ -17045,21 +17149,78 @@ mod tests {
                  TerminalThreadMetadataStore::global(cx)
                      .read(cx)
                      .entry(terminal_id)
@@ -334,7 +350,7 @@ index c868051..763d313 100644
      }
  
      #[gpui::test]
-@@ -17089,6 +17244,8 @@ mod tests {
+@@ -17089,6 +17250,8 @@ mod tests {
              remote_connection: None,
              working_directory: None,
          };
@@ -343,7 +359,7 @@ index c868051..763d313 100644
          cx.update(|_, cx| {
              TerminalThreadMetadataStore::global(cx)
                  .update(cx, |store, cx| store.save(metadata.clone(), cx));
-@@ -17117,7 +17274,7 @@ mod tests {
+@@ -17117,7 +17280,7 @@ mod tests {
          assert!(panel.read_with(&cx, |panel, _cx| {
              panel.closed_terminal_spawns.contains(&terminal_id)
          }));
@@ -352,7 +368,7 @@ index c868051..763d313 100644
  
          cx.update(|_, cx| {
              TerminalThreadMetadataStore::global(cx)
-@@ -17135,7 +17292,7 @@ mod tests {
+@@ -17135,7 +17298,7 @@ mod tests {
              assert!(!panel.closed_terminal_spawns.contains(&terminal_id));
              let store = TerminalThreadMetadataStore::global(cx);
              let store = store.read(cx);
@@ -361,7 +377,7 @@ index c868051..763d313 100644
              assert!(!store.has_deleted_terminal_id(terminal_id));
          });
          assert_eq!(
-@@ -17144,9 +17301,26 @@ mod tests {
+@@ -17144,9 +17307,26 @@ mod tests {
              "a closed spawn error should not add an error notification"
          );
          assert!(fake_shpool.attach_history().is_empty());

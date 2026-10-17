@@ -1,19 +1,19 @@
-From 13be3e8e6d518b555c2ea44d7a4900d42d0ef4e1 Mon Sep 17 00:00:00 2001
+From fc83ea5aae9a039ab5ffadf15ddd15b3e1213c2e Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex-repair@example.invalid>
 Date: Sat, 17 Oct 2026 02:28:03 +0000
 Subject: [PATCH] Retain sidebar terminal metadata until session kill succeeds
 
 ---
  crates/agent_ui/src/agent_panel.rs            |  19 +-
- crates/sidebar/src/sidebar.rs                 | 326 ++++++++++++++----
- crates/sidebar/src/sidebar_tests.rs           | 255 ++++++++++++++
+ crates/sidebar/src/sidebar.rs                 | 326 +++++++++---
+ crates/sidebar/src/sidebar_tests.rs           | 502 ++++++++++++++++++
  crates/workspace/src/multi_workspace.rs       |  15 +
- crates/workspace/src/multi_workspace_tests.rs | 114 ++++++
+ crates/workspace/src/multi_workspace_tests.rs | 114 ++++
  crates/workspace/src/pane.rs                  |   4 +
- 6 files changed, 665 insertions(+), 68 deletions(-)
+ 6 files changed, 912 insertions(+), 68 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 5848286..b767bcb 100644
+index 2e60981..8caca50 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
 @@ -2525,7 +2525,7 @@ impl AgentPanel {
@@ -60,7 +60,7 @@ index 5848286..b767bcb 100644
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
-@@ -2645,7 +2656,7 @@ impl AgentPanel {
+@@ -2646,7 +2657,7 @@ impl AgentPanel {
          if spawn_is_pending {
              // The spawn outcome determines whether there is a persistent session
              // to kill. Its completion resolves this tombstone.
@@ -501,14 +501,14 @@ index 2bca37b..e8f3062 100644
          let draft_workspace_removed = matches!(
              workspace,
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 283219f..624627a 100644
+index 283219f..f3d576e 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
 @@ -25,6 +25,7 @@ use std::{
      sync::Arc,
  };
  use util::{path_list::PathList, rel_path::rel_path};
-+use workspace::item::test::TestItem;
++use workspace::item::test::{TestItem, TestProjectItem};
  
  fn close_terminal_from_sidebar(
      sidebar: &Entity<Sidebar>,
@@ -787,6 +787,260 @@ index 283219f..624627a 100644
  #[gpui::test]
  async fn test_parallel_threads_shown_with_live_status(cx: &mut TestAppContext) {
      let project = init_test_project_with_agent_panel("/my-project", cx).await;
+@@ -14799,6 +15054,253 @@ async fn test_archive_removes_worktree_even_when_workspace_paths_diverge(cx: &mu
+     );
+ }
+ 
++#[gpui::test]
++async fn test_closing_terminal_on_mixed_worktree_cancel_preserves_session_items_and_root(
++    cx: &mut TestAppContext,
++) {
++    init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    fs.insert_tree(
++        "/main-repo",
++        serde_json::json!({
++            ".git": { "worktrees": { "feature-b": {
++                "commondir": "../../", "HEAD": "ref: refs/heads/feature-b",
++            }}},
++            "src": { "lib.rs": "" },
++        }),
++    )
++    .await;
++    fs.insert_tree(
++        "/worktrees/main-repo/feature-b/main-repo",
++        serde_json::json!({
++            ".git": "gitdir: /main-repo/.git/worktrees/feature-b",
++            "src": { "main.rs": "" },
++        }),
++    )
++    .await;
++    fs.add_linked_worktree_for_repo(
++        Path::new("/main-repo/.git"),
++        false,
++        git::repository::Worktree {
++            path: PathBuf::from("/worktrees/main-repo/feature-b/main-repo"),
++            ref_name: Some("refs/heads/feature-b".into()),
++            sha: "def".into(),
++            is_main: false,
++            is_bare: false,
++        },
++    )
++    .await;
++    agent_ui::test_support::record_zed_created_worktree(
++        fs.as_ref(),
++        Path::new("/worktrees/main-repo/feature-b/main-repo"),
++        None,
++        cx,
++    )
++    .await;
++    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
++
++    let project = project::Project::test(
++        fs.clone(),
++        [
++            "/main-repo".as_ref(),
++            "/worktrees/main-repo/feature-b/main-repo".as_ref(),
++        ],
++        cx,
++    )
++    .await;
++    project
++        .update(cx, |project, cx| project.git_scans_complete(cx))
++        .await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let sidebar = setup_sidebar(&multi_workspace, cx);
++    let workspace =
++        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
++    let panel = add_agent_panel(&workspace, cx);
++
++    let (main_worktree_id, linked_worktree_id) = project.read_with(cx, |project, cx| {
++        let worktrees: Vec<_> = project
++            .visible_worktrees(cx)
++            .map(|worktree| (worktree.read(cx).id(), worktree.read(cx).abs_path()))
++            .collect();
++        let find = |path: &Path| {
++            worktrees
++                .iter()
++                .find(|(_, candidate)| candidate.as_ref() == path)
++                .map(|(id, _)| *id)
++                .unwrap()
++        };
++        (
++            find(Path::new("/main-repo")),
++            find(Path::new("/worktrees/main-repo/feature-b/main-repo")),
++        )
++    });
++    let linked_item =
++        cx.new(|cx| {
++            TestItem::new(cx).with_dirty(true).with_project_items(&[
++                TestProjectItem::new_in_worktree(1, "src/main.rs", linked_worktree_id, cx),
++            ])
++        });
++    let unrelated_item =
++        cx.new(|cx| {
++            TestItem::new(cx).with_dirty(true).with_project_items(&[
++                TestProjectItem::new_in_worktree(2, "src/lib.rs", main_worktree_id, cx),
++            ])
++        });
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.add_item_to_active_pane(Box::new(linked_item.clone()), None, true, window, cx);
++        workspace.add_item_to_active_pane(Box::new(unrelated_item.clone()), None, true, window, cx);
++    });
++
++    let terminal_id = panel
++        .update_in(cx, |panel, window, cx| {
++            panel.insert_test_terminal("Feature Terminal", true, window, cx)
++        })
++        .unwrap();
++    let metadata = TerminalThreadMetadata {
++        terminal_id,
++        title: "Feature Terminal".into(),
++        custom_title: None,
++        created_at: Utc::now(),
++        worktree_paths: WorktreePaths::from_path_lists(
++            PathList::new(&[PathBuf::from("/main-repo")]),
++            PathList::new(&[PathBuf::from("/worktrees/main-repo/feature-b/main-repo")]),
++        )
++        .unwrap(),
++        remote_connection: None,
++        working_directory: None,
++    };
++    cx.update(|_, cx| {
++        TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx));
++    });
++    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
++    cx.run_until_parked();
++
++    let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
++    let session_name = terminal_id.session_name();
++    fake.add_session(&session_name);
++    let items_are_attached = |cx: &VisualTestContext| {
++        workspace.read_with(cx, |workspace, cx| {
++            let ids: Vec<_> = workspace
++                .panes()
++                .iter()
++                .flat_map(|pane| pane.read(cx).items().map(|item| item.item_id()))
++                .collect();
++            ids.contains(&linked_item.entity_id()) && ids.contains(&unrelated_item.entity_id())
++        })
++    };
++
++    close_terminal_from_sidebar(&sidebar, terminal_id, cx);
++    cx.run_until_parked();
++    assert!(cx.has_pending_prompt());
++    assert!(fake.kill_history().is_empty());
++    assert!(fake.has_session(&session_name));
++    assert!(items_are_attached(cx));
++    assert_eq!(
++        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace
++            .workspaces()
++            .count()),
++        1
++    );
++    assert!(project.read_with(cx, |project, cx| {
++        project
++            .visible_worktrees(cx)
++            .any(|worktree| worktree.read(cx).id() == linked_worktree_id)
++    }));
++    cx.update(|_, cx| {
++        assert!(
++            TerminalThreadMetadataStore::global(cx)
++                .read(cx)
++                .entry(terminal_id)
++                .is_some()
++        )
++    });
++
++    cx.simulate_prompt_answer("Cancel");
++    cx.run_until_parked();
++    assert!(fake.kill_history().is_empty());
++    assert!(fake.has_session(&session_name));
++    assert!(items_are_attached(cx));
++    assert!(
++        fs.is_dir(Path::new("/worktrees/main-repo/feature-b/main-repo"))
++            .await
++    );
++    cx.update(|_, cx| {
++        assert!(
++            TerminalThreadMetadataStore::global(cx)
++                .read(cx)
++                .entry(terminal_id)
++                .is_some()
++        )
++    });
++
++    fake.state.lock().kill_error = Some("connection lost".into());
++    close_terminal_from_sidebar(&sidebar, terminal_id, cx);
++    cx.run_until_parked();
++    assert!(cx.has_pending_prompt());
++    assert!(fake.kill_history().is_empty());
++    cx.simulate_prompt_answer("Don't Save");
++    cx.run_until_parked();
++    assert_eq!(fake.kill_history(), vec![session_name.clone()]);
++    assert!(fake.has_session(&session_name));
++    assert!(items_are_attached(cx));
++    assert!(
++        fs.is_dir(Path::new("/worktrees/main-repo/feature-b/main-repo"))
++            .await
++    );
++    cx.update(|_, cx| {
++        assert!(
++            TerminalThreadMetadataStore::global(cx)
++                .read(cx)
++                .entry(terminal_id)
++                .is_some()
++        )
++    });
++
++    fake.state.lock().kill_error = None;
++    close_terminal_from_sidebar(&sidebar, terminal_id, cx);
++    for _ in 0..4 {
++        cx.run_until_parked();
++    }
++    assert!(!fake.has_session(&session_name));
++    cx.update(|_, cx| {
++        assert!(
++            TerminalThreadMetadataStore::global(cx)
++                .read(cx)
++                .entry(terminal_id)
++                .is_none()
++        )
++    });
++    assert_eq!(
++        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace
++            .workspaces()
++            .count()),
++        1
++    );
++    assert!(
++        !fs.is_dir(Path::new("/worktrees/main-repo/feature-b/main-repo"))
++            .await
++    );
++    workspace.read_with(cx, |workspace, cx| {
++        let ids: Vec<_> = workspace
++            .panes()
++            .iter()
++            .flat_map(|pane| pane.read(cx).items().map(|item| item.item_id()))
++            .collect();
++        assert!(!ids.contains(&linked_item.entity_id()));
++        assert!(ids.contains(&unrelated_item.entity_id()));
++    });
++    unrelated_item.read_with(cx, |item, _| {
++        assert!(item.is_dirty);
++        assert_eq!(item.save_count, 0);
++    });
++    assert!(project.read_with(cx, |project, cx| {
++        project
++            .visible_worktrees(cx)
++            .any(|worktree| worktree.read(cx).id() == main_worktree_id)
++    }));
++}
++
+ #[gpui::test]
+ async fn test_archive_mixed_workspace_closes_only_archived_worktree_items(cx: &mut TestAppContext) {
+     // When a workspace contains both a worktree being archived and other
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
 index aa0f0b5..8dc9909 100644
 --- a/crates/workspace/src/multi_workspace.rs
