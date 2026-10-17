@@ -2526,7 +2526,7 @@ impl AgentPanel {
                         cx.emit(AgentPanelEvent::EntryChanged);
                         cx.notify();
                     } else {
-                        this.close_terminal_internal(terminal_id, false, window, cx);
+                        this.close_terminal_internal(terminal_id, false, true, window, cx);
                     }
                 }
                 TerminalEvent::CloseTerminal
@@ -2610,7 +2610,7 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_terminal_internal(terminal_id, true, window, cx);
+        self.close_terminal_internal(terminal_id, true, true, window, cx);
     }
 
     pub fn close_terminal_without_activating_draft(
@@ -2619,13 +2619,24 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_terminal_internal(terminal_id, false, window, cx);
+        self.close_terminal_internal(terminal_id, false, true, window, cx);
+    }
+
+    pub fn close_terminal_after_session_kill(
+        &mut self,
+        terminal_id: TerminalId,
+        activate_draft_after_close: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_terminal_internal(terminal_id, activate_draft_after_close, false, window, cx);
     }
 
     fn close_terminal_internal(
         &mut self,
         terminal_id: TerminalId,
         activate_draft_after_close: bool,
+        kill_persistent_session: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2647,7 +2658,7 @@ impl AgentPanel {
         if spawn_is_pending {
             // The spawn outcome determines whether there is a persistent session
             // to kill. Its completion resolves this tombstone.
-        } else if should_kill_persistent_session {
+        } else if kill_persistent_session && should_kill_persistent_session {
             kill_persistent_terminal_session_and_delete_metadata(
                 self.project.clone(),
                 terminal_id,

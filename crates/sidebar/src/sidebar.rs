@@ -49,6 +49,7 @@ use remote::{RemoteConnectionOptions, same_remote_connection_identity};
 
 use serde::{Deserialize, Serialize};
 use settings::{Settings as _, SettingsStore};
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::mem;
@@ -66,10 +67,11 @@ use unicode_segmentation::UnicodeSegmentation as _;
 use util::ResultExt as _;
 use util::path_list::PathList;
 use workspace::{
-    CloseWindow, FocusWorkspaceSidebar, MoveProjectDown, MoveProjectUp, MultiWorkspace,
-    MultiWorkspaceEvent, NextProject, NextThread, Open, OpenMode, PreviousProject, PreviousThread,
-    ProjectGroupKey, RemovalIntent, SaveIntent, Sidebar as WorkspaceSidebar, SidebarSide, Toast,
-    ToggleWorkspaceSidebar, Workspace, notifications::NotificationId, sidebar_side_context_menu,
+    CloseWindow, FocusWorkspaceSidebar, ItemCloseGuard, MoveProjectDown, MoveProjectUp,
+    MultiWorkspace, MultiWorkspaceEvent, NextProject, NextThread, Open, OpenMode, Pane,
+    PreviousProject, PreviousThread, ProjectGroupKey, RemovalIntent, SaveIntent,
+    Sidebar as WorkspaceSidebar, SidebarSide, Toast, ToggleWorkspaceSidebar, Workspace,
+    notifications::NotificationId, sidebar_side_context_menu,
 };
 
 use git_ui_core::worktree_service::{RemoteBranchName, worktree_create_targets};
@@ -145,6 +147,8 @@ enum ArchiveWorktreeOutcome {
     Success,
     Cancelled,
 }
+
+type ArchivedWorktreeItemTargets = Vec<(Entity<Workspace>, Entity<Pane>, Vec<EntityId>)>;
 
 #[derive(Clone, Debug)]
 enum ActiveEntry {
@@ -5186,7 +5190,31 @@ impl Sidebar {
             return;
         }
 
+        self.finish_close_terminal(metadata, workspace, window, cx);
+    }
+
+    fn finish_close_terminal(
+        &mut self,
+        metadata: &TerminalThreadMetadata,
+        workspace: &ThreadEntryWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let terminal_id = metadata.terminal_id;
+        let project = match workspace {
+            ThreadEntryWorkspace::Open(workspace) => Some(workspace.read(cx).project().clone()),
+            ThreadEntryWorkspace::Closed { .. } => {
+                self.find_project_for_remote_connection(metadata.remote_connection.as_ref(), cx)
+            }
+        };
+        let Some(project) = project else {
+            log::warn!(
+                "no open project available to kill persistent terminal session for terminal {terminal_id}"
+            );
+            self.show_terminal_close_error(terminal_id, cx);
+            return;
+        };
+
         let is_active = self
             .active_entry
             .as_ref()
@@ -5212,7 +5240,6 @@ impl Sidebar {
             Some(terminal_id),
             cx,
         );
-
         let workspace_to_remove = self.linked_worktree_workspace_to_remove(
             &terminal_folder_paths,
             metadata.remote_connection.as_ref(),
@@ -5221,38 +5248,193 @@ impl Sidebar {
             &roots_to_archive,
             cx,
         );
-
         let mut workspaces_to_remove: Vec<Entity<Workspace>> =
             workspace_to_remove.into_iter().collect();
-        let close_item_tasks = self.close_items_for_archived_worktrees(
-            &roots_to_archive,
-            &mut workspaces_to_remove,
-            window,
-            cx,
-        );
-
+        let mixed_workspaces =
+            self.plan_archived_worktree_cleanup(&roots_to_archive, &mut workspaces_to_remove, cx);
+        let mixed_item_targets = self.archived_worktree_item_targets(&mixed_workspaces, cx);
         let terminal_workspace_removed = matches!(
             workspace,
             ThreadEntryWorkspace::Open(workspace) if workspaces_to_remove.contains(workspace)
         );
         let metadata = metadata.clone();
         let workspace = workspace.clone();
+        let roots_to_archive = roots_to_archive.clone();
 
+        if workspaces_to_remove.is_empty() {
+            cx.spawn_in(window, async move |this, cx| {
+                if !Self::consent_to_close_archived_worktree_items(&mixed_item_targets, cx).await? {
+                    return anyhow::Ok(());
+                }
+                let (guard, item_ids) = cx.update(|window, cx| {
+                    Self::guard_archived_worktree_items(
+                        &mixed_item_targets,
+                        &mixed_workspaces,
+                        window,
+                        cx,
+                    )
+                })?;
+                let kill = project.update(cx, |project, cx| {
+                    project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
+                });
+                if let Err(error) = kill.await {
+                    log::error!(
+                        "failed to kill persistent terminal session for terminal {terminal_id}: {error:#}"
+                    );
+                    this.update(cx, |this, cx| this.show_terminal_close_error(terminal_id, cx))?;
+                    return anyhow::Ok(());
+                }
+                this.update_in(cx, |this, window, cx| {
+                    let cleanup_is_safe = !guard.changed(cx)
+                        && Self::archived_worktree_item_membership_matches(&item_ids, cx);
+                    if !cleanup_is_safe {
+                        this.show_terminal_workspace_edited_after_stop(cx);
+                    }
+                    this.complete_terminal_close(
+                        &metadata,
+                        &workspace,
+                        is_active,
+                        neighbor.as_ref(),
+                        cleanup_is_safe && terminal_workspace_removed,
+                        if cleanup_is_safe { roots_to_archive } else { Vec::new() },
+                        if cleanup_is_safe { mixed_item_targets } else { Vec::new() },
+                        window,
+                        cx,
+                    );
+                })?;
+                anyhow::Ok(())
+            })
+            .detach_and_log_err(cx);
+            return;
+        }
+
+        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
+            return;
+        };
+        let sidebar = cx.weak_entity();
+        let consent_targets = mixed_item_targets.clone();
+        let consent_mixed_workspaces = mixed_workspaces.clone();
+        let kill_succeeded = Rc::new(Cell::new(false));
+        let close_guard = Rc::new(RefCell::new(None));
+        let callback_kill_succeeded = kill_succeeded.clone();
+        let callback_close_guard = close_guard.clone();
+        let remove_task = multi_workspace.update(cx, |multi_workspace, cx| {
+            multi_workspace.remove_with_pre_remove(
+                workspaces_to_remove,
+                RemovalIntent::KeepProject,
+                async move |cx| {
+                    if !Self::consent_to_close_archived_worktree_items(&consent_targets, cx)
+                        .await?
+                    {
+                        return Ok(false);
+                    }
+                    let guard = cx.update(|window, cx| {
+                        Self::guard_archived_worktree_items(
+                            &consent_targets,
+                            &consent_mixed_workspaces,
+                            window,
+                            cx,
+                        )
+                    })?;
+                    *callback_close_guard.borrow_mut() = Some(guard);
+                    let kill = project.update(cx, |project, cx| {
+                        project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
+                    });
+                    if let Err(error) = kill.await {
+                        log::error!(
+                            "failed to kill persistent terminal session for terminal {terminal_id}: {error:#}"
+                        );
+                        sidebar.update(cx, |this, cx| {
+                            this.show_terminal_close_error(terminal_id, cx)
+                        })?;
+                        return Err(error);
+                    }
+                    callback_kill_succeeded.set(true);
+                    let cleanup_is_safe = cx.update(|_, cx| {
+                        let guard = callback_close_guard.borrow();
+                        let Some((guard, item_ids)) = guard.as_ref() else { return true };
+                        !guard.changed(cx)
+                            && Self::archived_worktree_item_membership_matches(item_ids, cx)
+                    })?;
+                    Ok(cleanup_is_safe)
+                },
+                window,
+                cx,
+            )
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let removed = remove_task.await?;
+            if !removed && !kill_succeeded.get() {
+                return anyhow::Ok(());
+            }
+            this.update_in(cx, |this, window, cx| {
+                let mixed_cleanup_is_safe =
+                    close_guard
+                        .borrow()
+                        .as_ref()
+                        .is_none_or(|(guard, item_ids)| {
+                            !guard.changed(cx)
+                                && Self::archived_worktree_item_membership_matches(item_ids, cx)
+                        });
+                let cleanup_is_safe = removed && mixed_cleanup_is_safe;
+                if !cleanup_is_safe {
+                    this.show_terminal_workspace_edited_after_stop(cx);
+                }
+                this.complete_terminal_close(
+                    &metadata,
+                    &workspace,
+                    is_active,
+                    neighbor.as_ref(),
+                    removed && terminal_workspace_removed,
+                    if cleanup_is_safe {
+                        roots_to_archive
+                    } else {
+                        Vec::new()
+                    },
+                    if cleanup_is_safe {
+                        mixed_item_targets
+                    } else {
+                        Vec::new()
+                    },
+                    window,
+                    cx,
+                );
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn complete_terminal_close(
+        &mut self,
+        metadata: &TerminalThreadMetadata,
+        workspace: &ThreadEntryWorkspace,
+        is_active: bool,
+        neighbor: Option<&ActivatableEntry>,
+        terminal_workspace_removed: bool,
+        roots_to_archive: Vec<thread_worktree_archive::RootPlan>,
+        mixed_item_targets: ArchivedWorktreeItemTargets,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if terminal_workspace_removed {
+            self.delete_empty_drafts_for_archive_paths(
+                metadata.folder_paths(),
+                metadata.remote_connection.as_ref(),
+                cx,
+            );
+        }
+        self.remove_archived_worktree_items(mixed_item_targets, window, cx);
+        let close_item_tasks = Vec::new();
+        let metadata = metadata.clone();
+        let workspace = workspace.clone();
+        let neighbor = neighbor.cloned();
         self.remove_workspaces_then(
-            workspaces_to_remove,
+            Vec::new(),
             close_item_tasks,
             window,
             cx,
             move |this, window, cx| {
-                if terminal_workspace_removed {
-                    this.delete_empty_drafts_for_archive_paths(
-                        metadata.folder_paths(),
-                        metadata.remote_connection.as_ref(),
-                        cx,
-                    );
-                }
-                // If the terminal's workspace has already been removed, don't
-                // synthesize a fallback draft in the detached AgentPanel.
                 this.close_terminal_entry(
                     &metadata,
                     &workspace,
@@ -5286,6 +5468,44 @@ impl Sidebar {
         .map(|workspace| workspace.read(cx).project().clone())
     }
 
+    fn show_terminal_workspace_edited_after_stop(&self, cx: &mut App) {
+        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
+            return;
+        };
+        let workspace = multi_workspace.read(cx).workspace().clone();
+        workspace.update(cx, |workspace, cx| {
+            struct TerminalWorkspaceEditedToast;
+            workspace.show_toast(
+                Toast::new(
+                    NotificationId::unique::<TerminalWorkspaceEditedToast>(),
+                    "Terminal session stopped; edited workspaces remain open",
+                )
+                .autohide(),
+                cx,
+            );
+        });
+    }
+
+    fn show_terminal_close_error(&self, terminal_id: TerminalId, cx: &mut App) {
+        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
+            return;
+        };
+        let workspace = multi_workspace.read(cx).workspace().clone();
+        workspace.update(cx, |workspace, cx| {
+            struct CloseTerminalErrorToast;
+            workspace.show_toast(
+                Toast::new(
+                    NotificationId::unique::<CloseTerminalErrorToast>(),
+                    format!(
+                        "Failed to stop terminal session {terminal_id}; close it again to retry"
+                    ),
+                )
+                .autohide(),
+                cx,
+            );
+        });
+    }
+
     fn close_terminal_entry(
         &mut self,
         metadata: &TerminalThreadMetadata,
@@ -5307,38 +5527,16 @@ impl Sidebar {
                     closed_via_panel = true;
                     panel.update(cx, |panel, cx| {
                         if defer_draft_activation || !activate_panel_draft {
-                            panel.close_terminal_without_activating_draft(terminal_id, window, cx);
+                            panel.close_terminal_after_session_kill(terminal_id, false, window, cx);
                         } else {
-                            panel.close_terminal(terminal_id, window, cx);
+                            panel.close_terminal_after_session_kill(terminal_id, true, window, cx);
                         }
                     });
                 }
             });
         }
-        if !closed_via_panel {
-            let session_name = terminal_id.session_name();
-            let project = match workspace {
-                ThreadEntryWorkspace::Open(workspace) => Some(workspace.read(cx).project().clone()),
-                ThreadEntryWorkspace::Closed { .. } => {
-                    self.find_project_for_remote_connection(metadata.remote_connection.as_ref(), cx)
-                }
-            };
-            if let Some(project) = project {
-                project
-                    .update(cx, |project, cx| {
-                        project.kill_persistent_terminal_session(session_name, cx)
-                    })
-                    .detach_and_log_err(cx);
-            } else {
-                log::warn!(
-                    "no open project available to kill persistent terminal session for terminal {terminal_id}"
-                );
-            }
-            if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
-                store.update(cx, |store, cx| {
-                    store.delete(terminal_id, cx);
-                });
-            }
+        if !closed_via_panel && let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+            store.update(cx, |store, cx| store.delete(terminal_id, cx));
         }
 
         self.start_detached_archive_worktree_task(roots_to_archive, cx);
@@ -5407,13 +5605,12 @@ impl Sidebar {
         .detach_and_log_err(cx);
     }
 
-    fn close_items_for_archived_worktrees(
+    fn plan_archived_worktree_cleanup(
         &self,
         roots_to_archive: &[thread_worktree_archive::RootPlan],
         workspaces_to_remove: &mut Vec<Entity<Workspace>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<Task<anyhow::Result<()>>> {
+        cx: &App,
+    ) -> Vec<(Entity<Workspace>, Vec<WorktreeId>)> {
         if roots_to_archive.is_empty() {
             return Vec::new();
         }
@@ -5457,6 +5654,132 @@ impl Sidebar {
             }
         }
 
+        mixed_workspaces
+    }
+
+    fn archived_worktree_item_targets(
+        &self,
+        mixed_workspaces: &[(Entity<Workspace>, Vec<WorktreeId>)],
+        cx: &App,
+    ) -> ArchivedWorktreeItemTargets {
+        let mut targets = Vec::new();
+        for (workspace, archived_worktree_ids) in mixed_workspaces {
+            for pane in workspace.read(cx).panes() {
+                let item_ids = pane
+                    .read(cx)
+                    .items()
+                    .filter(|item| {
+                        item.project_path(cx)
+                            .is_some_and(|path| archived_worktree_ids.contains(&path.worktree_id))
+                    })
+                    .map(|item| item.item_id())
+                    .collect::<Vec<_>>();
+                if !item_ids.is_empty() {
+                    targets.push((workspace.clone(), pane.clone(), item_ids));
+                }
+            }
+        }
+        targets
+    }
+
+    fn guard_archived_worktree_items(
+        targets: &ArchivedWorktreeItemTargets,
+        mixed_workspaces: &[(Entity<Workspace>, Vec<WorktreeId>)],
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (ItemCloseGuard, Vec<(Entity<Workspace>, Vec<EntityId>)>) {
+        let items = targets
+            .iter()
+            .flat_map(|(_, pane, item_ids)| {
+                pane.read(cx)
+                    .items()
+                    .filter(|item| item_ids.contains(&item.item_id()))
+                    .map(|item| item.boxed_clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let workspaces = mixed_workspaces
+            .iter()
+            .map(|(workspace, _)| workspace.clone())
+            .unique_by(|workspace| workspace.entity_id())
+            .map(|workspace| {
+                let item_ids = workspace
+                    .read(cx)
+                    .panes()
+                    .iter()
+                    .flat_map(|pane| pane.read(cx).items().map(|item| item.item_id()))
+                    .collect();
+                (workspace, item_ids)
+            })
+            .collect();
+        (ItemCloseGuard::new(items, window, cx), workspaces)
+    }
+
+    fn archived_worktree_item_membership_matches(
+        expected: &[(Entity<Workspace>, Vec<EntityId>)],
+        cx: &App,
+    ) -> bool {
+        expected.iter().all(|(workspace, expected_ids)| {
+            workspace
+                .read(cx)
+                .panes()
+                .iter()
+                .flat_map(|pane| pane.read(cx).items().map(|item| item.item_id()))
+                .eq(expected_ids.iter().copied())
+        })
+    }
+
+    async fn consent_to_close_archived_worktree_items(
+        targets: &ArchivedWorktreeItemTargets,
+        cx: &mut gpui::AsyncWindowContext,
+    ) -> anyhow::Result<bool> {
+        for (workspace, pane, item_ids) in targets {
+            let project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
+            for item_id in item_ids {
+                let item = pane.read_with(cx, |pane, _| {
+                    pane.items()
+                        .find(|item| item.item_id() == *item_id)
+                        .map(|item| item.boxed_clone())
+                });
+                let Some(item) = item else { continue };
+                if !Pane::save_item(
+                    project.clone(),
+                    pane.clone(),
+                    item.as_ref(),
+                    SaveIntent::Close,
+                    cx,
+                )
+                .await?
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    fn remove_archived_worktree_items(
+        &self,
+        targets: ArchivedWorktreeItemTargets,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for (_, pane, item_ids) in targets {
+            pane.update(cx, |pane, cx| {
+                let close_pane_if_empty = pane.close_pane_if_empty();
+                for item_id in item_ids {
+                    pane.remove_item(item_id, false, close_pane_if_empty, window, cx);
+                }
+            });
+        }
+    }
+
+    fn start_archived_worktree_item_cleanup(
+        &self,
+        mixed_workspaces: Vec<(Entity<Workspace>, Vec<WorktreeId>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<Task<anyhow::Result<()>>> {
         let mut close_item_tasks = Vec::new();
         for (workspace, archived_worktree_ids) in &mixed_workspaces {
             let panes: Vec<_> = workspace.read(cx).panes().to_vec();
@@ -5645,12 +5968,10 @@ impl Sidebar {
         // dropped without destroying the user's workspace layout.
         let mut workspaces_to_remove: Vec<Entity<Workspace>> =
             workspace_to_remove.into_iter().collect();
-        let close_item_tasks = self.close_items_for_archived_worktrees(
-            &roots_to_archive,
-            &mut workspaces_to_remove,
-            window,
-            cx,
-        );
+        let mixed_workspaces =
+            self.plan_archived_worktree_cleanup(&roots_to_archive, &mut workspaces_to_remove, cx);
+        let close_item_tasks =
+            self.start_archived_worktree_item_cleanup(mixed_workspaces, window, cx);
 
         let removed_workspace = !workspaces_to_remove.is_empty();
         let session_id = session_id.clone();
@@ -7103,12 +7424,10 @@ impl Sidebar {
         });
         let mut workspaces_to_remove: Vec<Entity<Workspace>> =
             workspace_to_remove.into_iter().collect();
-        let close_item_tasks = self.close_items_for_archived_worktrees(
-            &roots_to_archive,
-            &mut workspaces_to_remove,
-            window,
-            cx,
-        );
+        let mixed_workspaces =
+            self.plan_archived_worktree_cleanup(&roots_to_archive, &mut workspaces_to_remove, cx);
+        let close_item_tasks =
+            self.start_archived_worktree_item_cleanup(mixed_workspaces, window, cx);
 
         let draft_workspace_removed = matches!(
             workspace,
