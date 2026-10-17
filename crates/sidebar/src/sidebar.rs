@@ -5201,6 +5201,14 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) {
         let terminal_id = metadata.terminal_id;
+        let should_kill_persistent_session = match workspace {
+            ThreadEntryWorkspace::Open(workspace) => workspace
+                .read(cx)
+                .panel::<AgentPanel>(cx)
+                .and_then(|panel| panel.read(cx).terminal_is_persistent(terminal_id))
+                .unwrap_or(true),
+            ThreadEntryWorkspace::Closed { .. } => true,
+        };
         let project = match workspace {
             ThreadEntryWorkspace::Open(workspace) => Some(workspace.read(cx).project().clone()),
             ThreadEntryWorkspace::Closed { .. } => {
@@ -5274,15 +5282,17 @@ impl Sidebar {
                         cx,
                     )
                 })?;
-                let kill = project.update(cx, |project, cx| {
-                    project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
-                });
-                if let Err(error) = kill.await {
-                    log::error!(
-                        "failed to kill persistent terminal session for terminal {terminal_id}: {error:#}"
-                    );
-                    this.update(cx, |this, cx| this.show_terminal_close_error(terminal_id, cx))?;
-                    return anyhow::Ok(());
+                if should_kill_persistent_session {
+                    let kill = project.update(cx, |project, cx| {
+                        project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
+                    });
+                    if let Err(error) = kill.await {
+                        log::error!(
+                            "failed to kill persistent terminal session for terminal {terminal_id}: {error:#}"
+                        );
+                        this.update(cx, |this, cx| this.show_terminal_close_error(terminal_id, cx))?;
+                        return anyhow::Ok(());
+                    }
                 }
                 this.update_in(cx, |this, window, cx| {
                     let cleanup_is_safe = !guard.changed(cx)
@@ -5337,17 +5347,19 @@ impl Sidebar {
                         )
                     })?;
                     *callback_close_guard.borrow_mut() = Some(guard);
-                    let kill = project.update(cx, |project, cx| {
-                        project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
-                    });
-                    if let Err(error) = kill.await {
-                        log::error!(
-                            "failed to kill persistent terminal session for terminal {terminal_id}: {error:#}"
-                        );
-                        sidebar.update(cx, |this, cx| {
-                            this.show_terminal_close_error(terminal_id, cx)
-                        })?;
-                        return Err(error);
+                    if should_kill_persistent_session {
+                        let kill = project.update(cx, |project, cx| {
+                            project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
+                        });
+                        if let Err(error) = kill.await {
+                            log::error!(
+                                "failed to kill persistent terminal session for terminal {terminal_id}: {error:#}"
+                            );
+                            sidebar.update(cx, |this, cx| {
+                                this.show_terminal_close_error(terminal_id, cx)
+                            })?;
+                            return Err(error);
+                        }
                     }
                     callback_kill_succeeded.set(true);
                     let cleanup_is_safe = cx.update(|_, cx| {
