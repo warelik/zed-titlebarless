@@ -123,8 +123,8 @@ impl FakeShpoolStore {
 }
 
 macro_rules! shpool_script_prelude {
-    () => {
-        r#"
+    ($missing_client_status:literal) => {
+        concat!(r#"
 SHPOOL_BIN=""
 for b in shpool "$HOME/.local/bin/shpool" "$HOME/.cargo/bin/shpool" /opt/homebrew/bin/shpool /usr/local/bin/shpool; do
     if command -v "$b" >/dev/null 2>&1; then
@@ -135,7 +135,7 @@ for b in shpool "$HOME/.local/bin/shpool" "$HOME/.cargo/bin/shpool" /opt/homebre
         break
     fi
 done
-[ -n "$SHPOOL_BIN" ] || exit 0
+[ -n "$SHPOOL_BIN" ] || exit "#, $missing_client_status, r#"
 
 USER_ID="$(id -u 2>/dev/null || true)"
 
@@ -151,18 +151,21 @@ elif [ -n "$USER_ID" ] && [ -d "/run/user/$USER_ID" ]; then
 else
     SHPOOL_SOCK="$HOME/.local/run/shpool/shpool.socket"
 fi
-"#
+"#)
     };
 }
 
 /// Prelude searching for shpool binary and socket path.
-const SHPOOL_SCRIPT_PRELUDE: &str = shpool_script_prelude!();
+const SHPOOL_SCRIPT_PRELUDE: &str = shpool_script_prelude!("0");
+
+/// Prelude used for destructive operations, which must fail when shpool is unavailable.
+const SHPOOL_KILL_SCRIPT_PRELUDE: &str = shpool_script_prelude!("127");
 
 pub(crate) const SHPOOL_PROBE_MARKER: &str = "=== ZED_SHPOOL_PROBE_START ===";
 
 /// Complete script probing shpool binary, live/fallback socket, and running sessions.
 const SHPOOL_PROBE_SCRIPT: &str = concat!(
-    shpool_script_prelude!(),
+    shpool_script_prelude!("0"),
     r#"
 echo "=== ZED_SHPOOL_PROBE_START ==="
 echo "$SHPOOL_BIN"
@@ -672,7 +675,7 @@ impl Project {
             )));
         };
         let script = format!(
-            r#"{SHPOOL_SCRIPT_PRELUDE}
+            r#"{SHPOOL_KILL_SCRIPT_PRELUDE}
 "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
 "#
         );
@@ -1758,6 +1761,12 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("posix_item1"));
         assert!(stdout.contains("posix_item2"));
+    }
+
+    #[test]
+    fn test_shpool_kill_prelude_fails_when_client_is_missing() {
+        assert!(SHPOOL_SCRIPT_PRELUDE.contains("[ -n \"$SHPOOL_BIN\" ] || exit 0"));
+        assert!(SHPOOL_KILL_SCRIPT_PRELUDE.contains("[ -n \"$SHPOOL_BIN\" ] || exit 127"));
     }
 
     #[gpui::test]
