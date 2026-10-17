@@ -12,8 +12,8 @@ use client::{Client, proto};
 use futures::channel::mpsc;
 use gpui::{
     Action, AnyElement, AnyEntity, AnyView, App, AppContext, Context, Entity, EntityId,
-    EventEmitter, FocusHandle, Focusable, Font, Pixels, Point, Render, SharedString, Task, TaskExt,
-    WeakEntity, Window,
+    EventEmitter, FocusHandle, Focusable, Font, Pixels, Point, Render, SharedString, Subscription,
+    Task, TaskExt, WeakEntity, Window,
 };
 use language::Capability;
 pub use language::HighlightedText;
@@ -25,7 +25,7 @@ pub use settings::{
 use smallvec::SmallVec;
 use std::{
     any::{Any, TypeId},
-    cell::RefCell,
+    cell::{Cell, RefCell},
     path::Path,
     rc::Rc,
     sync::Arc,
@@ -61,6 +61,8 @@ pub struct ItemSettings {
     pub file_icons: bool,
     pub show_diagnostics: ShowDiagnostics,
     pub show_close_button: ShowCloseButton,
+    pub min_width: Option<Pixels>,
+    pub max_width: Option<Pixels>,
 }
 
 #[derive(RegisterSetting)]
@@ -91,6 +93,8 @@ impl Settings for ItemSettings {
             file_icons: tabs.file_icons.unwrap(),
             show_diagnostics: tabs.show_diagnostics.unwrap(),
             show_close_button: tabs.show_close_button.unwrap(),
+            min_width: tabs.min_width.map(|width| gpui::px(width.0)),
+            max_width: tabs.max_width.map(|width| gpui::px(width.0)),
         }
     }
 }
@@ -470,6 +474,53 @@ where
         event
             .downcast_ref::<T::Event>()
             .is_some_and(|event| self.read(cx).should_serialize(event))
+    }
+}
+
+pub struct ItemCloseGuard {
+    items: Vec<(Box<dyn ItemHandle>, bool)>,
+    changed: Rc<Cell<bool>>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl ItemCloseGuard {
+    pub fn new(items: Vec<Box<dyn ItemHandle>>, window: &mut Window, cx: &mut App) -> Self {
+        let changed = Rc::new(Cell::new(false));
+        let subscriptions = items
+            .iter()
+            .map(|item| {
+                let changed = changed.clone();
+                item.subscribe_to_item_events(
+                    window,
+                    cx,
+                    Box::new(move |event, _, _| {
+                        if event == ItemEvent::Edit {
+                            changed.set(true);
+                        }
+                    }),
+                )
+            })
+            .collect();
+        let items = items
+            .into_iter()
+            .map(|item| {
+                let dirty = item.is_dirty(cx);
+                (item, dirty)
+            })
+            .collect();
+        Self {
+            items,
+            changed,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    pub fn changed(&self, cx: &App) -> bool {
+        self.changed.get()
+            || self
+                .items
+                .iter()
+                .any(|(item, was_dirty)| item.is_dirty(cx) != *was_dirty)
     }
 }
 
