@@ -17330,10 +17330,6 @@ mod tests {
             remote_connection: None,
             working_directory: None,
         };
-        cx.update(|_, cx| {
-            TerminalThreadMetadataStore::global(cx)
-                .update(cx, |store, cx| store.save(metadata.clone(), cx));
-        });
         panel.update_in(&mut cx, |panel, window, cx| {
             panel.restore_terminal(
                 metadata,
