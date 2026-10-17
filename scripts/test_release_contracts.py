@@ -838,10 +838,10 @@ class RepairPromptContractTests(unittest.TestCase):
         config = "maintainer/zed-fork@" + "a" * 40
         prompt = release.request_text(sha, upstream, config)
 
-        self.assertIn("This is an internal downstream review, not an upstream PR submission.", prompt)
-        self.assertIn("independent exact-SHA Codex review", prompt)
-        self.assertIn("manual human-confirmation banner", prompt)
-        self.assertIn("Do not require or add that banner", prompt)
+        self.assertIn(f"Apply the existing downstream maintenance contract in `AGENTS.md` at `{config}`", prompt)
+        self.assertIn("already requires independent exact-SHA Codex review", prompt)
+        self.assertIn("excludes upstream README banners and manual author confirmation", prompt)
+        self.assertIn("This internal comparison is not an upstream PR submission.", prompt)
         self.assertIn("Patch configuration: `" + config + "`", prompt)
         self.assertIn("regression coverage", prompt)
         self.assertIn("official SSH remote-server protocol and download source", prompt)
@@ -850,16 +850,39 @@ class RepairPromptContractTests(unittest.TestCase):
         self.assertIn(f"<!-- zed-codex:{sha} -->", prompt)
 
     def test_repair_prompt_reuses_applicable_unadopted_candidates_without_old_context(self):
-        state = {"config": "a" * 40, "upstream": "b" * 40, "head": "c" * 40}
-        prompt = release.repair_text(state, 1, "fixture failure")
+        state = {
+            "config": "a" * 40,
+            "upstream": "b" * 40,
+            "head": "c" * 40,
+        }
+        prepared = {
+            "repository": "maintainer/zed-fork",
+            "pull_request": 7,
+            "head": "d" * 40,
+            "seed": "e" * 40,
+            "config": "f" * 40,
+            "current_config": state["config"],
+            "upstream": state["upstream"],
+            "baseline_patches_tree": "1" * 40,
+            "changed_paths": ["patches/0014-Fix-terminal-cleanup.patch"],
+        }
+        prompt = release.repair_text(state, 1, "fixture failure", prepared=prepared)
+        default_prompt = release.repair_text(state, 1, "fixture failure")
 
-        self.assertIn("Before recreating an application fix, inspect earlier repair PRs", prompt)
-        self.assertIn("the same baseline patch bytes", prompt)
-        self.assertIn("Reuse any applicable, unadopted application patches verbatim", prompt)
-        self.assertIn("inspect their linked review findings", prompt)
-        self.assertIn("Do not replay old policy or immutable repair context", prompt)
+        self.assertNotIn("A prepared application candidate is pinned below", default_prompt)
+        self.assertNotIn("inspect earlier repair PRs", default_prompt)
+        self.assertIn("A prepared application candidate is pinned below", prompt)
+        self.assertIn("same-repository repair identity", prompt)
+        self.assertIn("application-only delta", prompt)
+        self.assertIn("identical baseline patches tree", prompt)
+        self.assertIn("Reuse only this exact candidate's applicable patch changes", prompt)
+        self.assertIn("inspect its linked review findings", prompt)
+        self.assertIn("Do not replay old policy or repair context", prompt)
+        self.assertIn("fresh exact-SHA review and every mandatory gate still apply", prompt)
+        self.assertIn(json.dumps(prepared, sort_keys=True), prompt)
+        self.assertNotIn("inspect earlier repair PRs", prompt)
+        self.assertIn(".repair/context.json", prompt)
         self.assertIn(f"`{release.UPSTREAM}@{state['upstream']}`", prompt)
-        self.assertIn("fresh exact-SHA review and all mandatory gates", prompt)
         self.assertIn("Do not mix policy and application repairs", prompt)
         self.assertIn("Attempt 1/3.", prompt)
         self.assertIn(f"<!-- zed-fix:{state['head']}:1 -->", prompt)
