@@ -1855,6 +1855,17 @@ impl MultiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<bool>> {
+        self.remove_with_pre_remove(workspaces, intent, async |_| Ok(true), window, cx)
+    }
+
+    pub fn remove_with_pre_remove(
+        &mut self,
+        workspaces: impl IntoIterator<Item = Entity<Workspace>>,
+        intent: RemovalIntent,
+        before_remove: impl AsyncFnOnce(&mut gpui::AsyncWindowContext) -> Result<bool> + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<bool>> {
         let workspaces: Vec<_> = workspaces.into_iter().collect();
 
         if workspaces.is_empty() {
@@ -1896,6 +1907,10 @@ impl MultiWorkspace {
                 if !should_continue {
                     return Ok(false);
                 }
+            }
+
+            if !before_remove(cx).await? {
+                return Ok(false);
             }
 
             // Edit phase: one synchronous update. Delete the rows, then pick
