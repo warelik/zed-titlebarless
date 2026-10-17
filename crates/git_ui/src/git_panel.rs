@@ -8135,7 +8135,7 @@ impl GitPanel {
                                             ));
                                         }
                                         Some(GitListEntry::EmptySection(section)) => {
-                                            items.push(this.render_empty_section(*section));
+                                            items.push(this.render_empty_section(*section, cx));
                                         }
                                         None => {}
                                     }
@@ -8185,8 +8185,11 @@ impl GitPanel {
         Label::new(label.into()).single_line().color(color)
     }
 
-    fn list_item_height(&self) -> Rems {
-        rems(1.75)
+    fn list_item_height(&self, cx: &App) -> gpui::DefiniteLength {
+        match workspace::panel_row_height(cx) {
+            Some(height) => height.into(),
+            None => rems(1.75).into(),
+        }
     }
 
     fn render_list_header(
@@ -8224,7 +8227,7 @@ impl GitPanel {
         h_flex()
             .id(id)
             .group(group_name)
-            .h(self.list_item_height())
+            .h(self.list_item_height(cx))
             .w_full()
             .pl_2p5()
             .pr_1()
@@ -8306,14 +8309,14 @@ impl GitPanel {
             .into_any_element()
     }
 
-    fn render_empty_section(&self, section: Section) -> AnyElement {
+    fn render_empty_section(&self, section: Section, cx: &App) -> AnyElement {
         let message = match section {
             Section::Staged => "No staged changes yet",
             Section::Unstaged => "No unstaged changes",
             _ => "No changes",
         };
         h_flex()
-            .h(self.list_item_height())
+            .h(self.list_item_height(cx))
             .w_full()
             .pl_2p5()
             .pr_1()
@@ -8724,7 +8727,7 @@ impl GitPanel {
 
         h_flex()
             .id(id)
-            .h(self.list_item_height())
+            .h(self.list_item_height(cx))
             .w_full()
             .pl_2p5()
             .pr_1()
@@ -8947,7 +8950,7 @@ impl GitPanel {
             .child(self.entry_label(entry.name.clone(), label_color).truncate());
         h_flex()
             .id(id)
-            .h(self.list_item_height())
+            .h(self.list_item_height(cx))
             .min_w_0()
             .w_full()
             .pl_2p5()
