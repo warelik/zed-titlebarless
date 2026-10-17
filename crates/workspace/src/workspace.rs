@@ -329,7 +329,9 @@ static ZED_WINDOW_POSITION: LazyLock<Option<Point<Pixels>>> = LazyLock::new(|| {
 /// Whether the title bar's contents live in the status bar. Only macOS supports this: Windows and
 /// Linux draw their window controls in the title bar, so it has to stay there.
 pub fn title_bar_in_status_bar(cx: &App) -> bool {
-    cfg!(target_os = "macos") && WorkspaceSettings::get_global(cx).title_bar_to_status_bar
+    cfg!(target_os = "macos")
+        && WorkspaceSettings::get_global(cx).title_bar_to_status_bar
+        && StatusBarSettings::get_global(cx).show
 }
 
 /// Where stock Zed puts the traffic lights; the title bar is centred on them.
@@ -13257,6 +13259,51 @@ mod tests {
         let in_title_bar = title_bar_top(false, cx);
         assert!(title_bar_top(true, cx) > in_title_bar + px(100.));
         assert_eq!(title_bar_top(false, cx), in_title_bar);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    async fn test_title_bar_to_status_bar_keeps_title_when_status_bar_hidden(
+        cx: &mut TestAppContext,
+    ) {
+        struct TestTitleBar;
+        impl Render for TestTitleBar {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_4().debug_selector(|| "test_title_bar".into())
+            }
+        }
+
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_titlebar_item(cx.new(|_| TestTitleBar).into(), window, cx);
+        });
+        cx.run_until_parked();
+
+        set_title_bar_to_status_bar(false, cx);
+        let title_bar_top = cx
+            .debug_bounds("test_title_bar")
+            .expect("title bar contents should be rendered")
+            .top();
+        set_title_bar_to_status_bar(true, cx);
+        cx.update(|_, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.status_bar.get_or_insert_default().show = Some(false);
+                })
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.debug_bounds("test_title_bar")
+                .expect("hidden status bar must retain title bar contents")
+                .top(),
+            title_bar_top
+        );
     }
 
     #[cfg(target_os = "macos")]
