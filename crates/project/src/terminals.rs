@@ -631,6 +631,19 @@ impl Project {
         })
     }
 
+    fn shpool_session_not_found(stderr: &str, session_name: &str) -> bool {
+        let diagnostics = [
+            format!("not found: {session_name}"),
+            format!("no such session: {session_name}"),
+        ];
+        stderr.lines().any(|line| {
+            let line = line.trim();
+            diagnostics
+                .iter()
+                .any(|diagnostic| line == diagnostic || line == format!("Error: {diagnostic}"))
+        })
+    }
+
     /// Ends the shpool session `session_name` and everything running in it.
     /// Does nothing on a host without shpool.
     pub fn kill_persistent_terminal_session(
@@ -684,7 +697,7 @@ impl Project {
             let output = command.await?.output().await?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                if !stderr.contains("not found") && !stderr.contains("no such session") {
+                if !Self::shpool_session_not_found(&stderr, &session_name) {
                     log::warn!(
                         "failed to kill shpool session {session_name}: {}",
                         stderr.trim()
@@ -1761,6 +1774,26 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("posix_item1"));
         assert!(stdout.contains("posix_item2"));
+    }
+
+    #[test]
+    fn test_shpool_kill_ignores_only_requested_session_not_found() {
+        assert!(Project::shpool_session_not_found(
+            "not found: zed-session\n",
+            "zed-session"
+        ));
+        assert!(Project::shpool_session_not_found(
+            "Error: no such session: zed-session\n",
+            "zed-session"
+        ));
+        assert!(!Project::shpool_session_not_found(
+            "sh: shpool: not found\n",
+            "zed-session"
+        ));
+        assert!(!Project::shpool_session_not_found(
+            "not found: another-session\n",
+            "zed-session"
+        ));
     }
 
     #[test]
