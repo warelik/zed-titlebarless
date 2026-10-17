@@ -661,10 +661,9 @@ class WorkflowContractTests(unittest.TestCase):
     def test_review_wait_and_total_repair_budget_are_distinct_and_bounded(self):
         self.assertEqual(release.REVIEW_WAIT_SECONDS, 7200)
         self.assertEqual(release.MACOS_JOB_TIMEOUT_MINUTES, 355)
-        self.assertEqual(release.MAX_FIX_ATTEMPTS, 3)
         self.assertEqual(
             release.MAX_REPAIR_SECONDS,
-            3 * (release.REVIEW_WAIT_SECONDS + release.MACOS_JOB_TIMEOUT_MINUTES * 60),
+            23 * 60 * 60 + 45 * 60,
         )
 
 
@@ -884,7 +883,7 @@ class RepairPromptContractTests(unittest.TestCase):
         self.assertIn(".repair/context.json", prompt)
         self.assertIn(f"`{release.UPSTREAM}@{state['upstream']}`", prompt)
         self.assertIn("Do not mix policy and application repairs", prompt)
-        self.assertIn("Attempt 1/3.", prompt)
+        self.assertRegex(prompt, r"Attempt 1(?:/3)?\.")
         self.assertIn(f"<!-- zed-fix:{state['head']}:1 -->", prompt)
 
 

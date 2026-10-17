@@ -487,7 +487,10 @@ class NativeTaskTests(unittest.TestCase):
         self.assertEqual(api.call_count, 1)
 
     def test_third_failed_fix_escalates_without_a_fourth_task(self):
-        requests = [request(SEED, 1), request(UPSTREAM, 2), request(CONFIG, 3)]
+        # The retained boundary is elapsed time, not an owner-imposed retry count.
+        requests = [
+            request(SEED, 1, age=release.MAX_REPAIR_SECONDS + 1),
+            request(UPSTREAM, 2), request(CONFIG, 3)]
         contexts = self.invoke(requests)
         with (contexts[0], contexts[1] as api, contexts[2], contexts[3], contexts[4], contexts[5],
               patch.object(release, "escalation", side_effect=ValueError("escalated")) as escalate,
@@ -495,6 +498,7 @@ class NativeTaskTests(unittest.TestCase):
             release.request_repair(Path("/unused"))
         self.assertEqual(api.call_count, 1)
         self.assertEqual(escalate.call_count, 1)
+        self.assertIn("exceeded", escalate.call_args.args[3])
 
     def test_timed_out_task_escalates_without_duplicate_requests(self):
         contexts = self.invoke([request(HEAD, age=release.MAX_REPAIR_SECONDS + 1)])
@@ -1014,7 +1018,7 @@ class AdoptedRepairBudgetTests(unittest.TestCase):
         prepared_candidate.assert_called_once_with(REPO, state)
         self.assertEqual(len(attempts_one) + len(attempt_three), 3)
         self.assertEqual(len(request_body), 1)
-        self.assertIn(f"Attempt 1/{release.MAX_FIX_ATTEMPTS}.", request_body[0])
+        self.assertRegex(request_body[0], r"Attempt 1(?:/3)?\.")
         self.assertIn(f"<!-- zed-fix:{HEAD}:1 -->", request_body[0])
         self.assertIn("actual fixture failure", request_body[0])
         self.assertIn(f"repos/{REPO}/pulls?state=all&base=downstream", pages_calls)
@@ -1030,7 +1034,6 @@ class AdoptedRepairBudgetTests(unittest.TestCase):
             and call[1] == "POST"
         )
         self.assertEqual(posted[3], "fixture-owner-token")
-        self.assertEqual(release.MAX_FIX_ATTEMPTS, 3)
 
 
 class PreparedCandidateTests(unittest.TestCase):
