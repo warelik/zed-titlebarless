@@ -455,16 +455,30 @@ class NativeTaskTests(unittest.TestCase):
 
     def test_first_fix_is_a_native_owner_request_not_a_review_or_a_report(self):
         contexts = self.invoke([])
-        with contexts[0], contexts[1] as api, contexts[2], contexts[3], contexts[4], contexts[5]:
+        prepared = {
+            "repository": REPO,
+            "pull_request": 7,
+            "head": "e" * 40,
+            "seed": "f" * 40,
+            "config": "9" * 40,
+            "current_config": CONFIG,
+            "upstream": UPSTREAM,
+            "baseline_patches_tree": "8" * 40,
+            "changed_paths": ["patches/0014-Fix-terminal-cleanup.patch"],
+        }
+        with (contexts[0], contexts[1] as api, contexts[2], contexts[3], contexts[4], contexts[5],
+              patch.object(release, "prepared_app_candidate", return_value=prepared) as prepare):
             release.request_repair(Path("/unused"))
         sent = api.call_args
         self.assertEqual(sent.args[0], f"repos/{REPO}/issues/2/comments")
         self.assertEqual(sent.kwargs["token"], "test-only")
         body = sent.kwargs["data"]["body"]
+        prepare.assert_called_once_with(REPO, STATE)
         self.assertTrue(body.startswith("@codex fix "))
         self.assertIn(f"<!-- zed-fix:{HEAD}:1 -->", body)
         self.assertIn("push the actual fix", body)
         self.assertIn("Actual failed assertion", body)
+        self.assertEqual(body.count(json.dumps(prepared, sort_keys=True)), 1)
 
     def test_same_head_is_not_requested_twice(self):
         contexts = self.invoke([request(HEAD)])
@@ -992,10 +1006,12 @@ class AdoptedRepairBudgetTests(unittest.TestCase):
             patch.object(release, "api", side_effect=api),
             patch.object(release, "failure_evidence", return_value="actual fixture failure"),
             patch.object(release, "owner_token", return_value="fixture-owner-token") as owner_token,
+            patch.object(release, "prepared_app_candidate", return_value=None) as prepared_candidate,
         ):
             release.request_repair(Path("/unused"))
 
         owner_token.assert_called_once_with(REPO)
+        prepared_candidate.assert_called_once_with(REPO, state)
         self.assertEqual(len(attempts_one) + len(attempt_three), 3)
         self.assertEqual(len(request_body), 1)
         self.assertIn(f"Attempt 1/{release.MAX_FIX_ATTEMPTS}.", request_body[0])
@@ -1015,6 +1031,266 @@ class AdoptedRepairBudgetTests(unittest.TestCase):
         )
         self.assertEqual(posted[3], "fixture-owner-token")
         self.assertEqual(release.MAX_FIX_ATTEMPTS, 3)
+
+
+class PreparedCandidateTests(unittest.TestCase):
+    CYCLE = "e" * 64
+
+    def git(self, root, *args):
+        result = subprocess.run(
+            ["git", *args],
+            cwd=root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        return result.stdout.strip()
+
+    def commit(self, root, message, paths):
+        ignored = subprocess.run(
+            ["git", "check-ignore", "--no-index", "-v", "--", *paths],
+            cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.assertEqual(ignored.returncode, 1, ignored.stdout + ignored.stderr)
+        self.git(root, "add", "--", *paths)
+        self.git(
+            root,
+            "-c", "user.name=Fixture",
+            "-c", "user.email=fixture@example.invalid",
+            "-c", "core.hooksPath=/dev/null",
+            "-c", "commit.gpgSign=false",
+            "commit", "-m", message,
+        )
+        return self.git(root, "rev-parse", "HEAD")
+
+    def make_fixture(
+        self,
+        root,
+        *,
+        current_tree_change=None,
+        context_change=None,
+        candidate_delta="application",
+    ):
+        root.mkdir()
+        self.git(root, "init")
+        self.git(root, "config", "user.name", "Fixture")
+        self.git(root, "config", "user.email", "fixture@example.invalid")
+        (root / "patches").mkdir()
+        (root / "scripts").mkdir()
+        base_patch = root / "patches/0013-existing.patch"
+        source_manifest = root / "patches/source.json"
+        release_script = root / "scripts/release.py"
+        base_patch.write_text("diff --git a/example b/example\n")
+        source_manifest.write_text('{"source":"fixture"}\n')
+        release_script.write_text("POLICY_VERSION = 1\n")
+        config = self.commit(
+            root,
+            "Trusted original configuration",
+            ["patches/0013-existing.patch", "patches/source.json", "scripts/release.py"],
+        )
+
+        self.git(root, "switch", "-c", "current-policy", config)
+        release_script.write_text("POLICY_VERSION = 1\nPOLICY_CHANGE = True\n")
+        current_paths = ["scripts/release.py"]
+        if current_tree_change == "patch":
+            base_patch.write_text("different baseline patch bytes\n")
+            current_paths.append("patches/0013-existing.patch")
+        elif current_tree_change == "source":
+            source_manifest.write_text('{"source":"changed fixture"}\n')
+            current_paths.append("patches/source.json")
+        current_config = self.commit(root, "Separate policy configuration", current_paths)
+
+        self.git(root, "switch", "--detach", config)
+        context = {
+            "schema": 1,
+            "config": config,
+            "upstream": UPSTREAM,
+            "cycle": self.CYCLE,
+            "nonblocking": False,
+        }
+        if context_change:
+            context.update(context_change)
+        (root / ".repair").mkdir()
+        context_path = root / ".repair/context.json"
+        context_path.write_text(json.dumps(context, indent=2) + "\n")
+        seed = self.commit(root, "Immutable repair context seed", [".repair/context.json"])
+
+        candidate_paths = []
+        if candidate_delta in {"application", "mixed"}:
+            (root / "patches/0014-new.patch").write_text("diff --git a/new b/new\n")
+            candidate_paths.append("patches/0014-new.patch")
+        if candidate_delta in {"policy", "mixed"}:
+            (root / "scripts/test_policy_candidate.py").write_text("POLICY_TEST = True\n")
+            candidate_paths.append("scripts/test_policy_candidate.py")
+        head = self.commit(root, "Prepared repair candidate", candidate_paths) if candidate_paths else seed
+        return {
+            "root": root,
+            "config": config,
+            "current_config": current_config,
+            "seed": seed,
+            "head": head,
+            "upstream": UPSTREAM,
+            "cycle": self.CYCLE,
+            "context_path": context_path,
+        }
+
+    def pull_for(self, fixture, *, number=7, user=None, head_repo=REPO,
+                 head_ref="repair/prepared", head_sha=None, prior_changes=None):
+        prior = {
+            "schema": 1,
+            "config": fixture["config"],
+            "upstream": fixture["upstream"],
+            "seed": fixture["seed"],
+            "cycle": fixture["cycle"],
+            "nonblocking": False,
+        }
+        prior.update(prior_changes or {})
+        return {
+            "number": number,
+            "state": "open",
+            "user": user or {"login": REPO.split("/")[0], "type": "User"},
+            "head": {
+                "repo": {"full_name": head_repo},
+                "ref": head_ref,
+                "sha": head_sha or fixture["head"],
+            },
+            "body": "<!-- zed-repair:v1 " + json.dumps(prior) + " -->",
+        }
+
+    def call_candidate(self, fixture, pull, *, reject_git=False):
+        current = {
+            "number": 8,
+            "config": fixture["current_config"],
+            "upstream": fixture["upstream"],
+            "cycle": fixture["cycle"],
+        }
+        commands = []
+        fetches = []
+        real_run = release.run
+
+        def pages(path):
+            if path == f"repos/{REPO}/pulls?state=all&base=downstream":
+                return [pull]
+            raise AssertionError(path)
+
+        def run(*args, cwd=None, env=None):
+            commands.append(args)
+            if args[:3] == ("git", "fetch", "--no-tags"):
+                fetches.append(args)
+                if reject_git:
+                    raise AssertionError("Invalid candidate must be rejected before Git")
+                return ""
+            if reject_git:
+                raise AssertionError("Invalid candidate must be rejected before Git")
+            return real_run(*args, cwd=cwd, env=env)
+
+        with (
+            patch.object(release, "ROOT", fixture["root"]),
+            patch.object(release, "pages", side_effect=pages),
+            patch.object(release, "run", side_effect=run),
+        ):
+            result = release.prepared_app_candidate(REPO, current)
+        return result, commands, fetches
+
+    def test_valid_prepared_candidate_returns_exact_descriptor_without_copying(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = self.make_fixture(Path(temporary) / "repo")
+            pull = self.pull_for(fixture)
+            context_bytes = fixture["context_path"].read_bytes()
+            result, commands, fetches = self.call_candidate(fixture, pull)
+            expected_tree = self.git(
+                fixture["root"], "rev-parse", f"{fixture['current_config']}:patches")
+            self.assertEqual(result, {
+                "repository": REPO,
+                "pull_request": 7,
+                "head": fixture["head"],
+                "seed": fixture["seed"],
+                "config": fixture["config"],
+                "current_config": fixture["current_config"],
+                "upstream": fixture["upstream"],
+                "baseline_patches_tree": expected_tree,
+                "changed_paths": ["patches/0014-new.patch"],
+            })
+            self.assertNotEqual(fixture["config"], fixture["current_config"])
+            self.assertEqual(
+                self.git(fixture["root"], "rev-parse", f"{fixture['config']}:patches"),
+                expected_tree,
+            )
+            self.assertEqual(
+                self.git(fixture["root"], "diff", "--name-only",
+                         fixture["config"], fixture["current_config"]),
+                "scripts/release.py",
+            )
+            self.assertEqual(len(fetches), 2)
+            self.assertTrue(any(command[:2] == ("git", "merge-base") for command in commands))
+            self.assertTrue(any(command[:2] == ("git", "diff") for command in commands))
+            self.assertTrue(any(command[:2] == ("git", "ls-tree") for command in commands))
+            self.assertTrue(any(command[:2] == ("git", "show") for command in commands))
+            self.assertEqual(fixture["context_path"].read_bytes(), context_bytes)
+            self.assertFalse((fixture["root"] / "proposal").exists())
+            self.assertEqual(self.git(fixture["root"], "status", "--short"), "")
+            self.assertEqual(
+                self.git(fixture["root"], "merge-base", "--is-ancestor",
+                         fixture["config"], fixture["current_config"]),
+                "",
+            )
+
+    def test_identity_filters_reject_without_fetch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = self.make_fixture(Path(temporary) / "repo")
+            variants = (
+                ("wrong login", {"user": {"login": "stranger", "type": "User"}}, {}),
+                ("wrong user type", {"user": {"login": REPO.split("/")[0], "type": "Bot"}}, {}),
+                ("wrong app actor type", {"user": {"login": "github-actions[bot]", "type": "User"}}, {}),
+                ("fork head repository", {"head_repo": "other/fork"}, {}),
+                ("non-repair branch", {"head_ref": "review/prepared"}, {}),
+                ("changed upstream", {}, {"upstream": "9" * 40}),
+                ("changed cycle", {}, {"cycle": "8" * 64}),
+                ("malformed config SHA", {}, {"config": "invalid"}),
+                ("malformed seed SHA", {}, {"seed": "invalid"}),
+                ("malformed upstream SHA", {}, {"upstream": "invalid"}),
+                ("malformed head SHA", {"head_sha": "invalid"}, {}),
+            )
+            for name, pull_changes, prior_changes in variants:
+                with self.subTest(case=name):
+                    pull = self.pull_for(fixture, prior_changes=prior_changes, **pull_changes)
+                    result, commands, fetches = self.call_candidate(fixture, pull, reject_git=True)
+                    self.assertIsNone(result)
+                    self.assertEqual(commands, [])
+                    self.assertEqual(fetches, [])
+
+    def test_different_baseline_patch_or_source_manifest_bytes_are_rejected(self):
+        for change in ("patch", "source"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                fixture = self.make_fixture(
+                    Path(temporary) / "repo",
+                    current_tree_change=change,
+                )
+                result, commands, fetches = self.call_candidate(
+                    fixture, self.pull_for(fixture))
+                self.assertIsNone(result)
+                self.assertEqual(len(fetches), 2)
+                self.assertTrue(any(command[:2] == ("git", "rev-parse") for command in commands))
+
+    def test_context_mismatch_policy_only_mixed_and_invalid_seed_are_rejected(self):
+        cases = (
+            ("context mismatch", {"context_change": {"cycle": "7" * 64}, "candidate_delta": "application"},
+             None),
+            ("policy-only delta", {"candidate_delta": "policy"}, None),
+            ("mixed delta", {"candidate_delta": "mixed"}, None),
+            ("invalid seed ancestry", {"candidate_delta": "application"}, "config"),
+        )
+        for name, fixture_args, invalid_seed in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as temporary:
+                fixture = self.make_fixture(Path(temporary) / "repo", **fixture_args)
+                prior_changes = {"seed": fixture["config"]} if invalid_seed else None
+                result, _, fetches = self.call_candidate(
+                    fixture,
+                    self.pull_for(fixture, prior_changes=prior_changes),
+                )
+                self.assertIsNone(result)
+                self.assertEqual(len(fetches), 2)
 
 
 class AdoptionTests(unittest.TestCase):

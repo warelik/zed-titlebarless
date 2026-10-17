@@ -832,6 +832,61 @@ class RepairPromptContractTests(unittest.TestCase):
         self.assertIn("<!-- zed-fix:" + state["head"] + ":1 -->", prompt)
         self.assertNotIn("9router", prompt)
 
+    def test_source_review_is_internal_to_the_downstream_and_keeps_all_safety_checks(self):
+        sha = "c" * 40
+        upstream = "b" * 40
+        config = "maintainer/zed-fork@" + "a" * 40
+        prompt = release.request_text(sha, upstream, config)
+
+        self.assertIn(f"Apply the existing downstream maintenance contract in `AGENTS.md` at `{config}`", prompt)
+        self.assertIn("already requires independent exact-SHA Codex review", prompt)
+        self.assertIn("excludes upstream README banners and manual author confirmation", prompt)
+        self.assertIn("This internal comparison is not an upstream PR submission.", prompt)
+        self.assertIn("Patch configuration: `" + config + "`", prompt)
+        self.assertIn("regression coverage", prompt)
+        self.assertIn("official SSH remote-server protocol and download source", prompt)
+        self.assertIn("downgrade refusal", prompt)
+        self.assertIn("DMG integrity before installation", prompt)
+        self.assertIn(f"<!-- zed-codex:{sha} -->", prompt)
+
+    def test_repair_prompt_reuses_applicable_unadopted_candidates_without_old_context(self):
+        state = {
+            "config": "a" * 40,
+            "upstream": "b" * 40,
+            "head": "c" * 40,
+        }
+        prepared = {
+            "repository": "maintainer/zed-fork",
+            "pull_request": 7,
+            "head": "d" * 40,
+            "seed": "e" * 40,
+            "config": "f" * 40,
+            "current_config": state["config"],
+            "upstream": state["upstream"],
+            "baseline_patches_tree": "1" * 40,
+            "changed_paths": ["patches/0014-Fix-terminal-cleanup.patch"],
+        }
+        prompt = release.repair_text(state, 1, "fixture failure", prepared=prepared)
+        default_prompt = release.repair_text(state, 1, "fixture failure")
+
+        self.assertNotIn("A prepared application candidate is pinned below", default_prompt)
+        self.assertNotIn("inspect earlier repair PRs", default_prompt)
+        self.assertIn("A prepared application candidate is pinned below", prompt)
+        self.assertIn("same-repository repair identity", prompt)
+        self.assertIn("application-only delta", prompt)
+        self.assertIn("identical baseline patches tree", prompt)
+        self.assertIn("Reuse only this exact candidate's applicable patch changes", prompt)
+        self.assertIn("inspect its linked review findings", prompt)
+        self.assertIn("Do not replay old policy or repair context", prompt)
+        self.assertIn("fresh exact-SHA review and every mandatory gate still apply", prompt)
+        self.assertIn(json.dumps(prepared, sort_keys=True), prompt)
+        self.assertNotIn("inspect earlier repair PRs", prompt)
+        self.assertIn(".repair/context.json", prompt)
+        self.assertIn(f"`{release.UPSTREAM}@{state['upstream']}`", prompt)
+        self.assertIn("Do not mix policy and application repairs", prompt)
+        self.assertIn("Attempt 1/3.", prompt)
+        self.assertIn(f"<!-- zed-fix:{state['head']}:1 -->", prompt)
+
 
 class RepairContextTests(unittest.TestCase):
     def test_native_repair_context_is_exact_json_and_has_no_source_archive(self):
@@ -1175,6 +1230,8 @@ class RustRegressionRunnerTests(unittest.TestCase):
         cargo_command = next(command for command in commands if command[:2] == ["cargo", "test"])
         self.assertIn("-p", cargo_command)
         self.assertIn("auto_update", cargo_command)
+        self.assertIn("--message-format=json-render-diagnostics", cargo_command)
+        self.assertNotIn("--message-format=json", cargo_command)
         self.assertEqual(
             {command[2] for command in test_runs},
             {"tests::test_historical", "tests::test_preserved", "tests::test_added",
@@ -1184,6 +1241,22 @@ class RustRegressionRunnerTests(unittest.TestCase):
                            if command[2] == "tests::added_without_prefix")
         self.assertEqual(nonprefixed[1:], ["--exact", "tests::added_without_prefix", "--nocapture"])
         self.assertTrue(all("--exact" in command for command in test_runs))
+
+    def test_failed_binary_output_is_visible_and_failure_propagates(self):
+        for output in (
+            "panic: preserved terminal cleanup failure\ntest result: FAILED",
+            None,
+        ):
+            with self.subTest(output=output):
+                captured = io.StringIO()
+                with patch("sys.stdout", captured):
+                    with self.assertRaises(subprocess.CalledProcessError) as raised:
+                        self.exercise(result_code=1, result_output=output)
+                self.assertEqual(raised.exception.returncode, 1)
+                self.assertEqual(raised.exception.stdout, output)
+                self.assertNotIn("Passed all", captured.getvalue())
+                if output is not None:
+                    self.assertIn("panic: preserved terminal cleanup failure", captured.getvalue())
 
     def test_missing_package_case_and_out_of_source_binary_fail_closed(self):
         with self.assertRaisesRegex(ValueError, "package is missing"):
