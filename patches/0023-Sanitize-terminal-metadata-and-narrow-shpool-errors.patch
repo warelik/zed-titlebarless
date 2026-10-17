@@ -1,0 +1,139 @@
+From 3b2828a6831573e6fded7503249d0a8461f856ab Mon Sep 17 00:00:00 2001
+From: Codex Repair <codex@example.invalid>
+Date: Sat, 17 Oct 2026 18:02:27 +0000
+Subject: [PATCH] Sanitize terminal metadata and narrow shpool errors
+
+---
+ .../src/terminal_thread_metadata_store.rs     | 41 ++++++++++++++++++-
+ crates/project/src/terminals.rs               | 35 +++++++++++++++-
+ 2 files changed, 73 insertions(+), 3 deletions(-)
+
+diff --git a/crates/agent_ui/src/terminal_thread_metadata_store.rs b/crates/agent_ui/src/terminal_thread_metadata_store.rs
+index 7c4f72c..5aca08e 100644
+--- a/crates/agent_ui/src/terminal_thread_metadata_store.rs
++++ b/crates/agent_ui/src/terminal_thread_metadata_store.rs
+@@ -563,6 +563,18 @@ impl Domain for TerminalThreadMetadataDb {
+ 
+ db::static_connection!(TerminalThreadMetadataDb, []);
+ 
++fn remote_connection_for_persistence(
++    remote_connection: Option<RemoteConnectionOptions>,
++) -> Option<RemoteConnectionOptions> {
++    remote_connection.map(|connection| match connection {
++        RemoteConnectionOptions::Ssh(mut options) => {
++            options.password = None;
++            RemoteConnectionOptions::Ssh(options)
++        }
++        connection => connection,
++    })
++}
++
+ impl TerminalThreadMetadataDb {
+     pub fn list(&self) -> anyhow::Result<Vec<TerminalThreadMetadata>> {
+         self.select::<TerminalThreadMetadata>(
+@@ -596,8 +608,7 @@ impl TerminalThreadMetadataDb {
+             } else {
+                 (Some(main_serialized.paths), Some(main_serialized.order))
+             };
+-        let remote_connection = row
+-            .remote_connection
++        let remote_connection = remote_connection_for_persistence(row.remote_connection)
+             .as_ref()
+             .map(serde_json::to_string)
+             .transpose()
+@@ -733,6 +744,32 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn test_terminal_metadata_persistence_strips_ssh_password() {
++        let connection = RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
++            host: "example.com".into(),
++            username: Some("alice".into()),
++            port: Some(2222),
++            password: Some("plaintext-secret".into()),
++            ..Default::default()
++        });
++
++        let persisted = remote_connection_for_persistence(Some(connection))
++            .expect("remote connection should be retained");
++        let RemoteConnectionOptions::Ssh(options) = persisted else {
++            panic!("SSH connection should remain SSH")
++        };
++        assert_eq!(options.host.to_string(), "example.com");
++        assert_eq!(options.username.as_deref(), Some("alice"));
++        assert_eq!(options.port, Some(2222));
++        assert_eq!(options.password, None);
++        assert!(
++            !serde_json::to_string(&options)
++                .expect("sanitized options should serialize")
++                .contains("plaintext-secret")
++        );
++    }
++
+     #[test]
+     fn test_terminal_title_prefix_preserves_non_alphanumeric_prefixes() {
+         assert_eq!(terminal_title_prefix("✳ Thinking"), Some("✳ "));
+diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
+index 621b401..cd9b352 100644
+--- a/crates/project/src/terminals.rs
++++ b/crates/project/src/terminals.rs
+@@ -631,6 +631,19 @@ impl Project {
+         })
+     }
+ 
++    fn shpool_session_not_found(stderr: &str, session_name: &str) -> bool {
++        let diagnostics = [
++            format!("not found: {session_name}"),
++            format!("no such session: {session_name}"),
++        ];
++        stderr.lines().any(|line| {
++            let line = line.trim();
++            diagnostics
++                .iter()
++                .any(|diagnostic| line == diagnostic || line == format!("Error: {diagnostic}"))
++        })
++    }
++
+     /// Ends the shpool session `session_name` and everything running in it.
+     /// Does nothing on a host without shpool.
+     pub fn kill_persistent_terminal_session(
+@@ -684,7 +697,7 @@ impl Project {
+             let output = command.await?.output().await?;
+             if !output.status.success() {
+                 let stderr = String::from_utf8_lossy(&output.stderr);
+-                if !stderr.contains("not found") && !stderr.contains("no such session") {
++                if !Self::shpool_session_not_found(&stderr, &session_name) {
+                     log::warn!(
+                         "failed to kill shpool session {session_name}: {}",
+                         stderr.trim()
+@@ -1763,6 +1776,26 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
+         assert!(stdout.contains("posix_item2"));
+     }
+ 
++    #[test]
++    fn test_shpool_kill_ignores_only_requested_session_not_found() {
++        assert!(Project::shpool_session_not_found(
++            "not found: zed-session\n",
++            "zed-session"
++        ));
++        assert!(Project::shpool_session_not_found(
++            "Error: no such session: zed-session\n",
++            "zed-session"
++        ));
++        assert!(!Project::shpool_session_not_found(
++            "sh: shpool: not found\n",
++            "zed-session"
++        ));
++        assert!(!Project::shpool_session_not_found(
++            "not found: another-session\n",
++            "zed-session"
++        ));
++    }
++
+     #[test]
+     fn test_shpool_kill_prelude_fails_when_client_is_missing() {
+         assert!(SHPOOL_SCRIPT_PRELUDE.contains("[ -n \"$SHPOOL_BIN\" ] || exit 0"));
+-- 
+2.43.0
+
