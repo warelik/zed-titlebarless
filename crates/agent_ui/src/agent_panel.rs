@@ -6442,7 +6442,14 @@ impl AgentPanel {
             && window
                 .root::<MultiWorkspace>()
                 .flatten()
-                .is_some_and(|multi_workspace| multi_workspace.read(cx).sidebar().is_some())
+                .is_some_and(|multi_workspace| {
+                    let multi_workspace = multi_workspace.read(cx);
+                    multi_workspace.sidebar().is_some()
+                        && multi_workspace.project_group_keys().contains(
+                            &multi_workspace
+                                .project_group_key_for_workspace(multi_workspace.workspace(), cx),
+                        )
+                })
     }
 
     fn sidebar_tab_rows(window: &Window, cx: &mut App) -> Option<workspace::AgentPanelTabRows> {
@@ -10472,6 +10479,35 @@ mod tests {
         // Lines are 1-based and inclusive; the path is presented as
         // `<rel-path>:<start>-<end>`, with a trailing space.
         assert_eq!(pasted, "file.rs:2-3 ");
+    }
+
+    #[gpui::test]
+    async fn test_empty_workspace_keeps_agent_toolbar_with_threads_in_panel(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.threads_sidebar.in_agent_panel = true;
+            AgentSettings::override_global(settings, cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs, [], cx).await;
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
+        register_test_sidebar(true, &mut cx);
+
+        cx.update(|window, cx| {
+            assert!(
+                !AgentPanel::shows_sidebar_tab_rows(window, cx),
+                "empty tab rows must not replace the active entry toolbar"
+            );
+        });
     }
 
     async fn setup_panel(cx: &mut TestAppContext) -> (Entity<AgentPanel>, VisualTestContext) {
