@@ -1,15 +1,15 @@
-From fb13e0669f1d83ceeb016389454249c581b0ab80 Mon Sep 17 00:00:00 2001
+From 25dbf8ddef7290ea99b561ff54f11682d1897da6 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex-repair@example.invalid>
 Date: Sat, 17 Oct 2026 03:19:48 +0000
 Subject: [PATCH] Retain sidebar terminal metadata until session kill succeeds
 
 ---
  crates/agent_ui/src/agent_panel.rs            |  19 +-
- crates/sidebar/src/sidebar.rs                 | 234 +++++++++++++-----
- crates/sidebar/src/sidebar_tests.rs           | 209 ++++++++++++++++
+ crates/sidebar/src/sidebar.rs                 | 237 +++++++++++-----
+ crates/sidebar/src/sidebar_tests.rs           | 255 ++++++++++++++++++
  crates/workspace/src/multi_workspace.rs       |  13 +
- crates/workspace/src/multi_workspace_tests.rs |  93 +++++++
- 5 files changed, 503 insertions(+), 65 deletions(-)
+ crates/workspace/src/multi_workspace_tests.rs |  98 +++++++
+ 5 files changed, 557 insertions(+), 65 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
 index c2b198a..d7f4735 100644
@@ -69,7 +69,7 @@ index c2b198a..d7f4735 100644
                  self.project.clone(),
                  terminal_id,
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 2bca37b..9fa5a94 100644
+index 2bca37b..6fffa2a 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -5186,7 +5186,31 @@ impl Sidebar {
@@ -112,7 +112,7 @@ index 2bca37b..9fa5a94 100644
          let workspace_to_remove = self.linked_worktree_workspace_to_remove(
              &terminal_folder_paths,
              metadata.remote_connection.as_ref(),
-@@ -5221,38 +5244,125 @@ impl Sidebar {
+@@ -5221,38 +5244,128 @@ impl Sidebar {
              &roots_to_archive,
              cx,
          );
@@ -132,15 +132,15 @@ index 2bca37b..9fa5a94 100644
              workspace,
              ThreadEntryWorkspace::Open(workspace) if workspaces_to_remove.contains(workspace)
          );
-+        let kill = project.update(cx, |project, cx| {
-+            project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
-+        });
          let metadata = metadata.clone();
          let workspace = workspace.clone();
 +        let roots_to_archive = roots_to_archive.clone();
-+
+ 
 +        if workspaces_to_remove.is_empty() {
 +            cx.spawn_in(window, async move |this, cx| {
++                let kill = project.update(cx, |project, cx| {
++                    project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
++                });
 +                if let Err(error) = kill.await {
 +                    log::error!(
 +                        "failed to kill persistent terminal session for terminal {terminal_id}: {error:#}"
@@ -176,6 +176,9 @@ index 2bca37b..9fa5a94 100644
 +                workspaces_to_remove,
 +                RemovalIntent::KeepProject,
 +                async move |cx| {
++                    let kill = project.update(cx, |project, cx| {
++                        project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
++                    });
 +                    if let Err(error) = kill.await {
 +                        log::error!(
 +                            "failed to kill persistent terminal session for terminal {terminal_id}: {error:#}"
@@ -212,7 +215,7 @@ index 2bca37b..9fa5a94 100644
 +        })
 +        .detach_and_log_err(cx);
 +    }
- 
++
 +    fn complete_terminal_close(
 +        &mut self,
 +        metadata: &TerminalThreadMetadata,
@@ -256,7 +259,7 @@ index 2bca37b..9fa5a94 100644
                  this.close_terminal_entry(
                      &metadata,
                      &workspace,
-@@ -5286,6 +5396,26 @@ impl Sidebar {
+@@ -5286,6 +5399,26 @@ impl Sidebar {
          .map(|workspace| workspace.read(cx).project().clone())
      }
  
@@ -283,7 +286,7 @@ index 2bca37b..9fa5a94 100644
      fn close_terminal_entry(
          &mut self,
          metadata: &TerminalThreadMetadata,
-@@ -5307,38 +5437,16 @@ impl Sidebar {
+@@ -5307,38 +5440,16 @@ impl Sidebar {
                      closed_via_panel = true;
                      panel.update(cx, |panel, cx| {
                          if defer_draft_activation || !activate_panel_draft {
@@ -326,7 +329,7 @@ index 2bca37b..9fa5a94 100644
          }
  
          self.start_detached_archive_worktree_task(roots_to_archive, cx);
-@@ -5407,13 +5515,12 @@ impl Sidebar {
+@@ -5407,13 +5518,12 @@ impl Sidebar {
          .detach_and_log_err(cx);
      }
  
@@ -343,7 +346,7 @@ index 2bca37b..9fa5a94 100644
          if roots_to_archive.is_empty() {
              return Vec::new();
          }
-@@ -5457,6 +5564,15 @@ impl Sidebar {
+@@ -5457,6 +5567,15 @@ impl Sidebar {
              }
          }
  
@@ -359,7 +362,7 @@ index 2bca37b..9fa5a94 100644
          let mut close_item_tasks = Vec::new();
          for (workspace, archived_worktree_ids) in &mixed_workspaces {
              let panes: Vec<_> = workspace.read(cx).panes().to_vec();
-@@ -5614,12 +5730,10 @@ impl Sidebar {
+@@ -5614,12 +5733,10 @@ impl Sidebar {
          // dropped without destroying the user's workspace layout.
          let mut workspaces_to_remove: Vec<Entity<Workspace>> =
              workspace_to_remove.into_iter().collect();
@@ -376,7 +379,7 @@ index 2bca37b..9fa5a94 100644
  
          let removed_workspace = !workspaces_to_remove.is_empty();
          let session_id = session_id.clone();
-@@ -7062,12 +7176,10 @@ impl Sidebar {
+@@ -7062,12 +7179,10 @@ impl Sidebar {
          });
          let mut workspaces_to_remove: Vec<Entity<Workspace>> =
              workspace_to_remove.into_iter().collect();
@@ -394,10 +397,18 @@ index 2bca37b..9fa5a94 100644
          let draft_workspace_removed = matches!(
              workspace,
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 283219f..b0e3d18 100644
+index 283219f..624627a 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -2898,6 +2898,10 @@ async fn test_closing_terminal_on_archived_linked_worktree_removes_workspace(
+@@ -25,6 +25,7 @@ use std::{
+     sync::Arc,
+ };
+ use util::{path_list::PathList, rel_path::rel_path};
++use workspace::item::test::TestItem;
+ 
+ fn close_terminal_from_sidebar(
+     sidebar: &Entity<Sidebar>,
+@@ -2898,6 +2899,14 @@ async fn test_closing_terminal_on_archived_linked_worktree_removes_workspace(
          })
          .expect("test terminal should be inserted");
      cx.run_until_parked();
@@ -405,13 +416,63 @@ index 283219f..b0e3d18 100644
 +    let session_name = terminal_id.session_name();
 +    fake.add_session(&session_name);
 +    fake.state.lock().kill_error = Some("connection lost".into());
++    let dirty_item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
++    worktree_workspace.update_in(cx, |workspace, window, cx| {
++        workspace.add_item_to_active_pane(Box::new(dirty_item.clone()), None, true, window, cx);
++    });
  
      assert_eq!(
          multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace
-@@ -2919,6 +2923,35 @@ async fn test_closing_terminal_on_archived_linked_worktree_removes_workspace(
-         cx.run_until_parked();
-     }
+@@ -2914,6 +2923,76 @@ async fn test_closing_terminal_on_archived_linked_worktree_removes_workspace(
+         "expected linked worktree terminal before closing, got: {entries_before:?}"
+     );
  
++    close_terminal_from_sidebar(&sidebar, terminal_id, cx);
++    cx.run_until_parked();
++    assert!(cx.has_pending_prompt());
++    assert!(
++        fake.kill_history().is_empty(),
++        "session kill must not start while close consent is pending"
++    );
++    assert!(fake.has_session(&session_name));
++    cx.simulate_prompt_answer("Cancel");
++    cx.run_until_parked();
++    assert!(
++        fake.kill_history().is_empty(),
++        "cancelling close consent must not kill the persistent session"
++    );
++    assert!(fake.has_session(&session_name));
++    cx.update(|_, cx| {
++        assert!(
++            TerminalThreadMetadataStore::global(cx)
++                .read(cx)
++                .entry(terminal_id)
++                .is_some(),
++            "cancelled close must retain terminal metadata"
++        );
++    });
++    assert_eq!(
++        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace
++            .workspaces()
++            .count()),
++        2,
++        "cancelled close must retain the linked worktree workspace"
++    );
++    assert!(
++        fs.is_dir(Path::new("/worktrees/project/feature-a/project"))
++            .await,
++        "cancelled close must retain the linked worktree root"
++    );
++
++    dirty_item.update(cx, |item, cx| {
++        item.is_dirty = false;
++        cx.notify();
++    });
++    close_terminal_from_sidebar(&sidebar, terminal_id, cx);
++    for _ in 0..4 {
++        cx.run_until_parked();
++    }
++
 +    assert!(fake.has_session(&session_name));
 +    cx.update(|_, cx| {
 +        assert!(
@@ -436,15 +497,10 @@ index 283219f..b0e3d18 100644
 +    );
 +
 +    fake.state.lock().kill_error = None;
-+    close_terminal_from_sidebar(&sidebar, terminal_id, cx);
-+    for _ in 0..4 {
-+        cx.run_until_parked();
-+    }
-+
-     let terminal_metadata_deleted = cx.update(|_, cx| {
-         TerminalThreadMetadataStore::global(cx)
-             .read(cx)
-@@ -4688,6 +4721,182 @@ async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes
+     close_terminal_from_sidebar(&sidebar, terminal_id, cx);
+     for _ in 0..4 {
+         cx.run_until_parked();
+@@ -4688,6 +4767,182 @@ async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes
      });
  }
  
@@ -659,10 +715,10 @@ index aa0f0b5..ef6e31a 100644
              // the replacement from the rows that actually remain.
              let (removed_any, reopen_key) = this.update_in(cx, |this, window, cx| {
 diff --git a/crates/workspace/src/multi_workspace_tests.rs b/crates/workspace/src/multi_workspace_tests.rs
-index 91abd7d..e081369 100644
+index 91abd7d..2ecc240 100644
 --- a/crates/workspace/src/multi_workspace_tests.rs
 +++ b/crates/workspace/src/multi_workspace_tests.rs
-@@ -717,6 +717,99 @@ async fn test_remove_fallback_via_find_or_create_skips_removed_workspaces(cx: &m
+@@ -717,6 +717,104 @@ async fn test_remove_fallback_via_find_or_create_skips_removed_workspaces(cx: &m
      });
  }
  
@@ -680,7 +736,7 @@ index 91abd7d..e081369 100644
 +        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
 +    let dirty_item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
 +    workspace.update_in(cx, |workspace, window, cx| {
-+        workspace.add_item_to_active_pane(Box::new(dirty_item), None, true, window, cx);
++        workspace.add_item_to_active_pane(Box::new(dirty_item.clone()), None, true, window, cx);
 +    });
 +
 +    let guard_calls = Rc::new(Cell::new(0));
@@ -714,11 +770,9 @@ index 91abd7d..e081369 100644
 +            .any(|candidate| candidate == &workspace)
 +    }));
 +
-+    workspace.update_in(cx, |workspace, _window, cx| {
-+        workspace
-+            .active_item(cx)
-+            .expect("dirty item should remain")
-+            .set_dirty(false, cx);
++    dirty_item.update(cx, |item, cx| {
++        item.is_dirty = false;
++        cx.notify();
 +    });
 +    let remove_task = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
 +        multi_workspace.remove_with_pre_remove(
@@ -737,12 +791,19 @@ index 91abd7d..e081369 100644
 +    }));
 +
 +    let guard_calls = Rc::new(Cell::new(0));
++    let weak_multi_workspace = multi_workspace.downgrade();
++    let guarded_workspace = workspace.clone();
 +    let remove_task = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
 +        let guard_calls = guard_calls.clone();
 +        multi_workspace.remove_with_pre_remove(
 +            [workspace.clone()],
 +            RemovalIntent::CloseProject,
-+            async move |_| {
++            async move |cx| {
++                assert!(weak_multi_workspace.read_with(cx, |multi_workspace, _| {
++                    multi_workspace
++                        .workspaces()
++                        .any(|candidate| candidate == &guarded_workspace)
++                })?);
 +                guard_calls.set(guard_calls.get() + 1);
 +                Ok(())
 +            },
