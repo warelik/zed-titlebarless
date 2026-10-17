@@ -2296,7 +2296,10 @@ impl AgentPanel {
             this.update_in(cx, |this, window, cx| {
                 this.pending_terminal_spawns.remove(&terminal_id);
                 if this.closed_terminal_spawns.remove(&terminal_id) {
-                    if session == PersistentSession::Unavailable {
+                    let unavailable_without_metadata = session == PersistentSession::Unavailable
+                        && TerminalThreadMetadataStore::try_global(cx)
+                            .is_some_and(|store| store.read(cx).entry(terminal_id).is_none());
+                    if unavailable_without_metadata {
                         if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
                             store.update(cx, |store, cx| store.delete(terminal_id, cx));
                         }
@@ -2622,10 +2625,12 @@ impl AgentPanel {
         self.close_terminal_internal(terminal_id, false, true, window, cx);
     }
 
-    pub fn terminal_is_persistent(&self, terminal_id: TerminalId) -> Option<bool> {
-        self.terminals
-            .get(&terminal_id)
-            .map(|terminal| terminal.persistent)
+    pub fn terminal_session_may_exist(&self, terminal_id: TerminalId, cx: &App) -> Option<bool> {
+        self.terminals.get(&terminal_id).map(|terminal| {
+            terminal.persistent
+                || TerminalThreadMetadataStore::try_global(cx)
+                    .map_or(true, |store| store.read(cx).entry(terminal_id).is_some())
+        })
     }
 
     pub fn close_terminal_after_session_kill(
@@ -2648,9 +2653,8 @@ impl AgentPanel {
     ) {
         let was_active = self.active_terminal_id() == Some(terminal_id);
         let should_kill_persistent_session = self
-            .terminals
-            .get(&terminal_id)
-            .map_or(true, |terminal| terminal.persistent);
+            .terminal_session_may_exist(terminal_id, cx)
+            .unwrap_or(true);
 
         let spawn_is_pending = self.pending_terminal_spawns.remove(&terminal_id)
             || self.closed_terminal_spawns.contains(&terminal_id);
@@ -17273,6 +17277,88 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_close_restored_unavailable_terminal_preserves_session_metadata(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        cx.update(|_, cx| TerminalThreadMetadataStore::init_global(cx));
+        let project = panel.read_with(&cx, |panel, _| panel.project.clone());
+        let fake = project.update(&mut cx, |project, _| project.enable_fake_shpool(&[]));
+
+        let terminal_id = TerminalId::new();
+        let metadata = TerminalThreadMetadata {
+            terminal_id,
+            title: "Managed".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::default(),
+            remote_connection: None,
+            working_directory: None,
+        };
+        fake.add_session(terminal_id.session_name());
+        {
+            let mut state = fake.state.lock();
+            state.available = false;
+            state.kill_error = Some("shpool unavailable".into());
+        }
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx)
+                .update(cx, |store, cx| store.save(metadata.clone(), cx));
+        });
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.restore_terminal(
+                metadata.clone(),
+                true,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(&cx, |panel, cx| {
+                panel.terminal_session_may_exist(terminal_id, cx)
+            }),
+            Some(true)
+        );
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.close_terminal(terminal_id, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(fake.kill_history(), vec![terminal_id.session_name()]);
+        assert!(fake.has_session(&terminal_id.session_name()));
+        cx.update(|_, cx| {
+            assert!(
+                TerminalThreadMetadataStore::global(cx)
+                    .read(cx)
+                    .entry(terminal_id)
+                    .is_some()
+            );
+        });
+
+        {
+            let mut state = fake.state.lock();
+            state.available = true;
+            state.kill_error = None;
+        }
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.restore_terminal(
+                metadata,
+                true,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(fake.attach_history(), vec![terminal_id.session_name()]);
+        assert!(panel.read_with(&cx, |panel, _| panel.has_terminal(terminal_id)));
+    }
+
+    #[gpui::test]
     async fn test_close_loaded_unmanaged_terminal_does_not_kill_shpool(cx: &mut TestAppContext) {
         let (panel, mut cx) = setup_panel(cx).await;
         cx.update(|_, cx| TerminalThreadMetadataStore::init_global(cx));
@@ -17320,6 +17406,82 @@ mod tests {
                     .is_none()
             );
         });
+    }
+
+    #[gpui::test]
+    async fn test_close_during_unavailable_pending_restore_preserves_existing_metadata(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        cx.update(|_, cx| TerminalThreadMetadataStore::init_global(cx));
+        let project = panel.read_with(&cx, |panel, _| panel.project.clone());
+        let fake = project.update(&mut cx, |project, _| project.enable_fake_shpool(&[]));
+        let terminal_id = TerminalId::new();
+        let metadata = TerminalThreadMetadata {
+            terminal_id,
+            title: "Pending managed terminal".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::default(),
+            remote_connection: None,
+            working_directory: None,
+        };
+        fake.add_session(terminal_id.session_name());
+        {
+            let mut state = fake.state.lock();
+            state.available = false;
+            state.kill_error = Some("shpool unavailable".into());
+        }
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx)
+                .update(cx, |store, cx| store.save(metadata.clone(), cx));
+        });
+
+        let (release_spawn, spawn_gate) = futures::channel::oneshot::channel::<()>();
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.test_terminal_spawn_gate = Some(spawn_gate);
+            panel.restore_terminal(
+                metadata.clone(),
+                true,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+            panel.close_terminal(terminal_id, window, cx);
+        });
+        release_spawn.send(()).unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(fake.kill_history(), vec![terminal_id.session_name()]);
+        assert!(fake.has_session(&terminal_id.session_name()));
+        panel.read_with(&cx, |panel, cx| {
+            assert!(!panel.has_terminal(terminal_id));
+            assert!(
+                TerminalThreadMetadataStore::global(cx)
+                    .read(cx)
+                    .entry(terminal_id)
+                    .is_some()
+            );
+        });
+
+        {
+            let mut state = fake.state.lock();
+            state.available = true;
+            state.kill_error = None;
+        }
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.restore_terminal(
+                metadata,
+                true,
+                AgentThreadSource::AgentPanel,
+                None,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(fake.attach_history(), vec![terminal_id.session_name()]);
     }
 
     #[gpui::test]

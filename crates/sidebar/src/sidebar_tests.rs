@@ -2528,6 +2528,70 @@ async fn test_sidebar_shows_live_dragged_terminal_without_persisting_it(
 }
 
 #[gpui::test]
+async fn test_sidebar_close_restored_unavailable_terminal_preserves_session_metadata(
+    cx: &mut TestAppContext,
+) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    let fake_shpool = project.update(cx, |project, _cx| project.enable_fake_shpool(&[]));
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+    let terminal_id = TerminalId::new();
+    let metadata = TerminalThreadMetadata {
+        terminal_id,
+        title: "Managed terminal".into(),
+        custom_title: None,
+        created_at: Utc::now(),
+        worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from(
+            "/my-project",
+        )])),
+        remote_connection: None,
+        working_directory: None,
+    };
+    fake_shpool.add_session(terminal_id.session_name());
+    {
+        let mut state = fake_shpool.state.lock();
+        state.available = false;
+        state.kill_error = Some("shpool unavailable".into());
+    }
+    cx.update(|_window, cx| {
+        TerminalThreadMetadataStore::global(cx)
+            .update(cx, |store, cx| store.save(metadata.clone(), cx));
+    });
+    panel.update_in(cx, |panel, window, cx| {
+        panel.restore_terminal(
+            metadata,
+            true,
+            AgentThreadSource::AgentPanel,
+            None,
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    close_terminal_from_sidebar(&sidebar, terminal_id, cx);
+    cx.run_until_parked();
+
+    assert_eq!(fake_shpool.kill_history(), vec![terminal_id.session_name()]);
+    assert!(fake_shpool.has_session(&terminal_id.session_name()));
+    assert!(
+        visible_entries_as_strings(&sidebar, cx)
+            .iter()
+            .any(|entry| entry.contains("Managed terminal"))
+    );
+    sidebar.read_with(cx, |_sidebar, cx| {
+        assert!(
+            TerminalThreadMetadataStore::global(cx)
+                .read(cx)
+                .entry(terminal_id)
+                .is_some()
+        );
+    });
+    assert!(panel.read_with(cx, |panel, _cx| panel.has_terminal(terminal_id)));
+}
+
+#[gpui::test]
 async fn test_closing_last_agent_panel_terminal_restores_empty_header(cx: &mut TestAppContext) {
     let project = init_test_project_with_agent_panel("/my-project", cx).await;
     let (multi_workspace, cx) =
