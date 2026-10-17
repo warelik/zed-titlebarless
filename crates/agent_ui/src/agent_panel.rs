@@ -161,7 +161,7 @@ fn kill_persistent_terminal_session_and_delete_metadata(
             if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
                 store.update(cx, |store, cx| store.delete(terminal_id, cx));
             }
-        })?;
+        });
         anyhow::Ok(())
     })
     .detach_and_log_err(cx);
