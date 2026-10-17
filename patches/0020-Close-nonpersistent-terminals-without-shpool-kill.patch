@@ -112,7 +112,7 @@ index 54be3c5..ca0fab0 100644
  
  #[gpui::test]
 -async fn test_sidebar_shows_live_dragged_terminal_without_persisting_it(cx: &mut TestAppContext) {
-+async fn test_sidebar_closes_loaded_nonpersistent_terminal_without_session_kill(
++async fn test_sidebar_shows_live_dragged_terminal_without_persisting_it(
 +    cx: &mut TestAppContext,
 +) {
      let project = init_test_project_with_agent_panel("/my-project", cx).await;
