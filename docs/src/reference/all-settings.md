@@ -151,7 +151,7 @@ Open the Settings Editor and search for “Threads Sidebar Position”. Or add t
 
 **Options**
 
-Numbers from `200` to `800` pixels (inclusive). Values outside this range are clamped to the nearest limit.
+Numbers from `100` to `800` pixels (inclusive). Values outside this range are clamped to the nearest limit.
 
 Open the Settings Editor and search for “Threads Sidebar Default Width”. Or add this to your `settings.json`:
 
@@ -5508,6 +5508,16 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 - `show_menus`: Whether to show the menus in the titlebar
 - `open_menus_on_hover`: Whether to open title-bar menus on hover. Once a menu is open, hovering always switches between menus.
 - `button_layout`: The layout of window control buttons in the title bar (Linux only). Can be set to `"platform_default"` to follow the system setting, `"standard"` to use Zed's built-in layout, or a custom format like `"close:minimize,maximize"`
+
+## Title Bar to Status Bar
+
+- Description: Whether to hide the title bar and show its contents in the status bar instead (macOS only). Other platforms ignore it, as their window controls are drawn in the title bar
+- Setting: `title_bar_to_status_bar`
+- Default: `false`
+
+**Options**
+
+`boolean` values
 
 ## Window Title Format
 
