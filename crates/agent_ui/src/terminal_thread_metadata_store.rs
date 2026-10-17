@@ -563,6 +563,18 @@ impl Domain for TerminalThreadMetadataDb {
 
 db::static_connection!(TerminalThreadMetadataDb, []);
 
+fn remote_connection_for_persistence(
+    remote_connection: Option<RemoteConnectionOptions>,
+) -> Option<RemoteConnectionOptions> {
+    remote_connection.map(|connection| match connection {
+        RemoteConnectionOptions::Ssh(mut options) => {
+            options.password = None;
+            RemoteConnectionOptions::Ssh(options)
+        }
+        connection => connection,
+    })
+}
+
 impl TerminalThreadMetadataDb {
     pub fn list(&self) -> anyhow::Result<Vec<TerminalThreadMetadata>> {
         self.select::<TerminalThreadMetadata>(
@@ -596,8 +608,7 @@ impl TerminalThreadMetadataDb {
             } else {
                 (Some(main_serialized.paths), Some(main_serialized.order))
             };
-        let remote_connection = row
-            .remote_connection
+        let remote_connection = remote_connection_for_persistence(row.remote_connection)
             .as_ref()
             .map(serde_json::to_string)
             .transpose()
@@ -731,6 +742,32 @@ mod tests {
             remote_connection: None,
             working_directory: None,
         }
+    }
+
+    #[test]
+    fn test_terminal_metadata_persistence_strips_ssh_password() {
+        let connection = RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+            host: "example.com".into(),
+            username: Some("alice".into()),
+            port: Some(2222),
+            password: Some("plaintext-secret".into()),
+            ..Default::default()
+        });
+
+        let persisted = remote_connection_for_persistence(Some(connection))
+            .expect("remote connection should be retained");
+        let RemoteConnectionOptions::Ssh(options) = persisted else {
+            panic!("SSH connection should remain SSH")
+        };
+        assert_eq!(options.host.to_string(), "example.com");
+        assert_eq!(options.username.as_deref(), Some("alice"));
+        assert_eq!(options.port, Some(2222));
+        assert_eq!(options.password, None);
+        assert!(
+            !serde_json::to_string(&options)
+                .expect("sanitized options should serialize")
+                .contains("plaintext-secret")
+        );
     }
 
     #[test]
