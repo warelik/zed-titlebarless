@@ -27,8 +27,8 @@ const SIDEBAR_RESIZE_HANDLE_SIZE: Pixels = px(6.0);
 
 use crate::open_remote_project_with_existing_connection;
 use crate::{
-    CloseIntent, CloseWindow, DockPosition, Event as WorkspaceEvent, Item, ModalView, OpenMode,
-    Panel, Workspace, WorkspaceId, client_side_decorations,
+    CloseIntent, CloseWindow, DockPosition, Event as WorkspaceEvent, Item, ItemCloseGuard,
+    ModalView, OpenMode, Panel, Workspace, WorkspaceId, client_side_decorations,
     persistence::model::MultiWorkspaceState,
 };
 
@@ -1852,6 +1852,17 @@ impl MultiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<bool>> {
+        self.remove_with_pre_remove(workspaces, intent, async |_| Ok(true), window, cx)
+    }
+
+    pub fn remove_with_pre_remove(
+        &mut self,
+        workspaces: impl IntoIterator<Item = Entity<Workspace>>,
+        intent: RemovalIntent,
+        before_remove: impl AsyncFnOnce(&mut gpui::AsyncWindowContext) -> Result<bool> + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<bool>> {
         let workspaces: Vec<_> = workspaces.into_iter().collect();
 
         if workspaces.is_empty() {
@@ -1895,9 +1906,58 @@ impl MultiWorkspace {
                 }
             }
 
+            let item_ids = workspaces
+                .iter()
+                .map(|workspace| {
+                    workspace.read_with(cx, |workspace, cx| {
+                        workspace
+                            .panes()
+                            .iter()
+                            .flat_map(|pane| pane.read(cx).items().map(|item| item.item_id()))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect::<Vec<_>>();
+            let items = workspaces
+                .iter()
+                .flat_map(|workspace| {
+                    workspace.read_with(cx, |workspace, cx| {
+                        workspace
+                            .panes()
+                            .iter()
+                            .flat_map(|pane| {
+                                pane.read(cx)
+                                    .items()
+                                    .map(|item| item.boxed_clone())
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            let guard = cx.update(|window, cx| ItemCloseGuard::new(items, window, cx))?;
+
+            if !before_remove(cx).await? {
+                return Ok(false);
+            }
+
             // Edit phase: one synchronous update. Delete the rows, then pick
             // the replacement from the rows that actually remain.
             let (removed_any, reopen_key) = this.update_in(cx, |this, window, cx| {
+                let current_item_ids = workspaces
+                    .iter()
+                    .map(|workspace| {
+                        workspace
+                            .read(cx)
+                            .panes()
+                            .iter()
+                            .flat_map(|pane| pane.read(cx).items().map(|item| item.item_id()))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                if guard.changed(cx) || current_item_ids != item_ids {
+                    return (false, None);
+                }
                 let mut removed_any = false;
                 let displayed_workspace = this.workspace().clone();
 
