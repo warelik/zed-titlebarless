@@ -2622,6 +2622,12 @@ impl AgentPanel {
         self.close_terminal_internal(terminal_id, false, true, window, cx);
     }
 
+    pub fn terminal_is_persistent(&self, terminal_id: TerminalId) -> Option<bool> {
+        self.terminals
+            .get(&terminal_id)
+            .map(|terminal| terminal.persistent)
+    }
+
     pub fn close_terminal_after_session_kill(
         &mut self,
         terminal_id: TerminalId,
