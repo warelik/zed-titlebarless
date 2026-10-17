@@ -5286,6 +5286,26 @@ impl Sidebar {
         .map(|workspace| workspace.read(cx).project().clone())
     }
 
+    fn show_terminal_close_error(&self, terminal_id: TerminalId, cx: &mut App) {
+        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
+            return;
+        };
+        let workspace = multi_workspace.read(cx).workspace().clone();
+        workspace.update(cx, |workspace, cx| {
+            struct CloseTerminalErrorToast;
+            workspace.show_toast(
+                Toast::new(
+                    NotificationId::unique::<CloseTerminalErrorToast>(),
+                    format!(
+                        "Failed to stop terminal session {terminal_id}; close it again to retry"
+                    ),
+                )
+                .autohide(),
+                cx,
+            );
+        });
+    }
+
     fn close_terminal_entry(
         &mut self,
         metadata: &TerminalThreadMetadata,
@@ -5324,20 +5344,33 @@ impl Sidebar {
                 }
             };
             if let Some(project) = project {
-                project
-                    .update(cx, |project, cx| {
-                        project.kill_persistent_terminal_session(session_name, cx)
-                    })
-                    .detach_and_log_err(cx);
+                let kill = project.update(cx, |project, cx| {
+                    project.kill_persistent_terminal_session(session_name, cx)
+                });
+                cx.spawn(async move |this, cx| match kill.await {
+                    Ok(()) => {
+                        cx.update(|cx| {
+                            if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+                                store.update(cx, |store, cx| store.delete(terminal_id, cx));
+                            }
+                        });
+                    }
+                    Err(error) => {
+                        log::error!(
+                            "failed to kill persistent terminal session for terminal {terminal_id}: {error:#}"
+                        );
+                        this.update(cx, |this, cx| {
+                            this.show_terminal_close_error(terminal_id, cx);
+                        })
+                        .ok();
+                    }
+                })
+                .detach();
             } else {
                 log::warn!(
                     "no open project available to kill persistent terminal session for terminal {terminal_id}"
                 );
-            }
-            if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
-                store.update(cx, |store, cx| {
-                    store.delete(terminal_id, cx);
-                });
+                self.show_terminal_close_error(terminal_id, cx);
             }
         }
 

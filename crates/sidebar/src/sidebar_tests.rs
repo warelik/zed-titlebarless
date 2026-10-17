@@ -4600,7 +4600,7 @@ async fn test_closing_active_agent_panel_terminal_activates_neighbor(cx: &mut Te
 }
 
 #[gpui::test]
-async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes_metadata(
+async fn test_failed_close_terminal_entry_retains_metadata_until_session_kill_succeeds(
     cx: &mut TestAppContext,
 ) {
     let main_project = init_test_project_with_agent_panel("/main-project", cx).await;
@@ -4612,6 +4612,7 @@ async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes
     let terminal_id = TerminalId::new();
     let session_name = terminal_id.session_name();
     fake.add_session(&session_name);
+    fake.state.lock().kill_error = Some("connection lost".into());
 
     let main_paths = PathList::new(&[PathBuf::from("/main-project")]);
     let closed_worktree_paths = PathList::new(&[PathBuf::from("/worktrees/feature-a")]);
@@ -4674,7 +4675,29 @@ async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes
     assert_eq!(
         fake.kill_history(),
         vec![session_name.clone()],
-        "closing terminal on closed workspace must kill persistent session"
+        "closing terminal on closed workspace must try to kill its persistent session"
+    );
+    assert!(fake.has_session(&session_name));
+    cx.update(|_, cx| {
+        assert!(
+            TerminalThreadMetadataStore::global(cx)
+                .read(cx)
+                .entry(terminal_id)
+                .is_some(),
+            "failed kill must retain metadata so closing can be retried"
+        );
+    });
+
+    fake.state.lock().kill_error = None;
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.close_terminal(&terminal_metadata, &terminal_workspace, window, cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        fake.kill_history(),
+        vec![session_name.clone(), session_name.clone()],
+        "retrying close must retry the persistent session kill"
     );
     assert!(!fake.has_session(&session_name));
     cx.update(|_, cx| {
@@ -4683,7 +4706,7 @@ async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes
                 .read(cx)
                 .entry(terminal_id)
                 .is_none(),
-            "metadata must be deleted after close on closed workspace"
+            "metadata must be deleted only after the session kill succeeds"
         );
     });
 }
