@@ -1,4 +1,4 @@
-From 21674d71177a2abf7d19ef244569558671f714ae Mon Sep 17 00:00:00 2001
+From f0a90dc598fe5f43f6ecff597ec2895a78e79279 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex-repair@example.invalid>
 Date: Sat, 17 Oct 2026 13:55:42 +0000
 Subject: [PATCH] Close nonpersistent terminals without shpool kill
@@ -6,8 +6,8 @@ Subject: [PATCH] Close nonpersistent terminals without shpool kill
 ---
  crates/agent_ui/src/agent_panel.rs  |  6 ++++
  crates/sidebar/src/sidebar.rs       | 52 ++++++++++++++++++-----------
- crates/sidebar/src/sidebar_tests.rs |  9 ++++-
- 3 files changed, 46 insertions(+), 21 deletions(-)
+ crates/sidebar/src/sidebar_tests.rs | 11 +++++-
+ 3 files changed, 48 insertions(+), 21 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
 index 8caca50..108ec1d 100644
@@ -104,19 +104,21 @@ index 0dbe984..30be973 100644
                      callback_kill_succeeded.set(true);
                      let cleanup_is_safe = cx.update(|_, cx| {
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 54be3c5..41ac630 100644
+index 54be3c5..ca0fab0 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -2313,7 +2313,7 @@ async fn test_agent_panel_terminals_appear_in_sidebar_and_search(cx: &mut TestAp
+@@ -2313,7 +2313,9 @@ async fn test_agent_panel_terminals_appear_in_sidebar_and_search(cx: &mut TestAp
  }
  
  #[gpui::test]
 -async fn test_sidebar_shows_live_dragged_terminal_without_persisting_it(cx: &mut TestAppContext) {
-+async fn test_sidebar_closes_loaded_nonpersistent_terminal_without_session_kill(cx: &mut TestAppContext) {
++async fn test_sidebar_closes_loaded_nonpersistent_terminal_without_session_kill(
++    cx: &mut TestAppContext,
++) {
      let project = init_test_project_with_agent_panel("/my-project", cx).await;
      let fake_shpool = project.update(cx, |project, _cx| project.enable_fake_shpool(&[]));
      let (multi_workspace, visual_context) =
-@@ -2483,8 +2483,15 @@ async fn test_sidebar_shows_live_dragged_terminal_without_persisting_it(cx: &mut
+@@ -2483,8 +2485,15 @@ async fn test_sidebar_shows_live_dragged_terminal_without_persisting_it(cx: &mut
          );
      });
  
