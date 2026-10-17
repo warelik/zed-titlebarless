@@ -5205,7 +5205,7 @@ impl Sidebar {
             ThreadEntryWorkspace::Open(workspace) => workspace
                 .read(cx)
                 .panel::<AgentPanel>(cx)
-                .and_then(|panel| panel.read(cx).terminal_is_persistent(terminal_id))
+                .and_then(|panel| panel.read(cx).terminal_session_may_exist(terminal_id, cx))
                 .unwrap_or(true),
             ThreadEntryWorkspace::Closed { .. } => true,
         };
