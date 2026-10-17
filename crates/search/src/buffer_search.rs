@@ -6,9 +6,9 @@ use crate::{
     ToggleCaseSensitive, ToggleRegex, ToggleReplace, ToggleSelection, ToggleWholeWord,
     buffer_search::registrar::WithResultsOrExternalQuery,
     search_bar::{
-        ActionButtonState, HistoryNavigationDirection, alignment_element,
+        ActionButtonState, HistoryNavigationDirection, alignment_element, error_line,
         filter_search_results_input, input_base_styles, render_action_button, render_text_input,
-        should_navigate_history,
+        should_navigate_history, text_input_cell,
     },
 };
 use any_vec::AnyVec;
@@ -37,7 +37,7 @@ use zed_actions::{outline::ToggleOutline, workspace::CopyPath, workspace::CopyRe
 use ui::{BASE_REM_SIZE_IN_PX, IconButtonShape, Tooltip, prelude::*, utils::SearchInputWidth};
 use util::{ResultExt, paths::PathMatcher};
 use workspace::{
-    ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace,
+    Toolbar, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace,
     item::{ItemBufferKind, ItemHandle},
     searchable::{
         Direction, FilteredSearchRange, SearchEvent, SearchToken, SearchableItemHandle,
@@ -221,7 +221,7 @@ impl Render for BufferSearchBar {
         let input_width = SearchInputWidth::calc_width(container_width);
 
         let input_base_styles =
-            |border_color| input_base_styles(border_color, |div| div.w(input_width));
+            |border_color| input_base_styles(border_color, |div| div.w(input_width), cx);
 
         let input_style = if find_in_results {
             filter_search_results_input(query_border, |div| div.w(input_width), cx)
@@ -230,7 +230,7 @@ impl Render for BufferSearchBar {
         };
 
         let query_column = input_style
-            .child(div().flex_1().min_w_0().py_1().child(render_text_input(
+            .child(text_input_cell(cx).min_w_0().child(render_text_input(
                 &self.query_editor,
                 color_override,
                 cx,
@@ -379,10 +379,7 @@ impl Render for BufferSearchBar {
 
         let replace_line = should_show_replace_input.then(|| {
             let replace_column = input_base_styles(replacement_border).child(
-                div()
-                    .flex_1()
-                    .py_1()
-                    .child(render_text_input(&self.replacement_editor, None, cx)),
+                text_input_cell(cx).child(render_text_input(&self.replacement_editor, None, cx)),
             );
             let focus_handle = self.replacement_editor.read(cx).focus_handle(cx);
 
@@ -420,13 +417,7 @@ impl Render for BufferSearchBar {
             key_context.add("in_replace");
         }
 
-        let query_error_line = self.query_error.as_ref().map(|error| {
-            Label::new(error)
-                .size(LabelSize::Small)
-                .color(Color::Error)
-                .mt_neg_1()
-                .ml_2()
-        });
+        let query_error_line = self.query_error.as_ref().map(|error| error_line(error, cx));
 
         let search_line =
             h_flex()
@@ -455,7 +446,9 @@ impl Render for BufferSearchBar {
 
         v_flex()
             .id("buffer_search")
-            .gap_2()
+            .when(Toolbar::compact_row_height(cx).is_none(), |this| {
+                this.gap_2()
+            })
             .w_full()
             .track_scroll(&self.scroll_handle)
             .key_context(key_context)

@@ -3121,7 +3121,8 @@ impl ConversationView {
         };
 
         let multi_workspace = multi_workspace.read(cx);
-        multi_workspace.sidebar_open() && multi_workspace.is_threads_list_view_active(cx)
+        multi_workspace.sidebar_render_state(cx).open
+            && multi_workspace.is_threads_list_view_active(cx)
             || multi_workspace.workspace() == &workspace
                 && self.is_visible_in_agent_panel(&workspace, cx)
     }
@@ -3389,7 +3390,6 @@ impl ConversationView {
                             dismiss_if_visible(this, window, cx);
                         }
                         AgentPanelEvent::EntryChanged
-                        | AgentPanelEvent::TerminalCloseRequested { .. }
                         | AgentPanelEvent::ThreadInteracted { .. } => {}
                     },
                 ));
