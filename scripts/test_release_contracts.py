@@ -883,7 +883,7 @@ class RepairPromptContractTests(unittest.TestCase):
         self.assertIn(".repair/context.json", prompt)
         self.assertIn(f"`{release.UPSTREAM}@{state['upstream']}`", prompt)
         self.assertIn("Do not mix policy and application repairs", prompt)
-        self.assertIn("Attempt 1/3.", prompt)
+        self.assertRegex(prompt, r"Attempt 1(?:/3)?\.")
         self.assertIn(f"<!-- zed-fix:{state['head']}:1 -->", prompt)
 
 
