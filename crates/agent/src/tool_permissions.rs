@@ -613,6 +613,8 @@ mod tests {
                 auto_open: true,
                 default_width: px(300.),
                 position: settings::SidebarDockPosition::Left,
+                compact: false,
+                in_agent_panel: false,
             },
             thinking_display: Default::default(),
         }
