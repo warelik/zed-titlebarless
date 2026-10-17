@@ -9,9 +9,11 @@ use crate::{
         PreviewTabsSettings, ProjectItemKind, SaveOptions, ShowCloseButton, ShowDiagnostics,
         TabContentParams, TabTooltipContent, WeakItemHandle,
     },
-    move_item,
+    move_item, move_window_on_drag,
     notifications::NotifyResultExt,
+    title_bar_area, title_bar_in_status_bar,
     toolbar::Toolbar,
+    traffic_light_row, traffic_lights_overlay_workspace,
     workspace_settings::{AutosaveSetting, FocusFollowsMouse, TabBarSettings, WorkspaceSettings},
 };
 use anyhow::Result;
@@ -856,6 +858,10 @@ impl Pane {
     pub fn set_close_pane_if_empty(&mut self, close_pane_if_empty: bool, cx: &mut Context<Self>) {
         self.close_pane_if_empty = close_pane_if_empty;
         cx.notify();
+    }
+
+    pub fn close_pane_if_empty(&self) -> bool {
+        self.close_pane_if_empty
     }
 
     pub fn set_can_navigate(&mut self, can_navigate: bool, cx: &mut Context<Self>) {
@@ -2840,6 +2846,7 @@ impl Pane {
         ix: usize,
         item: &dyn ItemHandle,
         detail: usize,
+        is_chip: bool,
         focus_handle: &FocusHandle,
         window: &mut Window,
         cx: &mut Context<Pane>,
@@ -2850,6 +2857,7 @@ impl Pane {
             .map(|id| id == item.item_id())
             .unwrap_or(false);
 
+        let settings = ItemSettings::get_global(cx);
         let label = item.tab_content(
             TabContentParams {
                 detail: Some(detail),
@@ -2857,7 +2865,7 @@ impl Pane {
                 preview: is_preview,
                 deemphasized: !self.has_focus(window, cx),
                 max_title_len: None,
-                truncate_title_middle: false,
+                truncate_title_middle: settings.max_width.is_some(),
             },
             window,
             cx,
@@ -2865,7 +2873,6 @@ impl Pane {
 
         let icon = self.tab_icon_element(item, is_active, window, cx);
 
-        let settings = ItemSettings::get_global(cx);
         let close_side = &settings.close_position;
         let show_close_button = &settings.show_close_button;
         let indicator = render_item_indicator(item.boxed_clone(), cx);
@@ -2918,6 +2925,9 @@ impl Pane {
                 ClosePosition::Right => ui::TabCloseSide::End,
             })
             .toggle_state(is_active)
+            .chip(is_chip)
+            .min_width(settings.min_width)
+            .max_width(settings.max_width)
             .on_click(cx.listener({
                 let item_handle = item.boxed_clone();
                 move |pane: &mut Self, event: &ClickEvent, window, cx| {
@@ -3054,6 +3064,13 @@ impl Pane {
                 h_flex()
                     .id(("pane-tab-content", ix))
                     .gap_1()
+                    .when(
+                        settings.min_width.is_some() || settings.max_width.is_some(),
+                        |this| this.flex_grow(1.),
+                    )
+                    .when(settings.max_width.is_some(), |this| {
+                        this.min_w_0().overflow_hidden()
+                    })
                     .children(if let Some(icon) = icon {
                         Some(icon)
                     } else if !capability.editable() {
@@ -3517,13 +3534,23 @@ impl Pane {
                 }
             });
 
+        let tab_bar_settings = TabBarSettings::get_global(cx);
+        let use_separate_rows = tab_bar_settings.show_pinned_tabs_in_separate_row;
+        let pinned_tab_chips = tab_bar_settings.pinned_tab_chips;
+        let unpinned_tab_chips = tab_bar_settings.unpinned_tab_chips;
+
         let mut tab_items = self
             .items
             .iter()
             .enumerate()
             .zip(tab_details(&self.items, window, cx))
             .map(|((ix, item), detail)| {
-                self.render_tab(ix, &**item, detail, &focus_handle, window, cx)
+                let is_chip = if self.is_tab_pinned(ix) {
+                    pinned_tab_chips
+                } else {
+                    unpinned_tab_chips
+                };
+                self.render_tab(ix, &**item, detail, is_chip, &focus_handle, window, cx)
                     .into_any_element()
             })
             .collect::<Vec<_>>();
@@ -3540,9 +3567,6 @@ impl Pane {
         }
         let unpinned_tabs = tab_items.split_off(self.pinned_tab_count);
         let pinned_tabs = tab_items;
-
-        let tab_bar_settings = TabBarSettings::get_global(cx);
-        let use_separate_rows = tab_bar_settings.show_pinned_tabs_in_separate_row;
 
         if use_separate_rows && !pinned_tabs.is_empty() && !unpinned_tabs.is_empty() {
             self.render_two_row_tab_bar(
@@ -3567,6 +3591,27 @@ impl Pane {
         }
     }
 
+    /// Whether this pane's header is the one the traffic lights sit in: the top-left pane, unless
+    /// the left dock covers that corner, or the pane the zoom overlay shows over everything.
+    fn holds_traffic_lights(&self, window: &Window, cx: &Context<Pane>) -> bool {
+        traffic_lights_overlay_workspace(window, cx)
+            && self.workspace.upgrade().is_some_and(|workspace| {
+                let workspace = workspace.read(cx);
+                let this = cx.entity();
+                // The zoom overlay covers the left dock too, so a zoomed pane needs the spacer
+                // whatever the dock shows.
+                let zoomed = workspace.zoomed.as_ref() == Some(&this.downgrade().into());
+                let maximized = workspace
+                    .maximized_pane
+                    .as_ref()
+                    .and_then(|pane| pane.upgrade())
+                    .is_some_and(|pane| pane == this);
+                zoomed
+                    || ((maximized || workspace.center.first_pane() == this)
+                        && workspace.left_dock.read(cx).visible_panel().is_none())
+            })
+    }
+
     fn configure_tab_bar_start(
         &mut self,
         tab_bar: TabBar,
@@ -3575,7 +3620,15 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Pane>,
     ) -> TabBar {
+        let traffic_light_spacer = self.holds_traffic_lights(window, cx);
         tab_bar
+            .when(traffic_light_spacer, |tab_bar| {
+                tab_bar.start_child(
+                    title_bar_area(div().id("traffic-light-spacer"), window, cx)
+                        .h_full()
+                        .w(px(ui::utils::TRAFFIC_LIGHT_PADDING)),
+                )
+            })
             .when(
                 self.display_nav_history_buttons.unwrap_or_default(),
                 |tab_bar| {
@@ -3631,7 +3684,7 @@ impl Pane {
                             .border_color(cx.theme().colors().border)
                     })
             }))
-            .child(self.render_unpinned_tabs_container(unpinned_tabs, tab_count, cx));
+            .child(self.render_unpinned_tabs_container(unpinned_tabs, tab_count, window, cx));
         tab_bar.into_any_element()
     }
 
@@ -3660,7 +3713,7 @@ impl Pane {
                     .overflow_x_scroll()
                     .w_full()
                     .children(pinned_tabs)
-                    .child(self.render_pinned_tab_bar_drop_target(cx)),
+                    .child(self.render_pinned_tab_bar_drop_target(window, cx)),
             );
         v_flex()
             .w_full()
@@ -3670,6 +3723,7 @@ impl Pane {
                 TabBar::new("unpinned_tab_bar").child(self.render_unpinned_tabs_container(
                     unpinned_tabs,
                     tab_count,
+                    window,
                     cx,
                 )),
             )
@@ -3680,6 +3734,7 @@ impl Pane {
         &mut self,
         unpinned_tabs: Vec<AnyElement>,
         tab_count: usize,
+        window: &mut Window,
         cx: &mut Context<Pane>,
     ) -> impl IntoElement {
         h_flex()
@@ -3691,16 +3746,20 @@ impl Pane {
                 this.suppress_scroll = true;
             }))
             .children(unpinned_tabs)
-            .child(self.render_tab_bar_drop_target(tab_count, cx))
+            .child(self.render_tab_bar_drop_target(tab_count, window, cx))
     }
 
     fn render_tab_bar_drop_target(
         &self,
         tab_count: usize,
+        window: &mut Window,
         cx: &mut Context<Pane>,
     ) -> impl IntoElement {
         div()
             .id("tab_bar_drop_target")
+            .when(title_bar_in_status_bar(cx), |this| {
+                move_window_on_drag(this, window, cx)
+            })
             .min_w_6()
             .h(Tab::container_height(cx))
             .flex_grow_1()
@@ -3741,9 +3800,16 @@ impl Pane {
             }))
     }
 
-    fn render_pinned_tab_bar_drop_target(&self, cx: &mut Context<Pane>) -> impl IntoElement {
+    fn render_pinned_tab_bar_drop_target(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Pane>,
+    ) -> impl IntoElement {
         div()
             .id("pinned_tabs_border")
+            .when(title_bar_in_status_bar(cx), |this| {
+                move_window_on_drag(this, window, cx)
+            })
             .debug_selector(|| "pinned_tabs_border".into())
             .min_w_6()
             .h(Tab::container_height(cx))
@@ -4428,6 +4494,11 @@ impl Render for Pane {
             let project = project.read(cx);
             project.is_local() || project.is_via_wsl(cx)
         };
+        let has_tab_bar = self.active_item().is_some() && display_tab_bar;
+        // Without a tab bar to hold the traffic-light spacer, the top-left pane gets a tab-bar-high
+        // header of its own so the lights keep off its toolbar and content.
+        let traffic_light_header = (!has_tab_bar && self.holds_traffic_lights(window, cx))
+            .then(|| traffic_light_row(window, cx));
 
         v_flex()
             .key_context(key_context)
@@ -4591,9 +4662,10 @@ impl Render for Pane {
                     cx.propagate();
                 }
             }))
-            .when(self.active_item().is_some() && display_tab_bar, |pane| {
+            .when(has_tab_bar, |pane| {
                 pane.child((self.render_tab_bar.clone())(self, window, cx))
             })
+            .children(traffic_light_header)
             .child({
                 let has_worktrees = project.read(cx).visible_worktrees(cx).next().is_some();
                 // main content
