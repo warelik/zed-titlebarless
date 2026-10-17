@@ -463,20 +463,45 @@ impl remote::RemoteClientDelegate for RemoteClientDelegate {
     fn ask_password(
         &self,
         prompt: String,
-        tx: oneshot::Sender<EncryptedPassword>,
+        tx: oneshot::Sender<Result<EncryptedPassword, askpass::AskPassCancelReason>>,
         cancellation: oneshot::Receiver<()>,
         cx: &mut AsyncApp,
     ) {
         let mut known_password = self.known_password.clone();
         if let Some(password) = known_password.take() {
-            tx.send(password).ok();
+            tx.send(Ok(password)).ok();
+            return;
+        }
+
+        let Some(ui) = self.ui.upgrade() else {
+            log::warn!(
+                "SSH password requested during background reconnect, but interactive prompt is unavailable"
+            );
+            tx.send(Err(askpass::AskPassCancelReason::PromptUnavailable))
+                .ok();
+            return;
+        };
+
+        let (modal_tx, modal_rx) = oneshot::channel();
+        let prompt_result = self.window.update(cx, |_, window, cx| {
+            ui.update(cx, |modal, cx| {
+                modal.set_prompt(prompt, modal_tx, cancellation, window, cx);
+            })
+        });
+
+        if prompt_result.is_ok() {
+            cx.spawn(async move |_cx| {
+                let result = modal_rx
+                    .await
+                    .map_err(|_| askpass::AskPassCancelReason::CancelledByUser);
+                tx.send(result).ok();
+            })
+            .detach();
         } else {
-            self.window
-                .update(cx, |_, window, cx| {
-                    self.ui.update(cx, |modal, cx| {
-                        modal.set_prompt(prompt, tx, cancellation, window, cx);
-                    })
-                })
+            log::warn!(
+                "SSH password requested during background reconnect, but interactive prompt window is unavailable"
+            );
+            tx.send(Err(askpass::AskPassCancelReason::PromptUnavailable))
                 .ok();
         }
     }
@@ -640,7 +665,7 @@ impl remote::RemoteClientDelegate for BackgroundRemoteClientDelegate {
     fn ask_password(
         &self,
         prompt: String,
-        _tx: oneshot::Sender<EncryptedPassword>,
+        tx: oneshot::Sender<Result<EncryptedPassword, askpass::AskPassCancelReason>>,
         _cancellation: oneshot::Receiver<()>,
         _cx: &mut AsyncApp,
     ) {
@@ -648,6 +673,8 @@ impl remote::RemoteClientDelegate for BackgroundRemoteClientDelegate {
             "Pooled remote connection unexpectedly requires a password \
              (prompt: {prompt})"
         );
+        tx.send(Err(askpass::AskPassCancelReason::PromptUnavailable))
+            .ok();
     }
 
     fn set_status(&self, _status: Option<&str>, _cx: &mut AsyncApp) {}
@@ -840,6 +867,63 @@ mod tests {
         cx.run_until_parked();
 
         assert!(prompt.read_with(cx, |prompt, _| prompt.prompt.is_some()));
+    }
+
+    #[gpui::test]
+    async fn dropped_prompt_ui_answers_prompt_unavailable(cx: &mut TestAppContext) {
+        initialize_test(cx);
+
+        let window = cx.add_window(|window, cx| Editor::single_line(window, cx));
+        let prompt = window
+            .update(cx, |_, window, cx| {
+                cx.new(|cx| {
+                    RemoteConnectionPrompt::new(
+                        "example.com".to_string(),
+                        None,
+                        false,
+                        false,
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .expect("test window should remain open");
+        let prompt_weak = prompt.downgrade();
+        drop(prompt);
+
+        let delegate = RemoteClientDelegate::new(window.into(), prompt_weak, None);
+        let (response_sender, response_receiver) = oneshot::channel();
+        let (_cancellation_sender, cancellation_receiver) = oneshot::channel();
+        remote::RemoteClientDelegate::ask_password(
+            &delegate,
+            "Password:".to_string(),
+            response_sender,
+            cancellation_receiver,
+            &mut cx.to_async(),
+        );
+
+        assert!(matches!(
+            response_receiver.await,
+            Ok(Err(askpass::AskPassCancelReason::PromptUnavailable))
+        ));
+    }
+
+    #[gpui::test]
+    async fn background_delegate_answers_prompt_unavailable(cx: &mut TestAppContext) {
+        let (response_sender, response_receiver) = oneshot::channel();
+        let (_cancellation_sender, cancellation_receiver) = oneshot::channel();
+        remote::RemoteClientDelegate::ask_password(
+            &BackgroundRemoteClientDelegate,
+            "Password:".to_string(),
+            response_sender,
+            cancellation_receiver,
+            &mut cx.to_async(),
+        );
+
+        assert!(matches!(
+            response_receiver.await,
+            Ok(Err(askpass::AskPassCancelReason::PromptUnavailable))
+        ));
     }
 
     fn initialize_test(cx: &mut TestAppContext) {
