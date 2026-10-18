@@ -637,10 +637,11 @@ impl AutoUpdater {
                         }
                     };
                     // An automatic network failure cannot undo an installation
-                    // or hide its pending-relaunch action. Manual failures keep
+                    // or hide its pending-relaunch action or a manual error.
+                    // Manual failures keep
                     // their explicit error UI until the next successful check.
                     if check_type == UpdateCheckType::Automatic
-                        && matches!(installed_status, AutoUpdateStatus::Updated { .. })
+                        && matches!(installed_status, AutoUpdateStatus::Updated { .. } | AutoUpdateStatus::Errored { .. })
                     {
                         this.status = installed_status;
                     }
@@ -1946,7 +1947,7 @@ mod tests {
             let phase = phase_for_http.load(atomic::Ordering::SeqCst);
             async move {
                 if request.uri().path().ends_with("/latest.json") {
-                    anyhow::ensure!(phase != 1, "transient manifest failure");
+                    anyhow::ensure!(phase != 1 && phase != 4, "transient manifest failure");
                     let (version, id) = if phase == 3 { ("1.24.3", 43) } else { ("1.24.2", 42) };
                     let body = serde_json::to_vec(&test_fork_manifest(
                         version, id, "macos/aarch64", 3, TEST_FORK_CANDIDATE_SHA,
@@ -1967,14 +1968,18 @@ mod tests {
         let updater = create_fork_test_updater(cx, Version::new(1, 24, 2), http,
             test_fork_config(41), install);
         let updated = AutoUpdateStatus::Updated { version: Version::new(1, 24, 2) };
-        for current_phase in 0..=4 {
+        let mut manual_error = None;
+        for current_phase in 0..=5 {
             phase.store(current_phase, atomic::Ordering::SeqCst);
             updater.update(cx, |updater, cx| updater.poll(
-                if current_phase == 1 { UpdateCheckType::Automatic } else { UpdateCheckType::Manual }, cx));
+                if current_phase == 1 || current_phase == 4 { UpdateCheckType::Automatic } else { UpdateCheckType::Manual }, cx));
             cx.condition(&updater, |updater, _| updater.pending_poll.is_none()).await;
             let status = updater.read_with(cx, |updater, _| updater.status());
             if current_phase == 3 {
                 assert!(matches!(status, AutoUpdateStatus::Errored { .. }), "manual failure must stay visible");
+                manual_error = Some(status.clone());
+            } else if current_phase == 4 {
+                assert_eq!(Some(status), manual_error, "a failed automatic retry must retain the original manual error");
             } else {
                 assert_eq!(status, updated, "phase {current_phase} must retain the installed restart action");
             }
