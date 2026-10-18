@@ -497,6 +497,18 @@
     ],
     [
       "sidebar",
+      "test_clicking_active_terminal_clears_sidebar_selection"
+    ],
+    [
+      "sidebar",
+      "test_clicking_different_terminal_clears_sidebar_selection"
+    ],
+    [
+      "sidebar",
+      "test_clicking_different_thread_clears_sidebar_selection"
+    ],
+    [
+      "sidebar",
       "test_close_local_saved_terminal_from_remote_workspace_without_opening_workspace"
     ],
     [
@@ -509,11 +521,27 @@
     ],
     [
       "sidebar",
+      "test_closed_terminal_uses_saved_root_order_and_not_unrelated_same_host_project"
+    ],
+    [
+      "sidebar",
       "test_closing_terminal_on_mixed_worktree_cancel_preserves_session_items_and_root"
     ],
     [
       "sidebar",
       "test_closing_terminal_on_mixed_worktree_keeps_new_item_opened_during_kill"
+    ],
+    [
+      "sidebar",
+      "test_confirm_on_historical_thread_activates_workspace"
+    ],
+    [
+      "sidebar",
+      "test_confirm_on_historical_thread_in_new_project_group_opens_real_thread"
+    ],
+    [
+      "sidebar",
+      "test_confirm_on_historical_thread_preserves_historical_timestamp_and_order"
     ],
     [
       "sidebar",
@@ -525,11 +553,35 @@
     ],
     [
       "sidebar",
+      "test_keyboard_confirm_on_terminal_preserves_selection"
+    ],
+    [
+      "sidebar",
+      "test_keyboard_confirm_on_thread_preserves_selection"
+    ],
+    [
+      "sidebar",
       "test_parallel_threads_shown_with_live_status"
     ],
     [
       "sidebar",
       "test_project_tab_opens_panel_only_after_closed_target_workspace_loads"
+    ],
+    [
+      "sidebar",
+      "test_rename_selected_thread_action_renames_selected_thread"
+    ],
+    [
+      "sidebar",
+      "test_rename_selected_thread_action_renames_terminal"
+    ],
+    [
+      "sidebar",
+      "test_rename_thread_from_sidebar_updates_title_override"
+    ],
+    [
+      "sidebar",
+      "test_search_finds_threads_inside_collapsed_groups"
     ],
     [
       "sidebar",
@@ -546,6 +598,10 @@
     [
       "sidebar",
       "test_search_only_shows_workspace_headers_with_matches"
+    ],
+    [
+      "sidebar",
+      "test_search_then_keyboard_navigate_and_confirm"
     ],
     [
       "sidebar",
@@ -569,11 +625,27 @@
     ],
     [
       "sidebar",
+      "test_terminal_close_coordinates_live_owners_in_all_windows"
+    ],
+    [
+      "sidebar",
+      "test_terminal_close_waits_for_pending_owner_in_another_window"
+    ],
+    [
+      "sidebar",
       "test_terminal_remote_connection_match_distinguishes_ssh_arguments"
     ],
     [
       "sidebar",
+      "test_thread_title_update_propagates_to_sidebar"
+    ],
+    [
+      "sidebar",
       "test_timed_out_terminal_close_keeps_metadata_and_allows_retry"
+    ],
+    [
+      "sidebar",
+      "test_unavailable_saved_root_keeps_terminal_metadata_and_session"
     ],
     [
       "terminal",

@@ -1,0 +1,432 @@
+From 4b628cf78efbf3ccd03faf14cc5ef37157a31bac Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 21:25:54 +0000
+Subject: [PATCH] Preserve saved terminal context and coordinate cross-window
+ closes
+
+Use saved root insertion order and require exact ordered roots before same-host reuse. Coordinate all live/pending owners under the existing global terminal-ID intent, wait every startup, kill once and remove only matching views in their own windows. Keep active workspaces and files. Cover ordered/different roots, missing context, live and pending cross-window owners; retain existing assertions with reachable saved-root fixture data.
+---
+ crates/sidebar/src/sidebar.rs       | 120 +++++++++++++++++-
+ crates/sidebar/src/sidebar_tests.rs | 190 ++++++++++++++++++++++++++++
+ 2 files changed, 308 insertions(+), 2 deletions(-)
+
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index c5870e0..30a6df4 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -5243,7 +5243,10 @@ impl Sidebar {
+     ) -> Task<anyhow::Result<Entity<project::Project>>> {
+         let multi_workspace = self.multi_workspace.clone();
+         let connection_options = metadata.remote_connection.clone();
+-        let paths = metadata.folder_paths().paths().to_vec();
++        #[cfg(any(test, feature = "test-support"))]
++        let inherited_fake = self.find_project_for_remote_connection(connection_options.as_ref(), cx)
++            .and_then(|project| project.read(cx).fake_shpool());
++        let paths = metadata.folder_paths().ordered_paths().cloned().collect::<Vec<_>>();
+         cx.spawn_in(window, async move |_, cx| {
+             let (modal_workspace, app_state) = gpui::AsyncApp::update(cx, |cx| {
+                 let multi_workspace = multi_workspace.upgrade()
+@@ -5274,6 +5277,12 @@ impl Sidebar {
+                     None, project::LocalProjectFlags::default(), cx,
+                 ),
+             });
++            #[cfg(any(test, feature = "test-support"))]
++            if let Some(fake) = inherited_fake {
++                project.update(cx, |project, _| {
++                    if project.fake_shpool().is_none() { project.set_fake_shpool(fake); }
++                });
++            }
+             // Load the saved roots so per-project terminal settings/environment
+             // select the same daemon as terminal activation would.
+             for path in paths {
+@@ -5286,6 +5295,87 @@ impl Sidebar {
+         })
+     }
+ 
++    fn terminal_owners(
++        metadata: &TerminalThreadMetadata,
++        cx: &App,
++    ) -> Vec<(gpui::AnyWindowHandle, Entity<Workspace>, Entity<AgentPanel>)> {
++        let mut owners = Vec::new();
++        for handle in cx.windows() {
++            let Some(window) = handle.downcast::<MultiWorkspace>() else { continue };
++            let Ok(workspaces) = window.read_with(cx, |mw, _| mw.workspaces().cloned().collect::<Vec<_>>()) else { continue };
++            for workspace in workspaces {
++                let state = workspace.read(cx);
++                if !same_terminal_remote_connection(
++                    state.project().read(cx).remote_connection_options(cx).as_ref(),
++                    metadata.remote_connection.as_ref(),
++                ) { continue; }
++                let Some(panel) = state.panel::<AgentPanel>(cx) else { continue };
++                if panel.read(cx).has_terminal(metadata.terminal_id)
++                    || panel.read(cx).is_terminal_spawn_pending(metadata.terminal_id)
++                {
++                    owners.push((handle, workspace, panel));
++                }
++            }
++        }
++        owners
++    }
++
++    fn close_terminal_if_owned_elsewhere(
++        &mut self,
++        metadata: &TerminalThreadMetadata,
++        origin: gpui::WindowId,
++        cx: &mut Context<Self>,
++    ) -> bool {
++        let Some((_, workspace, _)) = Self::terminal_owners(metadata, cx).into_iter()
++            .find(|(window, _, _)| window.window_id() != origin)
++        else { return false };
++        let project = workspace.read(cx).project().clone();
++        let metadata = metadata.clone();
++        let id = metadata.terminal_id;
++        cx.spawn(async move |this, cx| {
++            if !cx.update(|cx| begin_terminal_close(id, cx)) {
++                return;
++            }
++            let result = async {
++                // The global intent blocks new restorations. Every startup
++                // already in flight must settle before the shared session ends.
++                let owners = cx.update(|cx| Self::terminal_owners(&metadata, cx));
++                let mut may_exist = owners.is_empty();
++                for (window, _, panel) in &owners {
++                    let pending = panel.update(cx, |panel, cx| {
++                        panel.wait_for_terminal_spawn(id, window.window_id(), cx)
++                    });
++                    may_exist |= pending.await?;
++                }
++                if may_exist {
++                    project.update(cx, |project, cx| {
++                        project.kill_persistent_terminal_session(id.session_name(), cx)
++                    }).await?;
++                }
++                cx.update(|cx| {
++                    // Re-read after waiting: a workspace may have moved to a
++                    // different window. Remove only this terminal's views, not
++                    // their workspaces, buffers or worktree directories.
++                    for (window, _, panel) in Self::terminal_owners(&metadata, cx) {
++                        window.update(cx, |_, window, cx| {
++                            panel.update(cx, |panel, cx| {
++                                panel.close_terminal_after_session_kill(id, false, window, cx);
++                            });
++                        }).log_err();
++                    }
++                    complete_terminal_close_metadata(id, true, cx);
++                });
++                anyhow::Ok(())
++            }.await;
++            if let Err(error) = result {
++                cx.update(|cx| complete_terminal_close_metadata(id, false, cx));
++                log::error!("failed to close terminal {id} across windows: {error:#}");
++                this.update(cx, |this, cx| this.show_terminal_close_error(id, cx)).ok();
++            }
++        }).detach();
++        true
++    }
++
+     fn finish_close_terminal(
+         &mut self,
+         metadata: &TerminalThreadMetadata,
+@@ -5293,10 +5383,13 @@ impl Sidebar {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
++        if self.close_terminal_if_owned_elsewhere(metadata, window.window_handle().window_id(), cx) {
++            return;
++        }
+         let project = match workspace {
+             ThreadEntryWorkspace::Open(workspace) => Some(workspace.read(cx).project().clone()),
+             ThreadEntryWorkspace::Closed { .. } => {
+-                self.find_project_for_remote_connection(metadata.remote_connection.as_ref(), cx)
++                self.find_project_for_terminal_context(metadata, cx)
+             }
+         };
+         if let Some(project) = project {
+@@ -5316,6 +5409,9 @@ impl Sidebar {
+                 }
+             };
+             this.update_in(cx, |this, window, cx| {
++                if this.close_terminal_if_owned_elsewhere(&metadata, window.window_handle().window_id(), cx) {
++                    return;
++                }
+                 // Re-read live state after connection setup: activation may have
+                 // started the same terminal while authentication was pending.
+                 let live_workspace = this.find_workspace_in_current_window(cx, |workspace, cx| {
+@@ -5419,6 +5515,9 @@ impl Sidebar {
+                 }) {
+                     return anyhow::Ok(());
+                 }
++                if this.update(cx, |this, cx| {
++                    this.close_terminal_if_owned_elsewhere(&metadata, close_window_id, cx)
++                })? { return anyhow::Ok(()); }
+                 if !gpui::AsyncApp::update(cx, |cx| begin_terminal_close(terminal_id, cx)) {
+                     return anyhow::Ok(());
+                 }
+@@ -5508,6 +5607,9 @@ impl Sidebar {
+                     }) {
+                         return Ok(false);
+                     }
++                    if sidebar.update(cx, |this, cx| {
++                        this.close_terminal_if_owned_elsewhere(&metadata, close_window_id, cx)
++                    })? { return Ok(false); }
+                     if !gpui::AsyncApp::update(cx, |cx| begin_terminal_close(terminal_id, cx)) {
+                         return Ok(false);
+                     }
+@@ -5649,6 +5751,20 @@ impl Sidebar {
+         );
+     }
+ 
++    fn find_project_for_terminal_context(
++        &self,
++        metadata: &TerminalThreadMetadata,
++        cx: &App,
++    ) -> Option<Entity<project::Project>> {
++        self.find_workspace_in_current_window(cx, |workspace, cx| {
++            let project = workspace.read(cx).project().read(cx);
++            same_terminal_remote_connection(
++                project.remote_connection_options(cx).as_ref(), metadata.remote_connection.as_ref(),
++            ) && project.worktree_paths(cx).folder_path_list().ordered_paths()
++                .eq(metadata.folder_paths().ordered_paths())
++        }).map(|workspace| workspace.read(cx).project().clone())
++    }
++
+     fn find_project_for_remote_connection(
+         &self,
+         remote_connection: Option<&RemoteConnectionOptions>,
+diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
+index ec74fb5..faa61c6 100644
+--- a/crates/sidebar/src/sidebar_tests.rs
++++ b/crates/sidebar/src/sidebar_tests.rs
+@@ -4782,6 +4782,8 @@ async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes
+     cx: &mut TestAppContext,
+ ) {
+     let main_project = init_test_project_with_agent_panel("/main-project", cx).await;
++    let context_fs = main_project.read_with(cx, |project, _| project.fs().clone());
++    context_fs.as_fake().insert_tree("/worktrees/feature-a", serde_json::json!({})).await;
+     let fake = main_project.update(cx, |p, _| p.enable_fake_shpool(&[]));
+     let (multi_workspace, cx) =
+         cx.add_window_view(|window, cx| MultiWorkspace::test_new(main_project.clone(), window, cx));
+@@ -4871,6 +4873,8 @@ async fn test_successful_delayed_terminal_kill_deletes_metadata_after_sidebar_is
+     cx: &mut TestAppContext,
+ ) {
+     let main_project = init_test_project_with_agent_panel("/main-project", cx).await;
++    let context_fs = main_project.read_with(cx, |project, _| project.fs().clone());
++    context_fs.as_fake().insert_tree("/worktrees/feature-a", serde_json::json!({})).await;
+     let fake = main_project.update(cx, |p, _| p.enable_fake_shpool(&[]));
+     let (multi_workspace, cx) =
+         cx.add_window_view(|window, cx| MultiWorkspace::test_new(main_project.clone(), window, cx));
+@@ -4968,6 +4972,8 @@ async fn test_successful_delayed_terminal_kill_deletes_metadata_after_sidebar_is
+ async fn test_timed_out_terminal_close_keeps_metadata_and_allows_retry(cx: &mut TestAppContext) {
+     cx.executor().allow_parking();
+     let project = init_test_project_with_agent_panel("/main-project", cx).await;
++    let context_fs = project.read_with(cx, |project, _| project.fs().clone());
++    context_fs.as_fake().insert_tree("/worktrees/feature-a", serde_json::json!({})).await;
+     let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
+     let (multi_workspace, cx) = cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+     let (sidebar, _panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+@@ -4988,6 +4994,9 @@ async fn test_timed_out_terminal_close_keeps_metadata_and_allows_retry(cx: &mut
+     });
+     save_thread_metadata_with_main_paths("blocking-thread", "Blocking Thread", closed_paths, main_paths,
+                                          chrono::Utc::now(), cx);
++    // Keep this a closed-workspace kill test, not an archive auto-load test.
++    save_thread_metadata_with_main_paths("timeout-blocker", "Blocking Thread",
++        closed_paths.clone(), main_paths.clone(), chrono::Utc::now(), cx);
+     sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+     cx.run_until_parked();
+     close_terminal_from_sidebar(&sidebar, terminal_id, cx);
+@@ -5027,6 +5036,8 @@ async fn test_failed_close_terminal_entry_retains_metadata_until_session_kill_su
+     cx: &mut TestAppContext,
+ ) {
+     let main_project = init_test_project_with_agent_panel("/main-project", cx).await;
++    let context_fs = main_project.read_with(cx, |project, _| project.fs().clone());
++    context_fs.as_fake().insert_tree("/worktrees/feature-a", serde_json::json!({})).await;
+     let fake = main_project.update(cx, |p, _| p.enable_fake_shpool(&[]));
+     let (multi_workspace, cx) =
+         cx.add_window_view(|window, cx| MultiWorkspace::test_new(main_project.clone(), window, cx));
+@@ -5134,6 +5145,185 @@ async fn test_failed_close_terminal_entry_retains_metadata_until_session_kill_su
+     });
+ }
+ 
++#[gpui::test]
++async fn test_closed_terminal_uses_saved_root_order_and_not_unrelated_same_host_project(cx: &mut TestAppContext) {
++    let unrelated = init_test_project_with_agent_panel("/unrelated", cx).await;
++    let wrong = unrelated.update(cx, |project, _| project.enable_fake_shpool(&[]));
++    let fs = unrelated.read_with(cx, |project, _| project.fs().clone());
++    fs.as_fake().insert_tree("/z-saved", serde_json::json!({})).await;
++    fs.as_fake().insert_tree("/a-saved", serde_json::json!({})).await;
++    let (multi_workspace, cx) = cx.add_window_view(|window, cx| MultiWorkspace::test_new(unrelated, window, cx));
++    let sidebar = setup_sidebar(&multi_workspace, cx);
++    let id = TerminalId::new();
++    let name = id.session_name();
++    let target = project::FakeShpoolStore::with_sessions([name.clone()]);
++    let created = Rc::new(RefCell::new(Vec::<Entity<project::Project>>::new()));
++    let created_observer = created.clone();
++    let fake_observer = target.clone();
++    let _observation = cx.update(|_, cx| cx.observe_new(
++        move |project: &mut project::Project, _: Option<&mut Window>, cx: &mut Context<project::Project>| {
++            if project.remote_connection_options(cx).is_none() {
++                project.set_fake_shpool(fake_observer.clone());
++                created_observer.borrow_mut().push(cx.entity());
++            }
++        },
++    ));
++    let paths = PathList::new(&[PathBuf::from("/z-saved"), PathBuf::from("/a-saved")]);
++    let metadata = TerminalThreadMetadata {
++        terminal_id: id, title: "Ordered saved context".into(), custom_title: None,
++        created_at: chrono::Utc::now(),
++        worktree_paths: WorktreePaths::from_path_lists(paths.clone(), paths.clone()).unwrap(),
++        remote_connection: None, working_directory: None,
++    };
++    cx.update(|_, cx| TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata.clone(), cx)));
++    sidebar.update_in(cx, |sidebar, window, cx| sidebar.close_terminal(
++        &metadata, &ThreadEntryWorkspace::Closed {
++            folder_paths: paths.clone(), project_group_key: ProjectGroupKey::new(None, paths.clone()),
++        }, window, cx,
++    ));
++    cx.run_until_parked();
++    assert!(wrong.kill_history().is_empty());
++    assert_eq!(target.kill_history(), vec![name.clone()]);
++    assert!(!target.has_session(&name));
++    assert_eq!(created.borrow().len(), 1);
++    let model = created.borrow()[0].clone();
++    let actual = model.read_with(cx, |project, cx| {
++        project.worktree_paths(cx).folder_path_list().ordered_paths().cloned().collect::<Vec<_>>()
++    });
++    assert_eq!(actual, vec![PathBuf::from("/z-saved"), PathBuf::from("/a-saved")]);
++    cx.update(|_, cx| assert!(TerminalThreadMetadataStore::global(cx).read(cx).entry(id).is_none()));
++}
++
++#[gpui::test]
++async fn test_unavailable_saved_root_keeps_terminal_metadata_and_session(cx: &mut TestAppContext) {
++    let project = init_test_project_with_agent_panel("/unrelated", cx).await;
++    let id = TerminalId::new();
++    let name = id.session_name();
++    let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
++    fake.add_session(&name);
++    let (multi_workspace, cx) = cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    let sidebar = setup_sidebar(&multi_workspace, cx);
++    let paths = PathList::new(&[PathBuf::from("/absent-saved-root")]);
++    let metadata = TerminalThreadMetadata {
++        terminal_id: id, title: "Missing saved context".into(), custom_title: None,
++        created_at: chrono::Utc::now(),
++        worktree_paths: WorktreePaths::from_path_lists(paths.clone(), paths.clone()).unwrap(),
++        remote_connection: None, working_directory: None,
++    };
++    cx.update(|_, cx| TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata.clone(), cx)));
++    sidebar.update_in(cx, |sidebar, window, cx| sidebar.close_terminal(
++        &metadata, &ThreadEntryWorkspace::Closed {
++            folder_paths: paths.clone(), project_group_key: ProjectGroupKey::new(None, paths),
++        }, window, cx,
++    ));
++    cx.run_until_parked();
++    assert!(fake.kill_history().is_empty());
++    assert!(fake.has_session(&name));
++    cx.update(|_, cx| {
++        let store = TerminalThreadMetadataStore::global(cx);
++        assert!(store.read(cx).entry(id).is_some());
++        assert!(!store.read(cx).is_intentionally_closing(id));
++    });
++}
++
++#[gpui::test]
++async fn test_terminal_close_coordinates_live_owners_in_all_windows(cx: &mut TestAppContext) {
++    let project = init_test_project_with_agent_panel("/shared", cx).await;
++    let id = TerminalId::new();
++    let name = id.session_name();
++    let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
++    fake.add_session(&name);
++    let a = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let b = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let ma = a.root(cx).unwrap();
++    let mb = b.root(cx).unwrap();
++    let mut ca = VisualTestContext::from_window(a.into(), cx);
++    let mut cb = VisualTestContext::from_window(b.into(), cx);
++    let (sidebar, pa) = setup_sidebar_with_agent_panel(&ma, &mut ca);
++    let (_, pb) = setup_sidebar_with_agent_panel(&mb, &mut cb);
++    let metadata = TerminalThreadMetadata {
++        terminal_id: id, title: "Shared terminal".into(), custom_title: None,
++        created_at: chrono::Utc::now(), worktree_paths: project.read_with(cx, |project, cx| project.worktree_paths(cx)),
++        remote_connection: None, working_directory: None,
++    };
++    cx.update(|cx| TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata.clone(), cx)));
++    pa.update_in(&mut ca, |panel, window, cx| panel.restore_terminal(
++        metadata.clone(), false, AgentThreadSource::AgentPanel, None, window, cx,
++    ));
++    pb.update_in(&mut cb, |panel, window, cx| panel.restore_terminal(
++        metadata.clone(), false, AgentThreadSource::AgentPanel, None, window, cx,
++    ));
++    ca.run_until_parked();
++    assert!(pa.read_with(&ca, |panel, _| panel.has_terminal(id)));
++    assert!(pb.read_with(&cb, |panel, _| panel.has_terminal(id)));
++    let wa = ma.read_with(&ca, |mw, _| mw.workspace().clone());
++    let wb = mb.read_with(&cb, |mw, _| mw.workspace().clone());
++    let paths = metadata.folder_paths().clone();
++    sidebar.update_in(&mut ca, |sidebar, window, cx| sidebar.close_terminal(
++        &metadata, &ThreadEntryWorkspace::Closed {
++            folder_paths: paths.clone(), project_group_key: ProjectGroupKey::new(None, paths),
++        }, window, cx,
++    ));
++    ca.run_until_parked();
++    assert_eq!(fake.kill_history(), vec![name.clone()]);
++    assert!(!fake.has_session(&name));
++    assert!(!pa.read_with(&ca, |panel, _| panel.has_terminal(id)));
++    assert!(!pb.read_with(&cb, |panel, _| panel.has_terminal(id)));
++    assert_eq!(ma.read_with(&ca, |mw, _| mw.workspace().clone()), wa);
++    assert_eq!(mb.read_with(&cb, |mw, _| mw.workspace().clone()), wb);
++    assert_eq!(ma.read_with(&ca, |mw, _| mw.workspaces().count()), 1);
++    assert_eq!(mb.read_with(&cb, |mw, _| mw.workspaces().count()), 1);
++    cx.update(|cx| assert!(TerminalThreadMetadataStore::global(cx).read(cx).entry(id).is_none()));
++}
++
++#[gpui::test]
++async fn test_terminal_close_waits_for_pending_owner_in_another_window(cx: &mut TestAppContext) {
++    let project = init_test_project_with_agent_panel("/shared", cx).await;
++    let id = TerminalId::new();
++    let name = id.session_name();
++    let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
++    fake.add_session(&name);
++    fake.state.lock().probe_delay = Some(Duration::from_secs(1));
++    let a = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let b = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let ma = a.root(cx).unwrap();
++    let mb = b.root(cx).unwrap();
++    let mut ca = VisualTestContext::from_window(a.into(), cx);
++    let mut cb = VisualTestContext::from_window(b.into(), cx);
++    let (sidebar, _) = setup_sidebar_with_agent_panel(&ma, &mut ca);
++    let (_, panel) = setup_sidebar_with_agent_panel(&mb, &mut cb);
++    let metadata = TerminalThreadMetadata {
++        terminal_id: id, title: "Pending shared terminal".into(), custom_title: None,
++        created_at: chrono::Utc::now(), worktree_paths: project.read_with(cx, |project, cx| project.worktree_paths(cx)),
++        remote_connection: None, working_directory: None,
++    };
++    cx.update(|cx| TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata.clone(), cx)));
++    panel.update_in(&mut cb, |panel, window, cx| panel.restore_terminal(
++        metadata.clone(), false, AgentThreadSource::AgentPanel, None, window, cx,
++    ));
++    ca.run_until_parked();
++    assert!(panel.read_with(&cb, |panel, _| panel.is_terminal_spawn_pending(id)));
++    let paths = metadata.folder_paths().clone();
++    sidebar.update_in(&mut ca, |sidebar, window, cx| sidebar.close_terminal(
++        &metadata, &ThreadEntryWorkspace::Closed {
++            folder_paths: paths.clone(), project_group_key: ProjectGroupKey::new(None, paths),
++        }, window, cx,
++    ));
++    ca.run_until_parked();
++    assert!(fake.kill_history().is_empty());
++    cx.update(|cx| assert!(TerminalThreadMetadataStore::global(cx).read(cx).is_intentionally_closing(id)));
++    cx.executor().advance_clock(Duration::from_secs(1));
++    ca.run_until_parked();
++    assert_eq!(fake.kill_history(), vec![name.clone()]);
++    assert!(!fake.has_session(&name));
++    assert!(!panel.read_with(&cb, |panel, _| panel.has_terminal(id) || panel.is_terminal_spawn_pending(id)));
++    cx.update(|cx| {
++        let store = TerminalThreadMetadataStore::global(cx);
++        assert!(store.read(cx).entry(id).is_none());
++        assert!(!store.read(cx).is_intentionally_closing(id));
++    });
++}
++
+ #[gpui::test]
+ async fn test_close_local_saved_terminal_from_remote_workspace_without_opening_workspace(
+     cx: &mut TestAppContext,
