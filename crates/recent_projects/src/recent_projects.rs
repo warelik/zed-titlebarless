@@ -2408,20 +2408,28 @@ impl RecentProjectsDelegate {
         window: &mut Window,
         cx: &mut Context<Picker<Self>>,
     ) {
-        if let Some(handle) = window.window_handle().downcast::<MultiWorkspace>() {
-            let key_for_remove = key.clone();
-            cx.defer(move |cx| {
-                handle
-                    .update(cx, |multi_workspace, window, cx| {
-                        multi_workspace
-                            .remove_project_group(&key_for_remove, window, cx)
-                            .detach_and_log_err(cx);
-                    })
-                    .log_err();
-            });
-        }
-
-        self.window_project_groups.retain(|k| k != &key);
+        let Some(handle) = window.window_handle().downcast::<MultiWorkspace>() else {
+            return;
+        };
+        cx.spawn_in(window, async move |picker, cx| {
+            let task = handle.update(cx, |multi_workspace, window, cx| {
+                multi_workspace.remove_project_group(&key, window, cx)
+            })?;
+            task.await?;
+            // Read authoritative state after consent. False can mean either a
+            // cancelled close or successful removal of an unloaded group; a
+            // concurrently opened member can also keep the group alive.
+            let groups = handle.update(cx, |multi_workspace, _, _| {
+                multi_workspace.project_group_keys()
+            })?;
+            picker.update_in(cx, |picker, window, cx| {
+                picker.delegate.window_project_groups = groups;
+                let query = picker.query(cx);
+                picker.update_matches(query, window, cx);
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
     }
 
     fn is_current_workspace(
@@ -3094,6 +3102,51 @@ mod tests {
             editor::init(cx);
             state
         })
+    }
+
+    #[gpui::test]
+    async fn test_remove_project_group_waits_for_close_consent(cx: &mut TestAppContext) {
+        let app_state = init_test(cx);
+        app_state.fs.as_fake().insert_tree("/close-project", json!({"file.txt": ""})).await;
+        let project = project::Project::test(app_state.fs.clone(), ["/close-project".as_ref()], cx).await;
+        let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            MultiWorkspace::test_new(project, window, cx)
+        });
+        multi_workspace.update(cx, |mw, cx| mw.open_sidebar(cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let dirty = cx.new(|cx| workspace::item::test::TestItem::new(cx).with_dirty(true));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(dirty.clone()), None, true, window, cx);
+        });
+        let picker = multi_workspace.update_in(cx, |mw, window, cx| {
+            let groups = mw.project_group_keys();
+            cx.new(|cx| Picker::list(RecentProjectsDelegate::new(
+                workspace.downgrade(), false, cx.focus_handle(), vec![], groups,
+                ProjectPickerStyle::Modal,
+            ), window, cx))
+        });
+        picker.update_in(cx, |picker, window, cx| {
+            picker.delegate.remove_project_group(key.clone(), window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        assert!(picker.read_with(cx, |picker, _| picker.delegate.window_project_groups.contains(&key)));
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert!(dirty.read_with(cx, |item, _| item.is_dirty));
+        assert!(picker.read_with(cx, |picker, _| picker.delegate.window_project_groups.contains(&key)));
+        assert!(multi_workspace.read_with(cx, |mw, _| mw.project_group_keys().contains(&key)));
+
+        picker.update_in(cx, |picker, window, cx| {
+            picker.delegate.remove_project_group(key.clone(), window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Don't Save");
+        cx.run_until_parked();
+        assert!(!picker.read_with(cx, |picker, _| picker.delegate.window_project_groups.contains(&key)));
+        assert!(!multi_workspace.read_with(cx, |mw, _| mw.project_group_keys().contains(&key)));
     }
 
     #[gpui::test]
