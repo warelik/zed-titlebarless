@@ -707,6 +707,21 @@ fn workspace_menu_worktree_labels(
         .collect()
 }
 
+fn same_terminal_remote_connection(
+    left: Option<&RemoteConnectionOptions>,
+    right: Option<&RemoteConnectionOptions>,
+) -> bool {
+    if !same_remote_connection_identity(left, right) {
+        return false;
+    }
+    match (left, right) {
+        (Some(RemoteConnectionOptions::Ssh(left)), Some(RemoteConnectionOptions::Ssh(right))) => {
+            left.args == right.args
+        }
+        _ => true,
+    }
+}
+
 fn apply_worktree_label_mode(
     mut worktrees: Vec<ThreadItemWorktreeInfo>,
     mode: AgentThreadWorktreeLabel,
@@ -5467,7 +5482,7 @@ impl Sidebar {
         cx: &App,
     ) -> Option<Entity<project::Project>> {
         self.find_workspace_in_current_window(cx, |workspace, cx| {
-            same_remote_connection_identity(
+            same_terminal_remote_connection(
                 workspace
                     .read(cx)
                     .project()
