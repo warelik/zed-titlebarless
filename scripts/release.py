@@ -998,6 +998,20 @@ def select_upstream():
         raise ValueError("Upstream release did not resolve to an exact commit")
     return tag, sha
 
+def active_snapshot(repo, patchset):
+    """Finish the already selected snapshot before discovering another release."""
+    matches = []
+    for pull in pages(f"repos/{repo}/pulls?state=open"):
+        ref = (pull.get("head") or {}).get("ref", "")
+        match = re.fullmatch(r"review/([0-9a-f]{40})-" + re.escape(patchset), ref)
+        if (match and (pull["head"].get("repo") or {}).get("full_name") == repo
+                and pull.get("user", {}).get("login") in {repo.split('/')[0], "github-actions[bot]"}
+                and pull["base"].get("ref") == f"review-base/{match[1]}"
+                and pull["base"].get("sha") == match[1]
+                and f"patch SHA-256: `{patchset}`" in (pull.get("body") or "")):
+            matches.append((pull["number"], match[1]))
+    return max(matches)[1] if matches else None
+
 def mirror_main(repo):
     current = api(f"repos/{repo}/git/ref/heads/main")["object"]["sha"]
     upstream = api(f"repos/{UPSTREAM}/git/ref/heads/main")["object"]["sha"]
@@ -1054,10 +1068,10 @@ def prepare(app):
     state = proposal(repo, config, app.parent)
     if state and state["waiting"]:
         return
-    upstream = state["upstream"] if state else select_upstream()[1]
+    patches, patchset = patch_identity(state["patches"] if state else ROOT / "patches")
+    upstream = state["upstream"] if state else active_snapshot(repo, patchset) or select_upstream()[1]
     if not SHA.fullmatch(upstream):
         raise ValueError("Expected a full upstream commit")
-    patches, patchset = patch_identity(state["patches"] if state else ROOT / "patches")
     mode = "policy" if state and state.get("policy") else "application"
     review_config = state["head"] if state else config
     policy_changed = policy_snapshot(ROOT) != policy_snapshot(CONTROL_ROOT)

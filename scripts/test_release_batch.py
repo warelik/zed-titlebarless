@@ -49,6 +49,7 @@ class BatchedReviewTests(unittest.TestCase):
             }, clear=True))
             for name, value in {
                 "mirror_main": None, "proposal": None,
+                "active_snapshot": None,
                 "select_upstream": ("v1.24.2", upstream),
                 "patch_identity": ([Path("fixture.patch")], "d" * 64),
                 "ensure_forward_release": None, "push_review_refs": None,
@@ -237,6 +238,16 @@ class BatchedReviewTests(unittest.TestCase):
                                                          "merge_base_commit": {"sha": commit}})):
             cutoff = release.adoption_time("maintainer/zed-fork", {"state": "closed", "number": 1}, commit)
         self.assertEqual(cutoff, datetime(2026, 10, 18, 1, tzinfo=timezone.utc))
+
+    def test_inflight_snapshot_is_not_replaced_by_new_upstream_discovery(self):
+        sha, patchset = "b" * 40, "d" * 64
+        pull = {"number": 49, "head": {"ref": f"review/{sha}-{patchset}",
+                                       "repo": {"full_name": "maintainer/zed-fork"}},
+                "base": {"ref": f"review-base/{sha}", "sha": sha},
+                "user": {"login": "github-actions[bot]"},
+                "body": f"patch SHA-256: `{patchset}`"}
+        with patch.object(release, "pages", return_value=[pull]):
+            self.assertEqual(release.active_snapshot("maintainer/zed-fork", patchset), sha)
 
 
 if __name__ == "__main__":

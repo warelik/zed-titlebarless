@@ -369,7 +369,15 @@
     ],
     [
       "agent_ui",
+      "test_terminal_exit_before_insertion_uses_the_normal_lifecycle"
+    ],
+    [
+      "agent_ui",
       "test_terminal_metadata_persistence_strips_ssh_password"
+    ],
+    [
+      "agent_ui",
+      "test_terminal_remote_identity_normalizes_empty_arguments"
     ],
     [
       "auto_update",

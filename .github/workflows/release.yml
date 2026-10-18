@@ -67,6 +67,9 @@ jobs:
           import release as gate
           repo = os.environ['GITHUB_REPOSITORY']
           policy = subprocess.check_output(['git', '-C', 'candidate', 'rev-parse', 'HEAD'], text=True).strip()
+          patchset = gate.patch_identity(pathlib.Path('candidate/patches'))[1]
+          if os.environ['FULL_PR'] == os.environ['DELTA_PR']:
+              raise SystemExit('Bootstrap requires two distinct review PRs')
           for kind, key in [('full', 'FULL_PR'), ('delta', 'DELTA_PR')]:
               number = os.environ[key]
               if not re.fullmatch(r'[1-9][0-9]*', number):
@@ -76,7 +79,17 @@ jobs:
               if kind == 'delta' and sha != policy:
                   raise SystemExit('Delta review does not identify this exact policy')
               if kind == 'delta':
+                  if pull['head']['ref'] != f'review/changes-{policy}':
+                      raise SystemExit('Delta PR has the wrong review scope')
                   delta_base = base
+              if kind == 'full':
+                  if sha == policy or pull['head']['ref'] != f'review/{base}-{patchset}':
+                      raise SystemExit('Complete-project PR has the wrong review scope')
+                  app_manifest = gate.api(f'repos/{repo}/contents/crates/zed/Cargo.toml?ref={sha}')
+                  if app_manifest.get('type') != 'file':
+                      raise SystemExit('Complete-project review must contain the assembled application')
+              if kind == 'full' and f'patch SHA-256: `{patchset}`' not in pull.get('body', ''):
+                  raise SystemExit('Complete-project review does not identify this exact patch set')
               ready, reason = gate.check_review(repo, int(number), sha, base)
               comments = gate.pages(f'repos/{repo}/issues/{number}/comments')
               marker = f'<!-- zed-full:{sha}:{policy} -->' if kind == 'full' else f'<!-- zed-codex:{sha} -->'
