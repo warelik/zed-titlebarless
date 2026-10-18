@@ -373,6 +373,10 @@
     ],
     [
       "agent_ui",
+      "test_new_terminal_prevents_initial_terminal_creation"
+    ],
+    [
+      "agent_ui",
       "test_ssh_routing_arguments_scope_terminal_project_assignment"
     ],
     [
@@ -418,6 +422,10 @@
     [
       "auto_update",
       "test_fork_manifest_requires_the_exact_release_contract"
+    ],
+    [
+      "auto_update",
+      "test_fork_poll_errors_preserve_pending_relaunch_and_manual_error_feedback"
     ],
     [
       "auto_update",

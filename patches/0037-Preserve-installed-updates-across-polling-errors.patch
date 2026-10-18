@@ -1,0 +1,126 @@
+From 195bfb42746ec5aaa5f24c0547a170ffe66c8147 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 08:31:34 +0000
+Subject: [PATCH] Retain pending fork relaunch state across polling failures
+
+---
+ crates/auto_update/src/auto_update.rs | 74 ++++++++++++++++++++++++++-
+ 1 file changed, 73 insertions(+), 1 deletion(-)
+
+diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs
+index 96c9cd7..e1ee875 100644
+--- a/crates/auto_update/src/auto_update.rs
++++ b/crates/auto_update/src/auto_update.rs
+@@ -556,7 +556,10 @@ impl AutoUpdater {
+ 
+         let check_type = self.update_check_type;
+         self.pending_poll.take();
+-        self.status = AutoUpdateStatus::Idle;
++        self.status = self.cached_fork_release.as_ref().map_or(
++            AutoUpdateStatus::Idle,
++            |(_, version)| AutoUpdateStatus::Updated { version: version.clone() },
++        );
+         self.poll(check_type, cx);
+     }
+ 
+@@ -606,6 +609,7 @@ impl AutoUpdater {
+ 
+         cx.notify();
+ 
++        let installed_status = self.status.clone();
+         self.pending_poll = Some(cx.spawn(async move |this, cx| {
+             let result = Self::update(this.upgrade()?, cx).await;
+             this.update(cx, |this, cx| {
+@@ -632,6 +636,14 @@ impl AutoUpdater {
+                             }
+                         }
+                     };
++                    // An automatic network failure cannot undo an installation
++                    // or hide its pending-relaunch action. Manual failures keep
++                    // their explicit error UI until the next successful check.
++                    if check_type == UpdateCheckType::Automatic
++                        && matches!(installed_status, AutoUpdateStatus::Updated { .. })
++                    {
++                        this.status = installed_status;
++                    }
+ 
+                     cx.notify();
+                 }
+@@ -860,6 +872,9 @@ impl AutoUpdater {
+             this.update(cx, |this, cx| {
+                 this.status = match previous_status {
+                     AutoUpdateStatus::Updated { .. } => previous_status,
++                    _ if cached_fork_release.is_some() => AutoUpdateStatus::Updated {
++                        version: cached_fork_release.as_ref().unwrap().1.clone(),
++                    },
+                     _ => {
+                         if this.update_check_type.is_manual() {
+                             cx.emit(AutoUpdateEvent::UpToDate);
+@@ -1919,6 +1934,63 @@ mod tests {
+         assert!(notification.await.expect("read update notification"));
+     }
+ 
++    #[gpui::test]
++    async fn test_fork_poll_errors_preserve_pending_relaunch_and_manual_error_feedback(
++        cx: &mut TestAppContext,
++    ) {
++        cx.background_executor.allow_parking();
++        let phase = Arc::new(AtomicUsize::new(0));
++        let install_calls = Arc::new(AtomicUsize::new(0));
++        let phase_for_http = phase.clone();
++        let http = FakeHttpClient::create(move |request| {
++            let phase = phase_for_http.load(atomic::Ordering::SeqCst);
++            async move {
++                if request.uri().path().ends_with("/latest.json") {
++                    anyhow::ensure!(phase != 1, "transient manifest failure");
++                    let (version, id) = if phase == 3 { ("1.24.3", 43) } else { ("1.24.2", 42) };
++                    let body = serde_json::to_vec(&test_fork_manifest(
++                        version, id, "macos/aarch64", 3, TEST_FORK_CANDIDATE_SHA,
++                        TEST_FORK_UPSTREAM_SHA, TEST_FORK_PATCHSET_SHA256,
++                        TEST_FORK_ARCHIVE_SHA256, None,
++                    ))?;
++                    return Ok(Response::builder().status(200).body(body.into()).unwrap());
++                }
++                anyhow::ensure!(phase != 3, "transient download failure");
++                Ok(Response::builder().status(200).body(b"abc".to_vec().into()).unwrap())
++            }
++        });
++        let calls = install_calls.clone();
++        let install: Rc<dyn Fn(&Path, &AsyncApp) -> Result<Option<PathBuf>>> = Rc::new(move |_, _| {
++            calls.fetch_add(1, atomic::Ordering::SeqCst);
++            Ok(None)
++        });
++        let updater = create_fork_test_updater(cx, Version::new(1, 24, 2), http,
++            test_fork_config(41), install);
++        let updated = AutoUpdateStatus::Updated { version: Version::new(1, 24, 2) };
++        for current_phase in 0..=4 {
++            phase.store(current_phase, atomic::Ordering::SeqCst);
++            updater.update(cx, |updater, cx| updater.poll(
++                if current_phase == 1 { UpdateCheckType::Automatic } else { UpdateCheckType::Manual }, cx));
++            cx.condition(&updater, |updater, _| updater.pending_poll.is_none()).await;
++            let status = updater.read_with(cx, |updater, _| updater.status());
++            if current_phase == 3 {
++                assert!(matches!(status, AutoUpdateStatus::Errored { .. }), "manual failure must stay visible");
++            } else {
++                assert_eq!(status, updated, "phase {current_phase} must retain the installed restart action");
++            }
++            assert_eq!(install_calls.load(atomic::Ordering::SeqCst), 1);
++            assert_eq!(updater.read_with(cx, |updater, _| updater.cached_fork_release.clone()),
++                       Some((42, Version::new(1, 24, 2))));
++        }
++        updater.update(cx, |updater, cx| {
++            updater.status = AutoUpdateStatus::Checking;
++            updater.restart_after_wake(cx);
++        });
++        cx.condition(&updater, |updater, _| updater.pending_poll.is_none()).await;
++        assert_eq!(updater.read_with(cx, |updater, _| updater.status()), updated);
++        assert_eq!(install_calls.load(atomic::Ordering::SeqCst), 1);
++    }
++
+     #[gpui::test]
+     async fn test_fork_corrupt_dmg_never_invokes_installer(cx: &mut TestAppContext) {
+         cx.background_executor.allow_parking();
+-- 
+2.43.0
+

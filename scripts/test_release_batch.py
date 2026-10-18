@@ -230,6 +230,8 @@ class BatchedReviewTests(unittest.TestCase):
         self.assertNotIn("ref: ${{ vars.ZED_TRUSTED_POLICY", bootstrap)
         self.assertIn("for directory in ['gate/scripts', 'baseline/scripts']:", bootstrap)
         self.assertIn("if policy != os.environ['GITHUB_SHA']:", bootstrap)
+        self.assertIn("if base != shipped_config:", bootstrap)
+        self.assertIn("gate.asset_bytes(repo, assets['provenance.json'])", bootstrap)
         self.assertIn("ref: 71d0f4314a4a9fadc9d404f6879586f6be2d93ae", bootstrap)
         self.assertIn("/baseline/scripts /candidate/scripts", bootstrap)
         self.assertIn("target=/baseline,readonly", bootstrap)

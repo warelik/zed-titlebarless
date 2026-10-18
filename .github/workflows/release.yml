@@ -70,7 +70,7 @@ jobs:
           DELTA_PR: ${{ inputs.delta_pr }}
         run: |
           python3 -B - <<'PY'
-          import ast, os, pathlib, re, subprocess, sys
+          import ast, json, os, pathlib, re, subprocess, sys
           sys.path.insert(0, str(pathlib.Path('gate/scripts').resolve()))
           import release as gate
           repo = os.environ['GITHUB_REPOSITORY']
@@ -80,6 +80,21 @@ jobs:
           patchset = gate.patch_identity(pathlib.Path('candidate/patches'))[1]
           if os.environ['FULL_PR'] == os.environ['DELTA_PR']:
               raise SystemExit('Bootstrap requires two distinct review PRs')
+          published = [r for r in gate.pages(f'repos/{repo}/releases')
+                       if not r['draft'] and not r['prerelease']]
+          if not published:
+              raise SystemExit('Bootstrap delta requires a last published configuration')
+          previous = max(published, key=lambda r: r['id'])
+          if re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+-titlebarless', previous['tag_name']):
+              shipped_config = previous['target_commitish']
+          else:
+              assets = {a['name']: a for a in previous['assets']}
+              provenance = json.loads(gate.asset_bytes(repo, assets['provenance.json']))
+              if provenance.get('repository') != repo or provenance.get('release_id') != previous['id']:
+                  raise SystemExit('Last published provenance belongs to another release')
+              shipped_config = provenance['config_sha']
+          if not re.fullmatch(r'[0-9a-f]{40}', shipped_config):
+              raise SystemExit('Last published configuration is not an exact commit')
           for kind, key in [('full', 'FULL_PR'), ('delta', 'DELTA_PR')]:
               number = os.environ[key]
               if not re.fullmatch(r'[1-9][0-9]*', number):
@@ -91,6 +106,8 @@ jobs:
               if kind == 'delta':
                   if pull['head']['ref'] != f'review/changes-{policy}':
                       raise SystemExit('Delta PR has the wrong review scope')
+                  if base != shipped_config:
+                      raise SystemExit('Delta PR must compare against the last published configuration')
                   delta_base = base
               if kind == 'full':
                   if sha == policy or pull['head']['ref'] != f'review/{base}-{patchset}':

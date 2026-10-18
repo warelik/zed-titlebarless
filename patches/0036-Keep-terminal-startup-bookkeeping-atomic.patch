@@ -1,0 +1,144 @@
+From 22e4173513605387775e383893e97f1e98c15bb9 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 08:31:34 +0000
+Subject: [PATCH] Keep terminal startup bookkeeping atomic with insertion
+
+---
+ crates/agent_ui/src/agent_panel.rs | 64 ++++++++++++++++++++++++++----
+ 1 file changed, 57 insertions(+), 7 deletions(-)
+
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index 47158e3..9619875 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -2237,6 +2237,7 @@ impl AgentPanel {
+             remote_connection: self.project.read(cx).remote_connection_options(cx),
+             working_directory: terminal_working_directory.clone(),
+         };
++        let recovery_created_at = recovery_metadata.created_at;
+         let mut window_cx = window.to_async(cx);
+         cx.spawn(async move |this, cx| {
+             let result = terminal_task.await;
+@@ -2248,9 +2249,11 @@ impl AgentPanel {
+                     }
+                 }
+                 let closed = this.update(cx, |this, cx| {
+-                    this.pending_terminal_spawns.remove(&terminal_id);
+                     let closed = this.closed_terminal_spawns.remove(&terminal_id);
+-                    cx.notify();
++                    if closed {
++                        this.pending_terminal_spawns.remove(&terminal_id);
++                        cx.notify();
++                    }
+                     closed
+                 }).unwrap_or_else(|_| store.as_ref().is_some_and(|store| {
+                     store.read(cx).is_intentionally_closing(terminal_id)
+@@ -2275,7 +2278,9 @@ impl AgentPanel {
+             let PersistentTerminal { terminal, session } = match result {
+                 Ok(terminal) => terminal,
+                 Err(error) => {
+-                    this.update_in(&mut window_cx, |this, window, cx| {
++                    let displayed = this.update_in(&mut window_cx, |this, window, cx| {
++                        this.pending_terminal_spawns.remove(&terminal_id);
++                        cx.notify();
+                         log::error!("failed to spawn agent panel terminal: {error:#}");
+                         let is_remote_disconnected = project.upgrade().is_some_and(|project| {
+                             is_remote_connection_disconnected(project.read(cx), cx)
+@@ -2355,15 +2360,28 @@ impl AgentPanel {
+                         }
+                         cx.emit(AgentPanelEvent::EntryChanged);
+                         cx.notify();
+-                    })
+-                    .log_err();
++                    });
++                    if displayed.is_err() {
++                        this.update(cx, |this, cx| {
++                            this.pending_terminal_spawns.remove(&terminal_id);
++                            cx.notify();
++                        }).log_err();
++                    }
++                    displayed.log_err();
+                     return anyhow::Ok(());
+                 }
+             };
+             // A reattached session already ran the init command when it started,
+             // and its program would receive the command as input.
+             let init_command = init_command.filter(|_| session != PersistentSession::Reattached);
+-            this.update_in(&mut window_cx, |this, window, cx| {
++            let created_at = if session == PersistentSession::Created {
++                Some(created_at.unwrap_or(recovery_created_at))
++            } else {
++                created_at
++            };
++            let displayed = this.update_in(&mut window_cx, |this, window, cx| {
++                this.pending_terminal_spawns.remove(&terminal_id);
++                cx.notify();
+                 let terminal_for_init_command = terminal.clone();
+                 let terminal_view = cx.new(|cx| {
+                     let mut view =
+@@ -2386,7 +2404,14 @@ impl AgentPanel {
+                     cx,
+                 );
+                 Self::write_terminal_init_command(&terminal_for_init_command, init_command, cx);
+-            }).log_err();
++            });
++            if displayed.is_err() {
++                this.update(cx, |this, cx| {
++                    this.pending_terminal_spawns.remove(&terminal_id);
++                    cx.notify();
++                }).log_err();
++            }
++            displayed.log_err();
+             anyhow::Ok(())
+         })
+         .detach_and_log_err(cx);
+@@ -8609,6 +8634,22 @@ mod tests {
+     #[gpui::test]
+     async fn test_new_terminal_prevents_initial_terminal_creation(cx: &mut TestAppContext) {
+         let (panel, mut cx) = setup_panel(cx).await;
++        cx.update(|_, cx| TerminalThreadMetadataStore::init_global(cx));
++        let observed_completion = std::rc::Rc::new(std::cell::Cell::new(false));
++        let completion = observed_completion.clone();
++        let observer_armed = std::rc::Rc::new(std::cell::Cell::new(false));
++        let armed = observer_armed.clone();
++        let _observer = cx.update(|window, cx| {
++            let window = window.window_handle();
++            cx.observe(&panel, move |panel, cx| {
++                if !armed.get() || panel.read(cx).has_pending_terminal_spawns() || completion.replace(true) {
++                    return;
++                }
++                window.update(cx, |_, window, cx| {
++                    panel.update(cx, |panel, cx| panel.ensure_thread_initialized(window, cx));
++                }).unwrap();
++            })
++        });
+         let project = panel.read_with(&cx, |panel, _| panel.project.clone());
+         project.update(&mut cx, |p, _| p.enable_fake_shpool(&[]));
+ 
+@@ -8621,6 +8662,7 @@ mod tests {
+         panel.update_in(&mut cx, |panel, window, cx| {
+             panel.test_terminal_spawn_gate = Some(spawn_gate);
+             panel.new_terminal(None, AgentThreadSource::AgentPanel, window, cx);
++            observer_armed.set(true);
+             assert!(
+                 panel.has_pending_terminal_spawns(),
+                 "a new terminal spawn should be marked pending until it lands"
+@@ -8662,6 +8704,14 @@ mod tests {
+                 "the pending marker should be cleared once the terminal lands"
+             );
+         });
++        assert!(observed_completion.get(), "completion must exercise the real panel observer");
++        panel.read_with(&cx, |panel, cx| {
++            let id = panel.active_terminal_id().unwrap();
++            let store = TerminalThreadMetadataStore::global(cx);
++            assert_eq!(panel.terminals.get(&id).unwrap().created_at,
++                       store.read(cx).entry(id).unwrap().created_at);
++        });
++
+     }
+ 
+     #[gpui::test]
+-- 
+2.43.0
+
