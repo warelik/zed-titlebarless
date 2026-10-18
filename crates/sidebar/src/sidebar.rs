@@ -1341,6 +1341,7 @@ impl Sidebar {
     fn open_workspace_for_group(
         &mut self,
         project_group_key: &ProjectGroupKey,
+        open_agent_panel: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1370,7 +1371,12 @@ impl Sidebar {
         cx.spawn_in(window, async move |_this, cx| {
             let result = task.await;
             remote_connection::dismiss_connection_modal(&modal_workspace, cx);
-            result?;
+            let workspace = result?;
+            if open_agent_panel {
+                workspace.update_in(cx, |workspace, window, cx| {
+                    workspace.open_panel::<AgentPanel>(window, cx);
+                })?;
+            }
             anyhow::Ok(())
         })
         .detach_and_log_err(cx);
@@ -3098,6 +3104,7 @@ impl Sidebar {
                                             } else {
                                                 sidebar.open_workspace_for_group(
                                                     &project_group_key,
+                                                    false,
                                                     window,
                                                     cx,
                                                 );
@@ -7676,18 +7683,45 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.activate_or_open_workspace_for_group_internal(key, false, window, cx);
+    }
+
+    pub(crate) fn activate_or_open_workspace_for_group_and_open_agent_panel(
+        &mut self,
+        key: &ProjectGroupKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_or_open_workspace_for_group_internal(key, true, window, cx);
+    }
+
+    fn activate_or_open_workspace_for_group_internal(
+        &mut self,
+        key: &ProjectGroupKey,
+        open_agent_panel: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let workspace = self
             .multi_workspace
             .upgrade()
             .and_then(|mw| mw.read(cx).last_active_workspace_for_group(key, cx))
             .or_else(|| self.workspace_for_group(key, cx));
         if let Some(workspace) = workspace {
-            if self.is_active_workspace(&workspace, cx) {
+            let already_active = self.is_active_workspace(&workspace, cx);
+            if !already_active {
+                self.activate_workspace(&workspace, window, cx);
+            }
+            if open_agent_panel {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.open_panel::<AgentPanel>(window, cx);
+                });
+            }
+            if already_active {
                 return;
             }
-            self.activate_workspace(&workspace, window, cx);
         } else {
-            self.open_workspace_for_group(key, window, cx);
+            self.open_workspace_for_group(key, open_agent_panel, window, cx);
         }
         self.selection = None;
         self.active_entry = None;
@@ -7754,7 +7788,7 @@ impl Sidebar {
                 multi_workspace.retain_active_workspace(cx);
             });
         } else {
-            self.open_workspace_for_group(&key, window, cx);
+            self.open_workspace_for_group(&key, false, window, cx);
         }
     }
 

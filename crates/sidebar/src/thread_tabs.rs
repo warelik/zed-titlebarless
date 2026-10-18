@@ -420,13 +420,7 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.activate_or_open_workspace_for_group(key, window, cx);
-        // The rows live in the agent panel, so keep it open in the project switched to.
-        if let Some(workspace) = self.active_workspace(cx) {
-            workspace.update(cx, |workspace, cx| {
-                workspace.open_panel::<AgentPanel>(window, cx);
-            });
-        }
+        self.activate_or_open_workspace_for_group_and_open_agent_panel(key, window, cx);
     }
 
     fn close_tab(&mut self, close: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {

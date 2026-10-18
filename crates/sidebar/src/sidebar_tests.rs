@@ -17418,3 +17418,73 @@ fn test_terminal_remote_connection_match_distinguishes_ssh_arguments() {
         Some(&different_endpoint)
     ));
 }
+
+
+#[gpui::test]
+async fn test_project_tab_opens_panel_only_after_closed_target_workspace_loads(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    agent_ui::test_support::init_test(cx);
+    cx.update(|cx| {
+        cx.observe_new(
+            |workspace: &mut Workspace,
+             window: Option<&mut Window>,
+             cx: &mut gpui::Context<Workspace>| {
+                if let Some(window) = window {
+                    let panel = cx.new(|cx| AgentPanel::test_new(workspace, window, cx));
+                    workspace.add_panel(panel, window, cx);
+                    workspace.close_panel::<AgentPanel>(window, cx);
+                }
+            },
+        )
+        .detach();
+    });
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/source-project", serde_json::json!({ "src": {} }))
+        .await;
+    fs.insert_tree("/closed-target", serde_json::json!({ "src": {} }))
+        .await;
+    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+
+    let source_project =
+        project::Project::test(fs.clone(), ["/source-project".as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(source_project, window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+    let source_workspace =
+        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+
+    source_workspace.update_in(cx, |workspace, window, cx| {
+        workspace.open_panel::<AgentPanel>(window, cx);
+        workspace.close_panel::<AgentPanel>(window, cx);
+    });
+    assert!(!source_workspace.read_with(cx, |_, cx| {
+        AgentPanel::is_visible(&source_workspace, cx)
+    }));
+
+    let target_key = ProjectGroupKey::new(
+        None,
+        PathList::new(&[std::path::PathBuf::from("/closed-target")]),
+    );
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.activate_or_open_workspace_for_group_and_open_agent_panel(
+            &target_key,
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    let target_workspace = multi_workspace.read_with(cx, |multi_workspace, cx| {
+        let workspace = multi_workspace.workspace().clone();
+        assert_eq!(workspace.read(cx).project_group_key(cx), target_key);
+        workspace
+    });
+    assert!(target_workspace.read_with(cx, |_, cx| {
+        AgentPanel::is_visible(&target_workspace, cx)
+    }));
+    assert!(!source_workspace.read_with(cx, |_, cx| {
+        AgentPanel::is_visible(&source_workspace, cx)
+    }), "opening a closed project tab must not reopen the source project's panel");
+}
