@@ -468,6 +468,22 @@
       "test_terminal_remote_connection_match_distinguishes_ssh_arguments"
     ],
     [
+      "terminal",
+      "test_init_command_skips_exit_without_child_status"
+    ],
+    [
+      "terminal",
+      "test_write_init_command_after_startup_clears_without_shell_command"
+    ],
+    [
+      "terminal",
+      "test_write_init_command_after_startup_skips_after_child_exit"
+    ],
+    [
+      "terminal",
+      "test_write_init_command_after_startup_skips_after_keyboard_input"
+    ],
+    [
       "workspace",
       "test_item_close_guard_preserves_discard_and_saved_formatting"
     ],

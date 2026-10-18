@@ -226,6 +226,14 @@ class BatchedReviewTests(unittest.TestCase):
         bootstrap = workflow.split("\n  bootstrap-policy:\n", 1)[1].split("\n  prepare:\n", 1)[0]
         self.assertNotIn("secrets.", bootstrap)
         self.assertIn("Require Both Complete Exact-Source Reviews Before Any Tests", bootstrap)
+        self.assertIn("ref: 71d0f4314a4a9fadc9d404f6879586f6be2d93ae", bootstrap)
+        self.assertIn("/baseline/scripts /candidate/scripts", bootstrap)
+        self.assertIn("target=/baseline,readonly", bootstrap)
+        self.assertIn('sys.path.insert(0,"/candidate/scripts");import release', bootstrap)
+        policy = workflow.split("\n  policy-check:\n", 1)[1].split("\n  test:\n", 1)[0]
+        self.assertIn("always() && needs.prepare.result == 'success'", policy)
+        repair = workflow.split("\n  repair:\n", 1)[1]
+        self.assertIn("(vars.ZED_TRUSTED_POLICY != '' || needs.bootstrap-policy.result == 'success')", repair)
 
     def test_current_adoption_receipt_advances_the_authenticated_history_cutoff(self):
         commit = "a" * 40

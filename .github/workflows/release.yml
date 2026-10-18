@@ -54,6 +54,14 @@ jobs:
           ref: ${{ vars.ZED_TRUSTED_POLICY || 'dbf40ff4bd626082e0ad3d9873c5b6ad5fa7f941' }}
           path: gate
           persist-credentials: false
+      # This immutable reviewed baseline includes the owner's new two-review,
+      # candidate-bound release and no-partial-repair contracts. Older fixtures
+      # deliberately expected the superseded release/repair behavior.
+      - uses: actions/checkout@v4
+        with:
+          ref: 71d0f4314a4a9fadc9d404f6879586f6be2d93ae
+          path: baseline
+          persist-credentials: false
       - name: Require Both Complete Exact-Source Reviews Before Any Tests
         id: review
         env:
@@ -122,17 +130,20 @@ jobs:
           lint=$(mktemp -d)
           trap 'rm -rf "$state" "$lint"' EXIT
           mkdir "$state/home" "$state/tmp" "$state/config" "$state/data" "$state/cache" "$state/state"
-          docker run --rm --read-only --network=none --cap-drop=ALL \
+          for suite in /baseline/scripts /candidate/scripts; do
+            docker run --rm --read-only --network=none --cap-drop=ALL \
             --security-opt=no-new-privileges --pids-limit=256 --cpus=2 --memory=2g \
             --user "$(id -u):$(id -g)" --workdir /state \
             --mount "type=bind,source=$GITHUB_WORKSPACE/candidate,target=/candidate,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/baseline,target=/baseline,readonly" \
             --mount "type=bind,source=$state,target=/state" \
             --env HOME=/state/home --env TMPDIR=/state/tmp --env XDG_CONFIG_HOME=/state/config \
             --env XDG_DATA_HOME=/state/data --env XDG_STATE_HOME=/state/state \
             --env XDG_CACHE_HOME=/state/cache --env DATA_DIR=/state/data \
             --env CI=true --env PYTHONDONTWRITEBYTECODE=1 \
             docker.io/library/python@sha256:5560e9ab8709f459489e5b8aa696eda8a07ef821e14bb122be62d91234bfa98b \
-            python3 -B -m unittest discover -s /candidate/scripts -p 'test_*.py' -v
+            python3 -B -c 'import sys,unittest;sys.path.insert(0,"/candidate/scripts");import release;suite=unittest.defaultTestLoader.discover(sys.argv[1],pattern="test_*.py");sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())' "$suite"
+          done
           curl -fsSL https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz -o "$lint/archive.tar.gz"
           printf '%s  %s\n' 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 "$lint/archive.tar.gz" | sha256sum -c -
           tar -xzf "$lint/archive.tar.gz" -C "$lint" actionlint
@@ -253,6 +264,7 @@ jobs:
     name: Final Policy Tests Without Write Credentials
     needs: [prepare, bootstrap-policy]
     if: >-
+      always() && needs.prepare.result == 'success' &&
       needs.prepare.outputs.ready == 'true' &&
       needs.prepare.outputs.policy_verified != 'true' &&
       !(needs.bootstrap-policy.result == 'success' &&
@@ -472,6 +484,7 @@ jobs:
     needs: [prepare, policy-check, test, publish, land, bootstrap-policy, activate-policy]
     if: >-
       always() && (contains(needs.*.result, 'failure') || needs.prepare.outputs.followup == 'true') &&
+      (vars.ZED_TRUSTED_POLICY != '' || needs.bootstrap-policy.result == 'success') &&
       !(needs.bootstrap-policy.result == 'failure' &&
         needs.bootstrap-policy.outputs.validation_started != 'true')
     runs-on: ubuntu-24.04
