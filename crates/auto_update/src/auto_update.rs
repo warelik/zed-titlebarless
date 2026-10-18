@@ -1278,10 +1278,11 @@ fn validate_fork_release(
 
     let repository = github_repository_from_manifest_url(&config.manifest_url)?;
     let expected_url = format!(
-        "{repository}/releases/download/build-{}-{}-{}/Zed.dmg",
+        "{repository}/releases/download/build-{}-{}-{}-{}/Zed.dmg",
         release.release.version,
         &release.upstream_sha[..12],
         &release.patchset_sha256[..12],
+        &release.candidate_sha[..12],
     );
     anyhow::ensure!(
         release.release.url == expected_url,
@@ -1732,9 +1733,10 @@ mod tests {
         url: Option<&str>,
     ) -> serde_json::Value {
         let default_url = format!(
-            "https://github.com/example/zed/releases/download/build-{version}-{}-{}/Zed.dmg",
+            "https://github.com/example/zed/releases/download/build-{version}-{}-{}-{}/Zed.dmg",
             &upstream_sha[..12],
-            &patchset_sha256[..12]
+            &patchset_sha256[..12],
+            &candidate_sha[..12]
         );
         serde_json::json!({
             "version": version,
@@ -2286,7 +2288,7 @@ mod tests {
             (
                 "url",
                 serde_json::json!(
-                    "https://example.com/example/zed/releases/download/build-1.24.2-89abcdef0123-0123456789ab/Zed.dmg"
+                    "https://example.com/example/zed/releases/download/build-1.24.2-89abcdef0123-0123456789ab-0123456789ab/Zed.dmg"
                 ),
             ),
             (
@@ -2304,6 +2306,15 @@ mod tests {
                 "invalid {field} must be rejected"
             );
         }
+
+        let mut different_candidate_asset = valid_manifest.clone();
+        different_candidate_asset["url"] = serde_json::json!(
+            "https://github.com/example/zed/releases/download/build-1.24.2-89abcdef0123-0123456789ab-aaaaaaaaaaaa/Zed.dmg"
+        );
+        assert!(
+            validate_test_fork_manifest(different_candidate_asset, &config).is_err(),
+            "asset URL must be bound to the exact candidate SHA"
+        );
 
         let mut missing_field = valid_manifest;
         missing_field.as_object_mut().expect("manifest is an object").remove("sha256");
