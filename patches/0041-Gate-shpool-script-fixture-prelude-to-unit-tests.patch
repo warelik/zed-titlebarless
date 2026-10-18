@@ -1,0 +1,25 @@
+From bd8f4c0f8f3ac7a7b7e9f935ed97cf18b0c0e3a3 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 18:28:43 +0000
+Subject: [PATCH] Compile the shpool fixture prelude only in unit tests
+
+Production expands the probe prelude directly through the macro. The old private constant is referenced only by the cfg(test) regression module, so exclude that fixture constant from normal library builds while retaining every script/kill regression. This fixes the upstream CI -D warnings failure without changing compiler flags, suppressing lints, or altering runtime scripts.
+---
+ crates/project/src/terminals.rs | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
+index cd9b352..c48fc1a 100644
+--- a/crates/project/src/terminals.rs
++++ b/crates/project/src/terminals.rs
+@@ -155,7 +155,8 @@ fi
+     };
+ }
+ 
+-/// Prelude searching for shpool binary and socket path.
++/// Prelude searching for shpool binary and socket path in script regressions.
++#[cfg(test)]
+ const SHPOOL_SCRIPT_PRELUDE: &str = shpool_script_prelude!("0");
+ 
+ /// Prelude used for destructive operations, which must fail when shpool is unavailable.
