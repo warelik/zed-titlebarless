@@ -1522,7 +1522,7 @@ def asset_bytes(repo, asset):
         raise ValueError("Release metadata asset is unexpectedly large")
     data = subprocess.check_output([
         "gh", "api", "-H", "Accept: application/octet-stream",
-        f"repos/{repo}/releases/assets/{asset['id']}"])
+        f"repos/{repo}/releases/assets/{asset['id']}"], timeout=60)
     if (len(data) != asset["size"]
             or "sha256:" + hashlib.sha256(data).hexdigest() != asset.get("digest")):
         raise ValueError("Downloaded metadata differs from its GitHub digest")
@@ -2107,8 +2107,15 @@ def run_regressions(app, manifest, upstream, candidate):
         for package in sorted({package for package, _ in required}):
             available = set()
             for binary in sorted(binaries.get(package, [])):
-                listing = capture([str(binary), "--list", "--format", "terse"],
-                                  cwd=app, env=env)
+                try:
+                    discovered = run_rust_case(
+                        [str(binary), "--list", "--format", "terse"], cwd=app, env=env,
+                        check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                    listing = discovered.stdout
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+                    print(error.stdout or "", end="", flush=True)
+                    failures.append((f"{package}::{binary.name} --list", error))
+                    continue
                 for line in listing.splitlines():
                     if line.endswith(": test"):
                         available.add((binary, line.removesuffix(": test")))

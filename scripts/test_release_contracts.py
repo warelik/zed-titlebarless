@@ -1119,6 +1119,18 @@ class DraftPublicationFailureTests(unittest.TestCase):
         )
 
 
+class MetadataDownloadBoundsTests(unittest.TestCase):
+    def test_metadata_download_is_bounded_and_still_checks_its_digest(self):
+        data = b"verified metadata"
+        asset = {"id": 42, "size": len(data), "digest": "sha256:" + hashlib.sha256(data).hexdigest()}
+        with patch.object(release.subprocess, "check_output", return_value=data) as download:
+            self.assertEqual(release.asset_bytes("owner/fork", asset), data)
+        self.assertEqual(download.call_args.kwargs["timeout"], 60)
+        with patch.object(release.subprocess, "check_output", return_value=b"x" * len(data)):
+            with self.assertRaisesRegex(ValueError, "differs from its GitHub digest"):
+                release.asset_bytes("owner/fork", asset)
+
+
 class PublicationBoundaryTests(unittest.TestCase):
     def test_failed_prepublication_gate_never_exposes_the_draft(self):
         with patch.object(release, "api") as api:
@@ -1256,6 +1268,7 @@ class RustRegressionRunnerTests(unittest.TestCase):
         result_output="test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out",
         result_code=0,
         runtime_timeout=False,
+        listing_timeout=False,
     ):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1312,6 +1325,8 @@ class RustRegressionRunnerTests(unittest.TestCase):
             commands = []
             test_runs = []
             self.last_test_runs = test_runs
+            listing_calls = []
+            self.last_listing_calls = listing_calls
 
             def capture(args, *, cwd, env):
                 self.assert_isolated(env)
@@ -1347,6 +1362,9 @@ class RustRegressionRunnerTests(unittest.TestCase):
                 if args[0] == "git":
                     return SimpleNamespace(returncode=0, stdout="")
                 if args[1:3] == ["--list", "--format"]:
+                    listing_calls.append(args)
+                    if listing_timeout and len(listing_calls) == 1:
+                        raise subprocess.TimeoutExpired(args, 60, output="hung listing output\n")
                     return SimpleNamespace(returncode=0, stdout=listing)
                 test_runs.append((args, env.copy()))
                 if runtime_timeout:
@@ -1424,6 +1442,17 @@ class RustRegressionRunnerTests(unittest.TestCase):
         self.assertEqual({command[2] for command, _ in self.last_test_runs}, expected)
         summary = captured.getvalue().split("Complete required Rust regression failure list:")[1]
         self.assertTrue(all(name in summary for name in expected))
+        self.assertNotIn("Passed all", captured.getvalue())
+
+    def test_timed_out_listing_does_not_block_other_packages_or_hide_missing_cases(self):
+        captured = io.StringIO()
+        with patch("sys.stdout", captured), self.assertRaises(subprocess.TimeoutExpired):
+            self.exercise(listing_timeout=True, real_shpool_case=True)
+        self.assertEqual(len(self.last_listing_calls), 2)
+        self.assertEqual([command[2] for command, _ in self.last_test_runs],
+                         ["tests::test_isolated_shpool_daemon_probe_and_kill"])
+        self.assertIn("hung listing output", captured.getvalue())
+        self.assertIn("Preserved Rust regression missing: auto_update::test_preserved", captured.getvalue())
         self.assertNotIn("Passed all", captured.getvalue())
 
     def test_timed_out_case_does_not_prevent_later_regressions(self):

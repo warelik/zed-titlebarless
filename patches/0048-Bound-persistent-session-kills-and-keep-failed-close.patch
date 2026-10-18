@@ -1,0 +1,202 @@
+From 816d5cdc6c963ae4e8be5a3c67da5ea3525ebf86 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 20:04:15 +0000
+Subject: [PATCH] Bound persistent session kills and keep failed closes
+ retryable
+
+Apply the existing17-second probe deadline to the common kill API, including preparation. Cancel owned probe/kill clients on task drop and exec the final client command without terminating shared daemons or SSH masters. Cover timeout cancellation, metadata retention, cleared closing state and successful retry.
+---
+ crates/project/src/terminals.rs     | 69 ++++++++++++++++++++++++++---
+ crates/sidebar/src/sidebar_tests.rs | 58 ++++++++++++++++++++++++
+ 2 files changed, 122 insertions(+), 5 deletions(-)
+
+diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
+index 9c9809c..a64e429 100644
+--- a/crates/project/src/terminals.rs
++++ b/crates/project/src/terminals.rs
+@@ -172,11 +172,12 @@ const SHPOOL_PROBE_SCRIPT: &str = concat!(
+ echo "=== ZED_SHPOOL_PROBE_START ==="
+ echo "$SHPOOL_BIN"
+ echo "$SHPOOL_SOCK"
+-"$SHPOOL_BIN" -s "$SHPOOL_SOCK" list --json
++exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" list --json
+ "#
+ );
+ 
+ pub(crate) const SHPOOL_PROBE_TIMEOUT: Duration = Duration::from_secs(17);
++pub(crate) const SHPOOL_KILL_TIMEOUT: Duration = Duration::from_secs(17);
+ 
+ pub struct ShpoolProbe {
+     pub program: String,
+@@ -711,11 +712,31 @@ impl Project {
+     }
+ 
+     /// Ends the shpool session `session_name` and everything running in it.
+-    /// Does nothing on a host without shpool.
++    /// Unavailable or timed-out kills return an error so the close can be retried.
+     pub fn kill_persistent_terminal_session(
+         &mut self,
+         session_name: String,
+         cx: &mut Context<Self>,
++    ) -> Task<Result<()>> {
++        let kill = self.kill_persistent_terminal_session_unbounded(session_name.clone(), cx);
++        let executor = cx.background_executor().clone();
++        cx.background_spawn(async move {
++            let timeout = executor.timer(SHPOOL_KILL_TIMEOUT);
++            futures::pin_mut!(kill, timeout);
++            match futures::future::select(kill, timeout).await {
++                futures::future::Either::Left((result, _)) => result,
++                futures::future::Either::Right(((), _)) => Err(anyhow::anyhow!(
++                    "shpool session {session_name} kill timed out after {}s",
++                    SHPOOL_KILL_TIMEOUT.as_secs()
++                )),
++            }
++        })
++    }
++
++    fn kill_persistent_terminal_session_unbounded(
++        &mut self,
++        session_name: String,
++        cx: &mut Context<Self>,
+     ) -> Task<Result<()>> {
+         #[cfg(any(test, feature = "test-support"))]
+         if let Some(fake) = &self.fake_shpool {
+@@ -755,12 +776,15 @@ impl Project {
+         };
+         let script = format!(
+             r#"{SHPOOL_KILL_SCRIPT_PRELUDE}
+-"$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
++exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
+ "#
+         );
+         let command = self.exec_script_in_sh(script, cx);
+         cx.background_spawn(async move {
+-            let output = command.await?.output().await?;
++            let mut command = command.await?;
++            // Cancel only this client; the shared daemon and SSH master must survive.
++            command.kill_on_drop(true);
++            let output = command.output().await?;
+             if !output.status.success() {
+                 let stderr = String::from_utf8_lossy(&output.stderr);
+                 if !Self::shpool_session_not_found(&stderr, &session_name) {
+@@ -836,7 +860,10 @@ impl Project {
+         }
+         let command = self.exec_script_in_sh(SHPOOL_PROBE_SCRIPT.to_string(), cx);
+         cx.background_spawn(async move {
+-            let output = command.await?.output().await?;
++            let mut command = command.await?;
++            // Cancel only this client; the shared daemon and SSH master must survive.
++            command.kill_on_drop(true);
++            let output = command.output().await?;
+             parse_shpool_probe_output(&output)
+         })
+     }
+@@ -1814,6 +1841,38 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
+         );
+     }
+ 
++    #[gpui::test]
++    async fn test_shpool_kill_timeout_is_retryable_and_cancels_delayed_kill(cx: &mut gpui::TestAppContext) {
++        cx.executor().allow_parking();
++        cx.update(|cx| {
++            let store = settings::SettingsStore::test(cx);
++            cx.set_global(store);
++            TerminalSettings::register(cx);
++        });
++        let project = Project::test(fs::FakeFs::new(cx.executor()), [], cx).await;
++        let fake = FakeShpoolStore::new();
++        fake.add_session("zed-timeout-kill");
++        fake.state.lock().kill_delay = Some(Duration::from_secs(60));
++        project.update(cx, |project, _| project.set_fake_shpool(fake.clone()));
++        let task = project.update(cx, |project, cx| {
++            project.kill_persistent_terminal_session("zed-timeout-kill".into(), cx)
++        });
++        cx.run_until_parked();
++        cx.executor().advance_clock(SHPOOL_KILL_TIMEOUT + Duration::from_secs(1));
++        cx.run_until_parked();
++        assert!(task.await.unwrap_err().to_string().contains("kill timed out after 17s"));
++        assert!(fake.has_session("zed-timeout-kill"));
++        cx.executor().advance_clock(Duration::from_secs(60));
++        cx.run_until_parked();
++        assert!(fake.has_session("zed-timeout-kill"), "cancelled kill must not complete late");
++        fake.state.lock().kill_delay = None;
++        project.update(cx, |project, cx| {
++            project.kill_persistent_terminal_session("zed-timeout-kill".into(), cx)
++        }).await.unwrap();
++        assert_eq!(fake.kill_history().len(), 2);
++        assert!(!fake.has_session("zed-timeout-kill"));
++    }
++
+     #[gpui::test]
+     async fn test_shpool_probe_timeout_returns_error_without_plain_shell_fallback(
+         cx: &mut gpui::TestAppContext,
+diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
+index 1d2e4c2..08134ab 100644
+--- a/crates/sidebar/src/sidebar_tests.rs
++++ b/crates/sidebar/src/sidebar_tests.rs
+@@ -4964,6 +4964,64 @@ async fn test_successful_delayed_terminal_kill_deletes_metadata_after_sidebar_is
+     });
+ }
+ 
++#[gpui::test]
++async fn test_timed_out_terminal_close_keeps_metadata_and_allows_retry(cx: &mut TestAppContext) {
++    cx.executor().allow_parking();
++    let project = init_test_project_with_agent_panel("/main-project", cx).await;
++    let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
++    let (multi_workspace, cx) = cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    let (sidebar, _panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
++    let terminal_id = TerminalId::new();
++    let session_name = terminal_id.session_name();
++    fake.add_session(&session_name);
++    fake.state.lock().kill_delay = Some(Duration::from_secs(60));
++    let main_paths = PathList::new(&[PathBuf::from("/main-project")]);
++    let closed_paths = PathList::new(&[PathBuf::from("/worktrees/feature-a")]);
++    let metadata = TerminalThreadMetadata {
++        terminal_id, title: "Timed out close".into(), custom_title: None,
++        created_at: chrono::Utc::now(),
++        worktree_paths: WorktreePaths::from_path_lists(main_paths.clone(), closed_paths.clone()).unwrap(),
++        remote_connection: None, working_directory: None,
++    };
++    cx.update(|_, cx| {
++        TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx));
++    });
++    save_thread_metadata_with_main_paths("blocking-thread", "Blocking Thread", closed_paths, main_paths,
++                                         chrono::Utc::now(), cx);
++    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
++    cx.run_until_parked();
++    close_terminal_from_sidebar(&sidebar, terminal_id, cx);
++    cx.run_until_parked();
++    cx.update(|_, cx| {
++        assert!(TerminalThreadMetadataStore::global(cx).read(cx).is_intentionally_closing(terminal_id));
++    });
++    cx.executor().advance_clock(Duration::from_secs(18));
++    cx.run_until_parked();
++    cx.update(|_, cx| {
++        let store = TerminalThreadMetadataStore::global(cx);
++        let store = store.read(cx);
++        assert!(store.entry(terminal_id).is_some());
++        assert!(!store.is_intentionally_closing(terminal_id));
++        assert!(!store.is_restore_blocked(terminal_id));
++    });
++    assert!(fake.has_session(&session_name));
++    cx.executor().advance_clock(Duration::from_secs(60));
++    cx.run_until_parked();
++    assert!(fake.has_session(&session_name), "timed out kill must not finish late");
++    fake.state.lock().kill_delay = None;
++    close_terminal_from_sidebar(&sidebar, terminal_id, cx);
++    cx.run_until_parked();
++    assert_eq!(fake.kill_history().len(), 2);
++    assert!(!fake.has_session(&session_name));
++    cx.update(|_, cx| {
++        let store = TerminalThreadMetadataStore::global(cx);
++        let store = store.read(cx);
++        assert!(store.entry(terminal_id).is_none());
++        assert!(!store.is_intentionally_closing(terminal_id));
++        assert!(store.is_restore_blocked(terminal_id));
++    });
++}
++
+ #[gpui::test]
+ async fn test_failed_close_terminal_entry_retains_metadata_until_session_kill_succeeds(
+     cx: &mut TestAppContext,
