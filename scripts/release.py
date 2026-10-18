@@ -734,7 +734,9 @@ def escalation(repo, config, upstream, reason, *, nonblocking=False):
 
 def failure_evidence(repo):
     run_id = os.environ["GITHUB_RUN_ID"]
-    lines = [f"Workflow evidence: https://github.com/{repo}/actions/runs/{run_id}"]
+    workflow_url = f"https://github.com/{repo}/actions/runs/{run_id}"
+    lines = [f"Workflow evidence: {workflow_url}"]
+    compiler_errors = []
     jobs = api(f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100")
     if jobs["total_count"] > 100:
         raise ValueError("Unexpected workflow job count; refuse incomplete failure evidence")
@@ -749,6 +751,18 @@ def failure_evidence(repo):
                 logs = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", logs)
                 logs = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", logs)
                 lines.append(logs[-18000:])
+                log_lines = logs.splitlines()
+                for index, line in enumerate(log_lines):
+                    if '{"reason":' in line or not re.search(r"\berror(?:\[E[0-9]+\])?:", line):
+                        continue
+                    excerpt = []
+                    for following in log_lines[index:index + 12]:
+                        if '{"reason":' in following:
+                            break
+                        excerpt.append(following[:2000])
+                    diagnostic = "\n".join(excerpt)
+                    if diagnostic not in compiler_errors:
+                        compiler_errors.append(diagnostic)
             except subprocess.CalledProcessError:
                 lines.append(f"Log unavailable; inspect {job['html_url']}")
     pr, sha = os.environ.get("CANDIDATE_PR", ""), os.environ.get("CANDIDATE_SHA", "")
@@ -757,7 +771,15 @@ def failure_evidence(repo):
         for finding in review_records(repo, pr, sha):
             if finding.get("body"):
                 lines.append(f"\n{finding.get('path')}:{finding.get('line')}\n{finding['body']}")
-    return "\n".join(lines)[-24000:]
+    # Cargo can fail early, wait for parallel jobs, then print megabytes of
+    # artifact JSON. Keep the actual diagnostics and full-log URL after the
+    # bounded tail so escalation's own size limit cannot erase the cause.
+    errors = "\n\n".join(compiler_errors)
+    footer = f"\n\nFull workflow evidence: {workflow_url}"
+    if errors:
+        footer = ("\n\nCompiler diagnostics (fetch the full job logs for the complete batch):\n"
+                  + errors[:10000] + footer)
+    return "\n".join(lines)[-12000:] + footer
 
 def check_policy(candidate):
     """Run untrusted policy only in the read-only job, against trusted and new tests."""
@@ -839,6 +861,8 @@ def request_text(sha, upstream, config):
         "Removal requires its regression to pass without that fix while retaining "
         "useful coverage; clean patch application or similar code is not proof.\n"
         "Read the entire downstream diff and its integration with upstream, including "
+        "every constructor, struct literal and caller of changed Rust fields/APIs, "
+        "including test fixtures and feature/target-gated paths. Inspect "
         "unchanged affected callers. The paired configuration-delta review covers "
         "release policy at its own exact commit. Return the COMPLETE actionable list in one response, all "
         "severities together. Account for known findings in open maintenance issues "

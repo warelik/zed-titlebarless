@@ -89,6 +89,9 @@ release maintenance.
    where appropriate. Review and run the relevant checks against the new exact
    SHA. Test the intended success and the defined failure behavior. An agent
    report, reaction, previous approval, or test of another revision is not proof.
+   For changed Rust fields or APIs, inspect every constructor, struct literal and
+   caller, including test fixtures and feature/target-gated code, before the final
+   compilation. Keep existing regression fixtures and their assertions intact.
    Upstream contribution procedures requiring a README banner and manual author
    confirmation do not apply to this downstream cycle. Do not copy those banners
    into patches: independent exact-SHA Codex review is the required review gate.

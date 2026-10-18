@@ -205,6 +205,26 @@ class BatchedReviewTests(unittest.TestCase):
         self.assertIn("Fetch ALL pages", prompt)
         self.assertTrue(prompt.endswith("<!-- zed-fix:" + "e" * 40 + ":1 -->"))
 
+    def test_compiler_errors_survive_artifact_noise_and_escalation_size_limits(self):
+        log = ("2026-10-18T10:29:55Z error[E0063]: missing lifecycle fields\n"
+               "2026-10-18T10:29:55Z  --> crates/agent_ui/src/store.rs:1107:24\n"
+               + ('2026-10-18T10:42:14Z {"reason":"compiler-artifact","noise":"' + "x" * 500 + '"}\n') * 100
+               + "2026-10-18T10:42:15Z error[E0308]: second independent compiler error\n"
+               "2026-10-18T10:42:15Z  --> crates/sidebar/src/sidebar.rs:42:1\n")
+        job = {"id": 17, "name": "Rust regressions", "conclusion": "failure",
+               "html_url": "https://github.com/maintainer/zed-fork/actions/runs/123/job/17"}
+        with (patch.dict(os.environ, {"GITHUB_RUN_ID": "123"}, clear=True),
+              patch.object(release, "api", return_value={"total_count": 1, "jobs": [job]}),
+              patch.object(release, "run", side_effect=lambda *a: "" if a[-1] == "--help" else log)):
+            evidence = release.failure_evidence("maintainer/zed-fork")
+        # The native escalation retains only the final 16000 characters.
+        bounded = evidence[-16000:]
+        self.assertIn("error[E0063]", bounded)
+        self.assertIn("store.rs:1107:24", bounded)
+        self.assertIn("error[E0308]", bounded)
+        self.assertIn("sidebar.rs:42:1", bounded)
+        self.assertIn("https://github.com/maintainer/zed-fork/actions/runs/123", bounded)
+
     def test_policy_snapshot_ignores_docs_but_detects_executable_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             left, right = Path(directory) / "left", Path(directory) / "right"
