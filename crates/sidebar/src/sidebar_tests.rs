@@ -4943,6 +4943,104 @@ async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes
 }
 
 #[gpui::test]
+async fn test_successful_delayed_terminal_kill_deletes_metadata_after_sidebar_is_dropped(
+    cx: &mut TestAppContext,
+) {
+    let main_project = init_test_project_with_agent_panel("/main-project", cx).await;
+    let fake = main_project.update(cx, |p, _| p.enable_fake_shpool(&[]));
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(main_project.clone(), window, cx));
+    let (sidebar, _panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+
+    let terminal_id = TerminalId::new();
+    let session_name = terminal_id.session_name();
+    fake.add_session(&session_name);
+    fake.state.lock().kill_delay = Some(Duration::from_secs(1));
+
+    let main_paths = PathList::new(&[PathBuf::from("/main-project")]);
+    let closed_worktree_paths = PathList::new(&[PathBuf::from("/worktrees/feature-a")]);
+    let metadata = TerminalThreadMetadata {
+        terminal_id,
+        title: "Closed Project Terminal".into(),
+        custom_title: None,
+        created_at: chrono::Utc::now(),
+        worktree_paths: WorktreePaths::from_path_lists(
+            main_paths.clone(),
+            closed_worktree_paths.clone(),
+        )
+        .unwrap(),
+        remote_connection: None,
+        working_directory: None,
+    };
+    cx.update(|_, cx| {
+        TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.save(metadata.clone(), cx);
+        });
+    });
+    // Add an active thread on the closed worktree to prevent archive auto-load,
+    // ensuring close_terminal exercises the Closed workspace branch directly.
+    save_thread_metadata_with_main_paths(
+        "blocking-thread",
+        "Blocking Thread",
+        closed_worktree_paths,
+        main_paths,
+        chrono::Utc::now(),
+        cx,
+    );
+
+    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+    cx.run_until_parked();
+
+    let (terminal_metadata, terminal_workspace) = sidebar.read_with(cx, |sidebar, _cx| {
+        sidebar
+            .contents
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                ListEntry::Terminal(terminal) if terminal.metadata.terminal_id == terminal_id => {
+                    Some((terminal.metadata.clone(), terminal.workspace.clone()))
+                }
+                _ => None,
+            })
+            .expect("closed terminal should be visible in sidebar")
+    });
+
+    assert!(matches!(
+        terminal_workspace,
+        ThreadEntryWorkspace::Closed { .. }
+    ));
+
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.close_terminal(&terminal_metadata, &terminal_workspace, window, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        assert!(TerminalThreadMetadataStore::global(cx).read(cx).is_intentionally_closing(terminal_id));
+    });
+    drop(sidebar);
+    drop(multi_workspace);
+    cx.update(|window, _cx| window.remove_window());
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+
+    assert_eq!(
+        fake.kill_history(),
+        vec![session_name.clone()],
+        "closing terminal on closed workspace must kill persistent session"
+    );
+    assert!(!fake.has_session(&session_name));
+    cx.cx.update(|cx| {
+        assert!(
+            TerminalThreadMetadataStore::global(cx)
+                .read(cx)
+                .entry(terminal_id)
+                .is_none(),
+            "metadata must be deleted after close on closed workspace"
+        );
+    });
+}
+
+#[gpui::test]
 async fn test_failed_close_terminal_entry_retains_metadata_until_session_kill_succeeds(
     cx: &mut TestAppContext,
 ) {
@@ -17487,4 +17585,40 @@ async fn test_project_tab_opens_panel_only_after_closed_target_workspace_loads(
     assert!(!source_workspace.read_with(cx, |_, cx| {
         AgentPanel::is_visible(&source_workspace, cx)
     }), "opening a closed project tab must not reopen the source project's panel");
+}
+
+#[gpui::test]
+async fn test_sidebar_close_waits_for_pending_terminal_startup(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/project", cx).await;
+    let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
+    fake.state.lock().probe_delay = Some(Duration::from_secs(1));
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+    let terminal_id = TerminalId::new();
+    let metadata = TerminalThreadMetadata {
+        terminal_id,
+        title: "Starting terminal".into(), custom_title: None,
+        created_at: chrono::Utc::now(),
+        worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from("/project")])),
+        remote_connection: None, working_directory: None,
+    };
+    fake.add_session(terminal_id.session_name());
+    cx.update(|_, cx| TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+        store.save(metadata.clone(), cx);
+    }));
+    panel.update_in(cx, |panel, window, cx| {
+        panel.restore_terminal(metadata.clone(), false, agent_ui::AgentThreadSource::AgentPanel, None, window, cx);
+    });
+    cx.run_until_parked();
+    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+    close_terminal_from_sidebar(&sidebar, terminal_id, cx);
+    cx.run_until_parked();
+    assert!(fake.kill_history().is_empty(), "do not treat a pre-start no-session kill as success");
+    cx.update(|_, cx| assert!(TerminalThreadMetadataStore::global(cx).read(cx).entry(terminal_id).is_some()));
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert_eq!(fake.kill_history(), vec![terminal_id.session_name()]);
+    assert!(!fake.has_session(&terminal_id.session_name()));
+    cx.update(|_, cx| assert!(TerminalThreadMetadataStore::global(cx).read(cx).entry(terminal_id).is_none()));
 }

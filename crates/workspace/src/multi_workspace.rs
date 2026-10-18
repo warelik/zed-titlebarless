@@ -1892,20 +1892,6 @@ impl MultiWorkspace {
         });
 
         cx.spawn_in(window, async move |this, cx| {
-            // Consent phase: run the standard close lifecycle for every
-            // workspace being removed. Prompts only; no state changes.
-            for workspace in &workspaces {
-                let should_continue = workspace
-                    .update_in(cx, |workspace, window, cx| {
-                        workspace.prepare_to_close(CloseIntent::ReplaceWindow, window, cx)
-                    })?
-                    .await?;
-
-                if !should_continue {
-                    return Ok(false);
-                }
-            }
-
             let item_ids = workspaces
                 .iter()
                 .map(|workspace| {
@@ -1935,7 +1921,32 @@ impl MultiWorkspace {
                     })
                 })
                 .collect();
-            let guard = cx.update(|window, cx| ItemCloseGuard::new(items, window, cx))?;
+            let mut guard = cx.update(|window, cx| ItemCloseGuard::new(items, window, cx))?;
+
+            // Consent phase: run the standard close lifecycle for every
+            // workspace being removed. Prompts only; no state changes.
+            for workspace in &workspaces {
+                let should_continue = workspace
+                    .update_in(cx, |workspace, window, cx| {
+                        workspace.prepare_to_close(CloseIntent::ReplaceWindow, window, cx)
+                    })?
+                    .await?;
+
+                if !should_continue {
+                    return Ok(false);
+                }
+            }
+
+            if !gpui::AsyncApp::update(cx, |cx| {
+                let current_ids = workspaces.iter().map(|workspace| {
+                    workspace.read(cx).panes().iter().flat_map(|pane| {
+                        pane.read(cx).items().map(|item| item.item_id()).collect::<Vec<_>>()
+                    }).collect::<Vec<_>>()
+                }).collect::<Vec<_>>();
+                guard.accept_consent(cx) && current_ids == item_ids
+            }) {
+                return Ok(false);
+            }
 
             if !before_remove(cx).await? {
                 return Ok(false);
