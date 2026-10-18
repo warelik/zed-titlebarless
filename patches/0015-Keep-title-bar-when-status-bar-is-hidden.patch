@@ -4,8 +4,8 @@ Date: Sat, 17 Oct 2026 00:02:36 +0000
 Subject: [PATCH 2/3] Keep title bar when status bar is hidden
 
 ---
- crates/workspace/src/workspace.rs | 48 ++++++++++++++++++++++++++++++-
- 1 file changed, 47 insertions(+), 1 deletion(-)
+ crates/workspace/src/workspace.rs | 49 +++++++++++++++++++++++++++++++-
+ 1 file changed, 48 insertions(+), 1 deletion(-)
 
 diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
 index 03e0743..d0e0c81 100644
@@ -22,7 +22,7 @@ index 03e0743..d0e0c81 100644
  }
  
  /// Where stock Zed puts the traffic lights; the title bar is centred on them.
-@@ -13245,6 +13247,50 @@ mod tests {
+@@ -13245,6 +13247,51 @@ mod tests {
          assert_eq!(title_bar_top(false, cx), in_title_bar);
      }
  
@@ -46,6 +46,7 @@ index 03e0743..d0e0c81 100644
 +        workspace.update_in(cx, |workspace, window, cx| {
 +            workspace.set_titlebar_item(cx.new(|_| TestTitleBar).into(), window, cx);
 +        });
++        cx.run_until_parked();
 +
 +        set_title_bar_to_status_bar(false, cx);
 +        let title_bar_top = cx
