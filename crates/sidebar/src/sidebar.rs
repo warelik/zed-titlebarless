@@ -5320,15 +5320,20 @@ impl Sidebar {
         owners
     }
 
-    fn close_terminal_if_owned_elsewhere(
+    fn close_terminal_with_other_owners(
         &mut self,
         metadata: &TerminalThreadMetadata,
         origin: gpui::WindowId,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some((_, workspace, _)) = Self::terminal_owners(metadata, cx).into_iter()
-            .find(|(window, _, _)| window.window_id() != origin)
-        else { return false };
+        let owners = Self::terminal_owners(metadata, cx);
+        // Several workspaces can own one session inside the same window.
+        let owner = if owners.len() > 1 {
+            owners.first()
+        } else {
+            owners.iter().find(|(window, _, _)| window.window_id() != origin)
+        };
+        let Some((_, workspace, _)) = owner else { return false };
         let project = workspace.read(cx).project().clone();
         let metadata = metadata.clone();
         let id = metadata.terminal_id;
@@ -5369,7 +5374,7 @@ impl Sidebar {
             }.await;
             if let Err(error) = result {
                 cx.update(|cx| complete_terminal_close_metadata(id, false, cx));
-                log::error!("failed to close terminal {id} across windows: {error:#}");
+                log::error!("failed to close terminal {id} across owners: {error:#}");
                 this.update(cx, |this, cx| this.show_terminal_close_error(id, cx)).ok();
             }
         }).detach();
@@ -5383,7 +5388,7 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.close_terminal_if_owned_elsewhere(metadata, window.window_handle().window_id(), cx) {
+        if self.close_terminal_with_other_owners(metadata, window.window_handle().window_id(), cx) {
             return;
         }
         let project = match workspace {
@@ -5409,7 +5414,7 @@ impl Sidebar {
                 }
             };
             this.update_in(cx, |this, window, cx| {
-                if this.close_terminal_if_owned_elsewhere(&metadata, window.window_handle().window_id(), cx) {
+                if this.close_terminal_with_other_owners(&metadata, window.window_handle().window_id(), cx) {
                     return;
                 }
                 // Re-read live state after connection setup: activation may have
@@ -5516,7 +5521,7 @@ impl Sidebar {
                     return anyhow::Ok(());
                 }
                 if this.update(cx, |this, cx| {
-                    this.close_terminal_if_owned_elsewhere(&metadata, close_window_id, cx)
+                    this.close_terminal_with_other_owners(&metadata, close_window_id, cx)
                 })? { return anyhow::Ok(()); }
                 if !gpui::AsyncApp::update(cx, |cx| begin_terminal_close(terminal_id, cx)) {
                     return anyhow::Ok(());
@@ -5608,7 +5613,7 @@ impl Sidebar {
                         return Ok(false);
                     }
                     if sidebar.update(cx, |this, cx| {
-                        this.close_terminal_if_owned_elsewhere(&metadata, close_window_id, cx)
+                        this.close_terminal_with_other_owners(&metadata, close_window_id, cx)
                     })? { return Ok(false); }
                     if !gpui::AsyncApp::update(cx, |cx| begin_terminal_close(terminal_id, cx)) {
                         return Ok(false);
