@@ -1884,6 +1884,10 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
     async fn test_isolated_shpool_daemon_probe_and_kill(cx: &mut gpui::TestAppContext) {
         cx.executor().allow_parking();
         if std::env::var("ZED_TEST_REAL_SHPOOL").is_err() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI must enable the preserved real-shpool regression"
+            );
             return;
         }
         let has_shpool = smol::process::Command::new("/bin/sh")
@@ -1892,9 +1896,10 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
             .await
             .map(|o| o.status.success())
             .unwrap_or(false);
-        if !has_shpool {
-            return;
-        }
+        assert!(
+            has_shpool,
+            "the enabled real-shpool regression requires shpool on PATH"
+        );
 
         let temp_dir = tempfile::tempdir().expect("tempdir creation");
         let isolated_runtime = temp_dir.path().join("runtime");
