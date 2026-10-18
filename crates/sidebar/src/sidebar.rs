@@ -5233,10 +5233,120 @@ impl Sidebar {
         self.finish_close_terminal(metadata, workspace, window, cx);
     }
 
+    /// Reconstruct the saved execution context without opening or activating
+    /// a workspace (which could restore unrelated buffers and terminal threads).
+    fn prepare_closed_terminal_project(
+        &self,
+        metadata: &TerminalThreadMetadata,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<Entity<project::Project>>> {
+        let multi_workspace = self.multi_workspace.clone();
+        let connection_options = metadata.remote_connection.clone();
+        let paths = metadata.folder_paths().paths().to_vec();
+        cx.spawn_in(window, async move |_, cx| {
+            let (modal_workspace, app_state) = gpui::AsyncApp::update(cx, |cx| {
+                let multi_workspace = multi_workspace.upgrade()
+                    .ok_or_else(|| anyhow::anyhow!("terminal window is no longer available"))?;
+                let workspace = multi_workspace.read(cx).workspace().clone();
+                let app_state = workspace.read(cx).app_state().clone();
+                anyhow::Ok((workspace, app_state))
+            })?;
+            let remote = if let Some(options) = connection_options {
+                let connect = cx.update(|window, cx| {
+                    remote_connection::connect_with_modal(&modal_workspace, options, window, cx)
+                })?;
+                let result = connect.await;
+                remote_connection::dismiss_connection_modal(&modal_workspace, cx);
+                Some(result?.ok_or_else(|| anyhow::anyhow!("saved terminal connection was cancelled"))?)
+            } else {
+                None
+            };
+            let project = gpui::AsyncApp::update(cx, |cx| match remote {
+                Some(remote) => project::Project::remote(
+                    remote, app_state.client.clone(), app_state.node_runtime.clone(),
+                    app_state.user_store.clone(), app_state.languages.clone(), app_state.fs.clone(),
+                    true, cx,
+                ),
+                None => project::Project::local(
+                    app_state.client.clone(), app_state.node_runtime.clone(),
+                    app_state.user_store.clone(), app_state.languages.clone(), app_state.fs.clone(),
+                    None, project::LocalProjectFlags::default(), cx,
+                ),
+            });
+            // Load the saved roots so per-project terminal settings/environment
+            // select the same daemon as terminal activation would.
+            for path in paths {
+                let load = project.update(cx, |project, cx| {
+                    project.find_or_create_worktree(path.as_path(), true, cx)
+                });
+                let _ = load.await?;
+            }
+            anyhow::Ok(project)
+        })
+    }
+
     fn finish_close_terminal(
         &mut self,
         metadata: &TerminalThreadMetadata,
         workspace: &ThreadEntryWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let project = match workspace {
+            ThreadEntryWorkspace::Open(workspace) => Some(workspace.read(cx).project().clone()),
+            ThreadEntryWorkspace::Closed { .. } => {
+                self.find_project_for_remote_connection(metadata.remote_connection.as_ref(), cx)
+            }
+        };
+        if let Some(project) = project {
+            self.finish_close_terminal_with_project(metadata, workspace, project, window, cx);
+            return;
+        }
+        let prepare = self.prepare_closed_terminal_project(metadata, window, cx);
+        let metadata = metadata.clone();
+        let workspace = workspace.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let project = match prepare.await {
+                Ok(project) => project,
+                Err(error) => {
+                    log::error!("failed to prepare saved terminal {} for close: {error:#}", metadata.terminal_id);
+                    this.update(cx, |this, cx| this.show_terminal_close_error(metadata.terminal_id, cx)).ok();
+                    return anyhow::Ok(());
+                }
+            };
+            this.update_in(cx, |this, window, cx| {
+                // Re-read live state after connection setup: activation may have
+                // started the same terminal while authentication was pending.
+                let live_workspace = this.find_workspace_in_current_window(cx, |workspace, cx| {
+                    let workspace = workspace.read(cx);
+                    same_terminal_remote_connection(
+                        workspace.project().read(cx).remote_connection_options(cx).as_ref(),
+                        metadata.remote_connection.as_ref(),
+                    ) && workspace.panel::<AgentPanel>(cx).is_some_and(|panel| {
+                        let panel = panel.read(cx);
+                        panel.has_terminal(metadata.terminal_id)
+                            || panel.is_terminal_spawn_pending(metadata.terminal_id)
+                    })
+                });
+                let (workspace, project) = match live_workspace {
+                    Some(workspace) => {
+                        let project = workspace.read(cx).project().clone();
+                        (ThreadEntryWorkspace::Open(workspace), project)
+                    }
+                    None => (workspace, project),
+                };
+                this.finish_close_terminal_with_project(&metadata, &workspace, project, window, cx);
+            })?;
+            anyhow::Ok(())
+        }).detach_and_log_err(cx);
+    }
+
+    fn finish_close_terminal_with_project(
+        &mut self,
+        metadata: &TerminalThreadMetadata,
+        workspace: &ThreadEntryWorkspace,
+        project: Entity<project::Project>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -5249,20 +5359,6 @@ impl Sidebar {
             .and_then(|panel| panel.read(cx).terminal_session_may_exist(terminal_id, cx))
             .unwrap_or(true);
         let close_window_id = window.window_handle().window_id();
-        let project = match workspace {
-            ThreadEntryWorkspace::Open(workspace) => Some(workspace.read(cx).project().clone()),
-            ThreadEntryWorkspace::Closed { .. } => {
-                self.find_project_for_remote_connection(metadata.remote_connection.as_ref(), cx)
-            }
-        };
-        let Some(project) = project else {
-            log::warn!(
-                "no open project available to kill persistent terminal session for terminal {terminal_id}"
-            );
-            self.show_terminal_close_error(terminal_id, cx);
-            return;
-        };
-
         let is_active = self
             .active_entry
             .as_ref()

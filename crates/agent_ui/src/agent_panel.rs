@@ -2138,7 +2138,7 @@ impl AgentPanel {
         );
     }
 
-    fn is_terminal_spawn_pending(&self, terminal_id: TerminalId) -> bool {
+    pub fn is_terminal_spawn_pending(&self, terminal_id: TerminalId) -> bool {
         self.pending_terminal_spawns.contains(&terminal_id)
             || self.closed_terminal_spawns.contains(&terminal_id)
     }
