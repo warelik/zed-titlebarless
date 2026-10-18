@@ -609,6 +609,24 @@ fn workspace_has_terminal_metadata_except(
         .any(|terminal| except_terminal_id != Some(terminal.terminal_id))
 }
 
+fn begin_terminal_close(terminal_id: TerminalId, cx: &mut App) -> bool {
+    TerminalThreadMetadataStore::try_global(cx).is_some_and(|store| {
+        store.update(cx, |store, _| store.begin_intentional_close(terminal_id))
+    })
+}
+
+fn complete_terminal_close_metadata(
+    terminal_id: TerminalId,
+    succeeded: bool,
+    cx: &mut App,
+) {
+    if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+        store.update(cx, |store, cx| {
+            store.complete_intentional_close(terminal_id, succeeded, cx)
+        });
+    }
+}
+
 #[derive(Clone)]
 struct WorkspaceMenuWorktreeLabel {
     icon: Option<IconName>,
@@ -5223,14 +5241,14 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) {
         let terminal_id = metadata.terminal_id;
-        let should_kill_persistent_session = match workspace {
-            ThreadEntryWorkspace::Open(workspace) => workspace
-                .read(cx)
-                .panel::<AgentPanel>(cx)
-                .and_then(|panel| panel.read(cx).terminal_session_may_exist(terminal_id, cx))
-                .unwrap_or(true),
-            ThreadEntryWorkspace::Closed { .. } => true,
+        let terminal_panel = match workspace {
+            ThreadEntryWorkspace::Open(workspace) => workspace.read(cx).panel::<AgentPanel>(cx),
+            ThreadEntryWorkspace::Closed { .. } => None,
         };
+        let should_kill_persistent_session = terminal_panel.as_ref()
+            .and_then(|panel| panel.read(cx).terminal_session_may_exist(terminal_id, cx))
+            .unwrap_or(true);
+        let close_window_id = window.window_handle().window_id();
         let project = match workspace {
             ThreadEntryWorkspace::Open(workspace) => Some(workspace.read(cx).project().clone()),
             ThreadEntryWorkspace::Closed { .. } => {
@@ -5292,23 +5310,46 @@ impl Sidebar {
         let roots_to_archive = roots_to_archive.clone();
 
         if workspaces_to_remove.is_empty() {
+            let (mut guard, item_ids) = Self::guard_archived_worktree_items(
+                &mixed_item_targets, &mixed_workspaces, window, cx,
+            );
             cx.spawn_in(window, async move |this, cx| {
                 if !Self::consent_to_close_archived_worktree_items(&mixed_item_targets, cx).await? {
                     return anyhow::Ok(());
                 }
-                let (guard, item_ids) = cx.update(|window, cx| {
-                    Self::guard_archived_worktree_items(
-                        &mixed_item_targets,
-                        &mixed_workspaces,
-                        window,
-                        cx,
-                    )
-                })?;
+                if !gpui::AsyncApp::update(cx, |cx| {
+                    guard.accept_consent(cx)
+                        && Self::archived_worktree_item_membership_matches(&item_ids, cx)
+                }) {
+                    return anyhow::Ok(());
+                }
+                if !gpui::AsyncApp::update(cx, |cx| begin_terminal_close(terminal_id, cx)) {
+                    return anyhow::Ok(());
+                }
+                let should_kill_persistent_session = if let Some(panel) = terminal_panel {
+                    let pending = panel.update(cx, |panel, cx| {
+                        panel.wait_for_terminal_spawn(terminal_id, close_window_id, cx)
+                    });
+                    match pending.await {
+                        Ok(may_exist) => may_exist,
+                        Err(error) => {
+                            gpui::AsyncApp::update(cx, |cx| complete_terminal_close_metadata(terminal_id, false, cx));
+                            return Err(error);
+                        }
+                    }
+                } else { should_kill_persistent_session };
+                if gpui::AsyncApp::update(cx, |cx| guard.changed(cx)
+                    || !Self::archived_worktree_item_membership_matches(&item_ids, cx)) {
+                    gpui::AsyncApp::update(cx, |cx| complete_terminal_close_metadata(terminal_id, false, cx));
+                    return anyhow::Ok(());
+                }
+
                 if should_kill_persistent_session {
                     let kill = project.update(cx, |project, cx| {
                         project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
                     });
                     if let Err(error) = kill.await {
+                        gpui::AsyncApp::update(cx, |cx| complete_terminal_close_metadata(terminal_id, false, cx));
                         log::error!(
                             "failed to kill persistent terminal session for terminal {terminal_id}: {error:#}"
                         );
@@ -5316,6 +5357,7 @@ impl Sidebar {
                         return anyhow::Ok(());
                     }
                 }
+                gpui::AsyncApp::update(cx, |cx| complete_terminal_close_metadata(terminal_id, true, cx));
                 this.update_in(cx, |this, window, cx| {
                     let cleanup_is_safe = !guard.changed(cx)
                         && Self::archived_worktree_item_membership_matches(&item_ids, cx);
@@ -5345,9 +5387,11 @@ impl Sidebar {
         };
         let sidebar = cx.weak_entity();
         let consent_targets = mixed_item_targets.clone();
-        let consent_mixed_workspaces = mixed_workspaces.clone();
+        let consent_guard = Self::guard_archived_worktree_items(
+            &consent_targets, &mixed_workspaces, window, cx,
+        );
         let kill_succeeded = Rc::new(Cell::new(false));
-        let close_guard = Rc::new(RefCell::new(None));
+        let close_guard = Rc::new(RefCell::new(Some(consent_guard)));
         let callback_kill_succeeded = kill_succeeded.clone();
         let callback_close_guard = close_guard.clone();
         let remove_task = multi_workspace.update(cx, |multi_workspace, cx| {
@@ -5360,20 +5404,45 @@ impl Sidebar {
                     {
                         return Ok(false);
                     }
-                    let guard = cx.update(|window, cx| {
-                        Self::guard_archived_worktree_items(
-                            &consent_targets,
-                            &consent_mixed_workspaces,
-                            window,
-                            cx,
-                        )
-                    })?;
-                    *callback_close_guard.borrow_mut() = Some(guard);
+                    if !gpui::AsyncApp::update(cx, |cx| {
+                        let mut guard = callback_close_guard.borrow_mut();
+                        let Some((guard, item_ids)) = guard.as_mut() else { return false };
+                        guard.accept_consent(cx)
+                            && Self::archived_worktree_item_membership_matches(item_ids, cx)
+                    }) {
+                        return Ok(false);
+                    }
+                    if !gpui::AsyncApp::update(cx, |cx| begin_terminal_close(terminal_id, cx)) {
+                        return Ok(false);
+                    }
+                    let should_kill_persistent_session = if let Some(panel) = terminal_panel {
+                        let pending = panel.update(cx, |panel, cx| {
+                            panel.wait_for_terminal_spawn(terminal_id, close_window_id, cx)
+                        });
+                        match pending.await {
+                            Ok(may_exist) => may_exist,
+                            Err(error) => {
+                                gpui::AsyncApp::update(cx, |cx| complete_terminal_close_metadata(terminal_id, false, cx));
+                                return Err(error);
+                            }
+                        }
+                    } else { should_kill_persistent_session };
+                    let safe_to_stop = gpui::AsyncApp::update(cx, |cx| {
+                        let guard = callback_close_guard.borrow();
+                        let Some((guard, item_ids)) = guard.as_ref() else { return false };
+                        !guard.changed(cx) && Self::archived_worktree_item_membership_matches(item_ids, cx)
+                    });
+                    if !safe_to_stop {
+                        gpui::AsyncApp::update(cx, |cx| complete_terminal_close_metadata(terminal_id, false, cx));
+                        return Ok(false);
+                    }
+
                     if should_kill_persistent_session {
                         let kill = project.update(cx, |project, cx| {
                             project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
                         });
                         if let Err(error) = kill.await {
+                            gpui::AsyncApp::update(cx, |cx| complete_terminal_close_metadata(terminal_id, false, cx));
                             log::error!(
                                 "failed to kill persistent terminal session for terminal {terminal_id}: {error:#}"
                             );
@@ -5383,6 +5452,7 @@ impl Sidebar {
                             return Err(error);
                         }
                     }
+                    gpui::AsyncApp::update(cx, |cx| complete_terminal_close_metadata(terminal_id, true, cx));
                     callback_kill_succeeded.set(true);
                     let cleanup_is_safe = cx.update(|_, cx| {
                         let guard = callback_close_guard.borrow();
@@ -5746,7 +5816,10 @@ impl Sidebar {
                 (workspace, item_ids)
             })
             .collect();
-        (ItemCloseGuard::new(items, window, cx), workspaces)
+        (
+            ItemCloseGuard::new(items, window, cx),
+            workspaces,
+        )
     }
 
     fn archived_worktree_item_membership_matches(

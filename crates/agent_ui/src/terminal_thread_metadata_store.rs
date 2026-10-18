@@ -178,6 +178,8 @@ pub struct TerminalThreadMetadataStore {
     pending_terminal_ops_tx: async_channel::Sender<DbOperation>,
     _db_operations_task: Task<()>,
     deleted_terminal_ids: HashSet<TerminalId>,
+    closing_terminal_ids: HashSet<TerminalId>,
+    intentionally_closed_terminal_ids: HashSet<TerminalId>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -300,9 +302,43 @@ impl TerminalThreadMetadataStore {
     }
 
     pub fn save(&mut self, metadata: TerminalThreadMetadata, cx: &mut Context<Self>) {
+        if self.closing_terminal_ids.contains(&metadata.terminal_id)
+            || self.intentionally_closed_terminal_ids.contains(&metadata.terminal_id)
+        {
+            return;
+        }
         self.deleted_terminal_ids.remove(&metadata.terminal_id);
         self.save_internal(metadata);
         cx.notify();
+    }
+
+    pub fn begin_intentional_close(&mut self, terminal_id: TerminalId) -> bool {
+        !self.intentionally_closed_terminal_ids.contains(&terminal_id)
+            && self.closing_terminal_ids.insert(terminal_id)
+    }
+
+    pub fn is_intentionally_closing(&self, terminal_id: TerminalId) -> bool {
+        self.closing_terminal_ids.contains(&terminal_id)
+    }
+
+    pub fn is_restore_blocked(&self, terminal_id: TerminalId) -> bool {
+        self.closing_terminal_ids.contains(&terminal_id)
+            || self.intentionally_closed_terminal_ids.contains(&terminal_id)
+    }
+
+    pub fn complete_intentional_close(
+        &mut self,
+        terminal_id: TerminalId,
+        succeeded: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.closing_terminal_ids.remove(&terminal_id);
+        if succeeded {
+            self.intentionally_closed_terminal_ids.insert(terminal_id);
+            self.delete(terminal_id, cx);
+        } else {
+            cx.notify();
+        }
     }
 
     pub fn rename_terminal(
@@ -503,6 +539,8 @@ impl TerminalThreadMetadataStore {
             terminals_by_paths: HashMap::default(),
             terminals_by_main_paths: HashMap::default(),
             deleted_terminal_ids: HashSet::default(),
+            closing_terminal_ids: HashSet::default(),
+            intentionally_closed_terminal_ids: HashSet::default(),
             reload_task: None,
             pending_terminal_ops_tx: tx,
             _db_operations_task,
@@ -757,6 +795,34 @@ mod tests {
             remote_connection: None,
             working_directory: None,
         }
+    }
+
+    #[gpui::test]
+    async fn test_intentional_close_blocks_restore_and_tombstones_stale_snapshots(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let metadata = metadata("Closing", WorktreePaths::default());
+        let terminal_id = metadata.terminal_id;
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(metadata.clone(), cx);
+                assert!(store.begin_intentional_close(terminal_id));
+                assert!(store.is_intentionally_closing(terminal_id));
+                store.save(metadata.clone(), cx);
+                store.complete_intentional_close(terminal_id, false, cx);
+                assert!(!store.is_intentionally_closing(terminal_id));
+                assert!(store.begin_intentional_close(terminal_id));
+                store.complete_intentional_close(terminal_id, true, cx);
+                assert!(store.is_restore_blocked(terminal_id));
+                assert!(!store.begin_intentional_close(terminal_id));
+                store.save(metadata, cx);
+                assert!(
+                    store.entry(terminal_id).is_none(),
+                    "a stale restore snapshot must not resurrect an intentionally closed terminal"
+                );
+            });
+        });
     }
 
     #[test]
