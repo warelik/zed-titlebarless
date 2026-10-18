@@ -2800,14 +2800,18 @@ impl AgentPanel {
         let observation = gpui::App::observe(cx, &panel, move |panel, cx| {
             if !panel.read(cx).is_terminal_spawn_pending(terminal_id) {
                 if let Some(sender) = completed.borrow_mut().take() {
-                    let _ = sender.send(Ok(()));
+                    if sender.send(Ok(())).is_err() {
+                        log::debug!("Terminal startup waiter {terminal_id} was cancelled before completion notification");
+                    }
                 }
             }
         });
         let closed = gpui::App::on_window_closed(cx, move |_, closed_window| {
             if closed_window == window_id {
                 if let Some(sender) = sender.borrow_mut().take() {
-                    let _ = sender.send(Err(anyhow::anyhow!("terminal window closed during startup")));
+                    if sender.send(Err(anyhow::anyhow!("terminal window closed during startup"))).is_err() {
+                        log::debug!("Terminal startup waiter {terminal_id} was cancelled before window-close notification");
+                    }
                 }
             }
         });
