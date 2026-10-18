@@ -62,11 +62,11 @@ jobs:
           path: gate
           persist-credentials: false
       # Reviewed test data for the owner's upstream-parameter contract, including
-      # the retained identities of two superseded release-profile/target cases.
+      # the retained identities of superseded compiler-override cases.
       # The executable bootstrap gate above remains immutable and independent.
       - uses: actions/checkout@v4
         with:
-          ref: 43865fe5b251090adec4bcacba2ebaf2a9e5a3d4
+          ref: 91e3d6897357992ff2ae60c0665a379fe4eb3259
           path: baseline
           persist-credentials: false
       - name: Require Both Complete Exact-Source Reviews Before Any Tests
