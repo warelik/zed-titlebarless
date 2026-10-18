@@ -1032,19 +1032,15 @@ impl MultiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<bool>> {
-        // The active workspace can remain unpinned while the sidebar is
-        // closed. Pin it first: this puts it in the removal set below, and
-        // keeps `activate`'s retention bookkeeping stable while switching
-        // to the replacement. The project row stays until close consent.
+        // Include the displayed workspace without changing retention before
+        // consent. A cancelled close must not turn a transient view persistent.
         let active_workspace = self.workspace().clone();
+        let mut workspaces = self.workspaces_for_project_group(group_key, cx);
         if active_workspace.read(cx).project_group_key(cx) == *group_key
-            && !self.is_workspace_retained(&active_workspace)
+            && !workspaces.contains(&active_workspace)
         {
-            let index = self.hold(active_workspace, window, cx);
-            self.pin(index, group_key.clone(), cx);
+            workspaces.push(active_workspace);
         }
-
-        let workspaces = self.workspaces_for_project_group(group_key, cx);
 
         if workspaces.is_empty() {
             let previous_len = self.project_groups.len();
