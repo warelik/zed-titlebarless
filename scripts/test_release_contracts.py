@@ -1151,6 +1151,7 @@ class RustRegressionRunnerTests(unittest.TestCase):
             self.assertEqual(path.stat().st_mode & 0o777, 0o700)
 
     def test_debug_assertions_only_enabled_for_selector_regressions(self):
+        """Legacy identity retained; owner requires upstream's one default test profile."""
         key = "CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS"
         with (
             tempfile.TemporaryDirectory() as temporary,
@@ -1160,13 +1161,15 @@ class RustRegressionRunnerTests(unittest.TestCase):
         for selector in ("test_tab_width_bounds",
                          "test_title_bar_to_status_bar_keeps_title_when_status_bar_hidden"):
             commands, test_runs = self.exercise(selector_case=selector)
-            cargo_envs = [env for command, env in commands if command[:2] == ["cargo", "test"]]
-            self.assertNotIn(key, cargo_envs[0])
-            self.assertEqual(cargo_envs[1][key], "true")
-            self.assertNotIn(key, next(env for command, env in test_runs
-                                       if command[2] == "tests::test_historical"))
-            self.assertIn(key, next(env for command, env in test_runs
-                                    if command[2] == "tests::" + selector))
+            cargo = [(command, env) for command, env in commands
+                     if command[:2] == ["cargo", "test"]]
+            self.assertEqual(len(cargo), 1)
+            self.assertNotIn("--release", cargo[0][0])
+            self.assertNotIn("--profile", cargo[0][0])
+            self.assertNotIn(key, cargo[0][1])
+            self.assertTrue(all(key not in env for _, env in test_runs))
+            self.assertIn("tests::" + selector, {command[2] for command, _ in test_runs})
+            self.assertIn("tests::test_historical", {command[2] for command, _ in test_runs})
 
     def exercise(
         self,
@@ -1175,6 +1178,7 @@ class RustRegressionRunnerTests(unittest.TestCase):
         listing=None,
         binary_outside=False,
         selector_case=False,
+        instrumentation=True,
         result_output="test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out",
         result_code=0,
     ):
@@ -1244,15 +1248,14 @@ class RustRegressionRunnerTests(unittest.TestCase):
                     ]
                     return json.dumps({"packages": packages})
                 if args[:2] == ["cargo", "test"] and "--no-run" in args:
-                    package_id = ("workspace-id" if "workspace" in args else
-                                  "auto-update-id")
-                    artifact = {
+                    return "".join(json.dumps({
                         "reason": "compiler-artifact",
                         "package_id": package_id,
-                        "profile": {"test": True},
+                        "profile": {"test": True, "debug_assertions": instrumentation},
                         "executable": str(binary),
-                    }
-                    return json.dumps(artifact) + "\n"
+                    }) + "\n" for package, package_id in (
+                        ("workspace", "workspace-id"), ("auto_update", "auto-update-id"))
+                        if package in args)
                 if args[0] == str(binary) and args[1:3] == ["--list", "--format"]:
                     return listing
                 raise AssertionError(f"unexpected captured command: {args}")
@@ -1274,6 +1277,10 @@ class RustRegressionRunnerTests(unittest.TestCase):
             ):
                 release.run_regressions(app, manifest, upstream, candidate)
             return commands, test_runs
+
+    def test_missing_selector_instrumentation_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "selector instrumentation"):
+            self.exercise(selector_case=True, instrumentation=False)
 
     def test_unions_preserved_and_added_cases_with_isolated_credentials(self):
         commands, test_runs = self.exercise()
@@ -1603,3 +1610,103 @@ class PublishedAssetVerificationTests(unittest.TestCase):
                     identity["patchset_sha256"],
                     identity["version"],
                 )
+
+
+class UpstreamCompilerRecipeTests(unittest.TestCase):
+    def fixture(self, app):
+        workflow = ("jobs:\n  run_tests_mac:\n    steps:\n"
+                    "      - run: cargo nextest run --workspace --no-fail-fast --no-tests=warn\n"
+                    "      - run: cp ./.cargo/ci-config.toml ./../.cargo/config.toml\n"
+                    "  bundle_mac_aarch64:\n    env:\n      CARGO_INCREMENTAL: 0\n"
+                    "    steps:\n      - run: ./script/bundle-mac aarch64-apple-darwin\n")
+        originals = {
+            ".cargo/config.toml": '[env]\nMACOSX_DEPLOYMENT_TARGET = "10.15.7"\n',
+            ".cargo/ci-config.toml": '[profile.dev]\ndebug = "limited"\n',
+            ".cargo/bundle-config.toml": "# unchanged upstream bundle config\n",
+            "rust-toolchain.toml": '[toolchain]\nchannel = "stable"\n',
+            "script/bundle-mac": "cargo --config .cargo/bundle-config.toml build --release\n",
+            ".github/workflows/release.yml": workflow,
+            "Cargo.toml": '[profile.release]\nlto = "thin"\ncodegen-units = 1\n',
+        }
+        for relative, content in originals.items():
+            path = app / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        def capture(args, *, cwd, env):
+            self.assertEqual(args[:2], ["git", "show"])
+            self.assertEqual(cwd, app)
+            self.assertTrue(args[2].startswith("b" * 40 + ":"))
+            return originals[args[2].split(":", 1)[1]]
+        return originals, capture
+
+    def test_matching_upstream_recipe_needs_no_compilation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary) / "app"
+            _, capture = self.fixture(app)
+            with patch.object(release, "capture", side_effect=capture):
+                release.verify_upstream_recipes(app, "b" * 40)
+
+    def test_profile_and_recipe_drift_are_rejected_before_cargo(self):
+        for relative in ("Cargo.toml", ".cargo/ci-config.toml", "script/bundle-mac"):
+            with self.subTest(path=relative), tempfile.TemporaryDirectory() as temporary:
+                app = Path(temporary) / "app"
+                _, capture = self.fixture(app)
+                path = app / relative
+                if relative == "Cargo.toml":
+                    path.write_text(path.read_text().replace('lto = "thin"', 'lto = "fat"'))
+                else:
+                    path.write_text(path.read_text() + "# downstream compiler override\n")
+                with patch.object(release, "capture", side_effect=capture):
+                    with self.assertRaisesRegex(ValueError, "differs|differ"):
+                        release.verify_upstream_recipes(app, "b" * 40)
+
+    def test_changed_upstream_test_profile_requires_porting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary) / "app"
+            originals, capture = self.fixture(app)
+            relative = ".github/workflows/release.yml"
+            originals[relative] = originals[relative].replace("cargo nextest run --workspace", "cargo nextest run --release --workspace")
+            (app / relative).write_text(originals[relative])
+            with patch.object(release, "capture", side_effect=capture):
+                with self.assertRaisesRegex(ValueError, "test recipe changed"):
+                    release.verify_upstream_recipes(app, "b" * 40)
+
+    def test_upstream_parent_configuration_is_scoped_and_existing_data_survives(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary) / "app"
+            self.fixture(app)
+            parent = app.parent / ".cargo"
+            with release.upstream_test_configuration(app):
+                self.assertEqual((parent / "config.toml").read_bytes(), (app / ".cargo/ci-config.toml").read_bytes())
+            self.assertFalse(parent.exists())
+            parent.mkdir()
+            sentinel = parent / "config.toml"
+            sentinel.write_text("existing shared configuration")
+            with self.assertRaises(FileExistsError):
+                with release.upstream_test_configuration(app):
+                    self.fail("must not enter with an existing parent configuration")
+            self.assertEqual(sentinel.read_text(), "existing shared configuration")
+
+    def test_recipe_failure_never_starts_regressions(self):
+        with (patch.dict(os.environ, {"UPSTREAM_SHA": "b" * 40, "CANDIDATE_SHA": "c" * 40}),
+              patch.object(release, "verify_upstream_recipes", side_effect=ValueError("recipe drift")),
+              patch.object(release, "run_regressions") as regressions):
+            with self.assertRaisesRegex(ValueError, "recipe drift"):
+                release.test_patches(Path("/unused-app"))
+            regressions.assert_not_called()
+
+    def test_host_compiler_overrides_are_not_forwarded(self):
+        injected = {"CARGO_PROFILE_RELEASE_LTO": "fat", "CARGO_PROFILE_DEV_CODEGEN_UNITS": "1",
+                    "CARGO_PROFILE_RELEASE_DEBUG": "none", "RUSTFLAGS": "-C lto=fat",
+                    "CARGO_INCREMENTAL": "0", "CARGO_BUILD_TARGET": "x86_64-apple-darwin"}
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, injected):
+            environment = release.isolated_environment(Path(temporary))
+            self.assertFalse(injected.keys() & environment.keys())
+
+    def test_cancelled_workflows_cannot_continue_expensive_or_publishing_jobs(self):
+        text = (release.ROOT / ".github/workflows/release.yml").read_text()
+        for name in ("test", "publish", "prepare", "repair"):
+            import re
+            block = re.search(rf"(?ms)^  {name}:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", text)[1]
+            condition = block.split("    if:", 1)[1].split("    runs-on:", 1)[0]
+            self.assertIn("!cancelled()", condition)

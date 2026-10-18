@@ -193,7 +193,7 @@ jobs:
       (github.event_name == 'pull_request_target' &&
        github.event.pull_request.base.ref == 'downstream' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
-       startsWith(github.event.pull_request.head.ref, 'repair/')))))
+       startsWith(github.event.pull_request.head.ref, 'repair/'))))) && !cancelled()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -298,7 +298,7 @@ jobs:
       needs.prepare.outputs.ready == 'true' &&
       needs.prepare.outputs.policy_verified != 'true' &&
       !(needs.bootstrap-policy.result == 'success' &&
-        needs.prepare.outputs.candidate_config == needs.bootstrap-policy.outputs.policy_ref)
+        needs.prepare.outputs.candidate_config == needs.bootstrap-policy.outputs.policy_ref) && !cancelled()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -323,7 +323,7 @@ jobs:
       needs.prepare.outputs.ready == 'true' &&
       needs.prepare.outputs.already_published != 'true' &&
       needs.activate-policy.result == 'success' &&
-      (needs.prepare.outputs.repair_pr == '' || needs.land.result == 'success')
+      (needs.prepare.outputs.repair_pr == '' || needs.land.result == 'success') && !cancelled()
     runs-on: macos-15
     timeout-minutes: 355
     env:
@@ -346,6 +346,8 @@ jobs:
           ref: ${{ needs.activate-policy.outputs.policy_ref }}
           path: trusted
           persist-credentials: false
+      - name: Verify The Selected Upstream Compiler Recipes
+        run: python3 trusted/scripts/release.py check-upstream-recipe "$GITHUB_WORKSPACE/app"
       - name: Free Space On The Disposable macOS Runner
         run: |
           df -h /
@@ -369,7 +371,7 @@ jobs:
   publish:
     name: Recheck Review And Publish Without Restarting Editors
     needs: [prepare, test, land, activate-policy]
-    if: always() && needs.prepare.result == 'success' && needs.test.result == 'success'
+    if: always() && needs.prepare.result == 'success' && needs.test.result == 'success' && !cancelled()
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -409,7 +411,7 @@ jobs:
       always() && needs.prepare.result == 'success' &&
       needs.prepare.outputs.ready == 'true' &&
       needs.prepare.outputs.repair_pr != '' &&
-      needs.activate-policy.result == 'success'
+      needs.activate-policy.result == 'success' && !cancelled()
     outputs:
       config: ${{ steps.adopt.outputs.config }}
     runs-on: ubuntu-24.04
@@ -465,7 +467,7 @@ jobs:
       always() && needs.prepare.result == 'success' && needs.prepare.outputs.ready == 'true' &&
       (needs.policy-check.result == 'success' || needs.prepare.outputs.policy_verified == 'true' ||
        (needs.bootstrap-policy.result == 'success' &&
-        needs.prepare.outputs.candidate_config == needs.bootstrap-policy.outputs.policy_ref))
+        needs.prepare.outputs.candidate_config == needs.bootstrap-policy.outputs.policy_ref)) && !cancelled()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -519,7 +521,7 @@ jobs:
       ((vars.ZED_TRUSTED_POLICY != '' || needs.bootstrap-policy.result == 'success') ||
        needs.bootstrap-policy.outputs.validation_started == 'true') &&
       !(needs.bootstrap-policy.result == 'failure' &&
-        needs.bootstrap-policy.outputs.validation_started != 'true')
+        needs.bootstrap-policy.outputs.validation_started != 'true') && !cancelled()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

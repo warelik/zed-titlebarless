@@ -245,10 +245,12 @@ class BatchedReviewTests(unittest.TestCase):
         self.assertIn("actual final check failure", escalate.call_args.args[3])
 
     def test_final_macos_tests_share_the_shipped_build_target(self):
+        # Legacy identity retained: forcing a test target differs from upstream CI.
         with (tempfile.TemporaryDirectory() as directory,
-              patch.object(release.sys, "platform", "darwin")):
+              patch.object(release.sys, "platform", "darwin"),
+              patch.dict(os.environ, {"CARGO_BUILD_TARGET": "x86_64-apple-darwin"})):
             environment = release.isolated_environment(Path(directory))
-        self.assertEqual(environment["CARGO_BUILD_TARGET"], "aarch64-apple-darwin")
+        self.assertNotIn("CARGO_BUILD_TARGET", environment)
 
     def test_adoption_cannot_change_reviewed_executable_files(self):
         reviewed, adopted = "a" * 40, "b" * 40
@@ -329,7 +331,7 @@ class BatchedReviewTests(unittest.TestCase):
         self.assertIn("if policy != os.environ['GITHUB_SHA']:", bootstrap)
         self.assertIn("if base != shipped_config:", bootstrap)
         self.assertIn("gate.asset_bytes(repo, assets['provenance.json'])", bootstrap)
-        self.assertIn("ref: 71d0f4314a4a9fadc9d404f6879586f6be2d93ae", bootstrap)
+        self.assertRegex(bootstrap, r"ref: [0-9a-f]{40}\n\s+path: baseline")
         self.assertIn("/baseline/scripts /candidate/scripts", bootstrap)
         self.assertIn("target=/baseline,readonly", bootstrap)
         self.assertIn('sys.path.insert(0,"/candidate/scripts");import release', bootstrap)
@@ -392,6 +394,76 @@ class BatchedReviewTests(unittest.TestCase):
                 "body": f"patch SHA-256: `{patchset}`"}
         with patch.object(release, "pages", return_value=[pull]):
             self.assertEqual(release.active_snapshot("maintainer/zed-fork", patchset), sha)
+
+
+
+
+class FinalRetryAuthorizationTests(unittest.TestCase):
+    repo = "maintainer/zed-fork"
+    application = "a" * 40
+    configuration = "c" * 40
+
+    def comments(self):
+        owner = {"login": "maintainer", "type": "User"}
+        records = [{"id": n, "user": {"login": "github-actions[bot]", "type": "Bot"},
+                    "body": f"Final validation and single build of `{self.application}` / `{'b' * 40}`: "
+                            f"https://github.com/{self.repo}/actions/runs/{n}\n"
+                            f"<!-- zed-final:{self.application} -->"}
+                   for n in (41, 42)]
+        records.append({"id": 100, "user": owner, "created_at": "2026-10-18T17:10:00Z",
+                        "body": f"Owner explicitly granted one additional final attempt.\n"
+                                f"<!-- zed-final-retry:{self.application}:{self.configuration}:42 -->"})
+        return records
+
+    def stopped_run(self):
+        return {"status": "completed", "conclusion": "cancelled",
+                "path": ".github/workflows/release.yml", "updated_at": "2026-10-18T17:09:00Z"}
+
+    def test_owner_grant_is_exact_and_bound_to_latest_stopped_run(self):
+        with patch.object(release, "api", return_value=self.stopped_run()) as api:
+            self.assertEqual(release.final_retry_authorization(
+                self.repo, self.application, self.configuration, self.comments()), 100)
+            api.assert_called_once_with(f"repos/{self.repo}/actions/runs/42")
+
+    def test_ordinary_callbacks_wrong_candidates_and_stale_grants_stay_blocked(self):
+        for mutation in ("bot", "wrong-config", "earlier-run", "before-stop", "missing-run"):
+            with self.subTest(mutation=mutation):
+                comments = self.comments()
+                if mutation == "bot": comments[-1]["user"] = {"login": "github-actions[bot]", "type": "Bot"}
+                elif mutation == "wrong-config": comments[-1]["body"] = comments[-1]["body"].replace(self.configuration, "d" * 40)
+                elif mutation == "earlier-run": comments[-1]["body"] = comments[-1]["body"].replace(":42 -->", ":41 -->")
+                elif mutation == "before-stop": comments[-1]["created_at"] = "2026-10-18T17:08:00Z"
+                else: comments[0]["body"] = f"<!-- zed-final:{self.application} -->"
+                with patch.object(release, "api", return_value=self.stopped_run()):
+                    self.assertIsNone(release.final_retry_authorization(
+                        self.repo, self.application, self.configuration, comments))
+
+    def test_live_successful_or_wrong_workflow_runs_cannot_supply_a_grant(self):
+        for changes in ({"status": "in_progress"}, {"conclusion": "success"}, {"path": ".github/workflows/other.yml"}):
+            with self.subTest(changes=changes), patch.object(release, "api", return_value=self.stopped_run() | changes):
+                self.assertIsNone(release.final_retry_authorization(
+                    self.repo, self.application, self.configuration, self.comments()))
+
+    def test_grant_is_consumed_by_one_complete_candidate_receipt(self):
+        comments = self.comments()
+        posted = []
+        def api(path, *, method="GET", data=None, **kwargs):
+            if method == "GET": return self.stopped_run()
+            self.assertEqual(method, "POST")
+            posted.append(data)
+            comments.append({"id": 101, "user": {"login": "github-actions[bot]", "type": "Bot"}, **data})
+            return {"id": 101}
+        with (patch.object(release, "pages", side_effect=lambda _: list(comments)),
+              patch.object(release, "api", side_effect=api),
+              patch.object(release, "unspent_heavy_attempt", return_value=None),
+              patch.object(release, "output"),
+              patch.dict(os.environ, {"GITHUB_RUN_ID": "43", "GITHUB_SHA": self.configuration})):
+            release.final_attempt(self.repo, 69, self.application, self.configuration)
+            with self.assertRaisesRegex(ValueError, "already started"):
+                release.final_attempt(self.repo, 69, self.application, self.configuration)
+        self.assertEqual(len(posted), 1)
+        self.assertIn("<!-- zed-final-retry-used:100 -->", posted[0]["body"])
+        self.assertIn(f"<!-- zed-final:{self.application}:{self.configuration} -->", posted[0]["body"])
 
 
 if __name__ == "__main__":

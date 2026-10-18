@@ -1,5 +1,6 @@
 import argparse
 import base64
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import io
@@ -305,12 +306,50 @@ def unspent_heavy_attempt(repo, sha, body):
         return None
     return configuration[1]
 
+def final_retry_authorization(repo, sha, config, comments):
+    """An owner may grant one exact new candidate a further expensive attempt."""
+    receipts = []
+    grants = []
+    for item in comments:
+        user, body = item.get("user") or {}, item.get("body") or ""
+        if user.get("login") not in {repo.split('/')[0], "github-actions[bot]"}:
+            continue
+        if (f"<!-- zed-final:{sha} -->" in body
+                or re.search(rf"<!-- zed-final:{sha}:[0-9a-f]{{40}} -->", body)):
+            if f"<!-- zed-final:{sha}:{config} -->" in body:
+                return None  # An authorization never reruns its complete candidate.
+            recorded = re.search(rf"https://github\.com/{re.escape(repo)}/actions/runs/([1-9][0-9]*)", body)
+            if not recorded:
+                return None  # Unknown historical attempts stay blocked.
+            receipts.append(int(recorded[1]))
+        if user.get("login") == repo.split('/')[0] and user.get("type") == "User":
+            match = re.search(rf"<!-- zed-final-retry:{sha}:{config}:([1-9][0-9]*) -->", body)
+            if match:
+                grants.append((item, int(match[1])))
+    if not receipts:
+        return None
+    for grant, previous in grants:
+        if previous != max(receipts):
+            continue
+        try:
+            attempt = api(f"repos/{repo}/actions/runs/{previous}")
+        except subprocess.CalledProcessError:
+            continue
+        if (attempt.get("status") == "completed"
+                and attempt.get("conclusion") in {"failure", "cancelled", "timed_out"}
+                and attempt.get("path") == ".github/workflows/release.yml"
+                and (grant.get("created_at") or "") > (attempt.get("updated_at") or "z")):
+            return grant["id"]
+    return None
+
+
 def final_attempt(repo, pr, sha, config, *, policy_only=False):
     """Deduplicate complete candidates; never repeat an app's started heavy pass."""
     identity = f"policy-{config}" if policy_only else f"{sha}:{config}"
     marker = f"<!-- zed-final:{identity} -->"
     application_marker = f"<!-- zed-final:{sha} -->"
     comments = pages(f"repos/{repo}/issues/{pr}/comments")
+    authorization = None if policy_only else final_retry_authorization(repo, sha, config, comments)
     for item in comments:
         user = item.get("user") or {}
         body = item.get("body") or ""
@@ -327,6 +366,8 @@ def final_attempt(repo, pr, sha, config, *, policy_only=False):
             old_configuration = unspent_heavy_attempt(repo, sha, body)
             if old_configuration and old_configuration != config:
                 continue
+            if authorization is not None and marker not in body:
+                continue
             output(final_failed=old_configuration is None)
         recorded = re.search(rf"https://github\.com/{re.escape(repo)}/actions/runs/[1-9][0-9]*", body)
         raise ValueError("Final validation was already started for this frozen candidate; "
@@ -339,7 +380,8 @@ def final_attempt(repo, pr, sha, config, *, policy_only=False):
                  "Both reviews and the full repair batch are complete. A failure blocks "
                  "publication and automatic expensive retries.\n\n" + marker
                  + ("\n" + application_marker if not policy_only else "")
-                 + f"\n<!-- zed-final-workflow:{revision} -->")})
+                  + f"\n<!-- zed-final-workflow:{revision} -->"
+                  + (f"\n<!-- zed-final-retry-used:{authorization} -->" if authorization is not None else ""))})
 
 def verify_adopted_configuration(repo, reviewed, adopted):
     """Only context removal and additive regression discovery may change at adoption."""
@@ -1298,12 +1340,16 @@ def require_debug_info(path, env):
 
 def test_patches(app):
     manifest = json.loads((ROOT / "patches/source.json").read_text())
-    run_regressions(app, manifest, os.environ["UPSTREAM_SHA"], os.environ["CANDIDATE_SHA"])
+    upstream = os.environ["UPSTREAM_SHA"]
+    verify_upstream_recipes(app, upstream)
+    with upstream_test_configuration(app):
+        run_regressions(app, manifest, upstream, os.environ["CANDIDATE_SHA"])
 
 def build(app):
     if sys.platform != "darwin":
         raise ValueError("The shipped macOS application must be built and inspected on macOS")
     identity = build_identity()
+    verify_upstream_recipes(app, identity["upstream_sha"])
     if run("git", "rev-parse", "HEAD", cwd=app) != identity["candidate_sha"]:
         raise ValueError("Build checkout differs from the reviewed candidate")
     run("git", "diff", "--exit-code", "HEAD", "--", cwd=app)
@@ -1314,7 +1360,7 @@ def build(app):
     target = app / "target/aarch64-apple-darwin/release"
     with tempfile.TemporaryDirectory(prefix="zed-build-") as temporary:
         env = isolated_environment(Path(temporary))
-        env.update(ZED_UPDATE_MANIFEST_URL=(
+        env.update(CARGO_INCREMENTAL="0", ZED_UPDATE_MANIFEST_URL=(
             f"https://github.com/{identity['repository']}/releases/latest/download/latest.json"),
             ZED_DOWNSTREAM_RELEASE_ID=str(identity["release_id"]),
             ZED_COMMIT_SHA=identity["candidate_sha"])
@@ -1697,12 +1743,15 @@ def publish(directory):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=(
-        "prepare", "test", "build", "publish", "repair", "check-policy", "land"))
+        "prepare", "test", "build", "publish", "repair", "check-policy", "land",
+        "check-upstream-recipe"))
     parser.add_argument("directory", type=Path)
     args = parser.parse_args()
     commands = {"prepare": prepare, "test": test_patches, "build": build,
                 "publish": publish, "repair": request_repair,
-                "check-policy": check_policy, "land": land_repair}
+                "check-policy": check_policy, "land": land_repair,
+                "check-upstream-recipe": lambda app: verify_upstream_recipes(
+                    app, os.environ["UPSTREAM_SHA"])}
     commands[args.command](args.directory.resolve())
 
 def complete_adoption(repo, state, commit):
@@ -1845,6 +1894,54 @@ def manifest_cases(manifest):
         raise ValueError("No preserved Rust regressions")
     return cases
 
+def verify_upstream_recipes(app, upstream):
+    """Reject compiler-recipe drift before running Cargo, using the selected SHA."""
+    if not SHA.fullmatch(upstream):
+        raise ValueError("Upstream recipe requires an exact commit")
+    originals = {}
+    for relative in (".cargo/config.toml", ".cargo/ci-config.toml",
+                     ".cargo/bundle-config.toml", "rust-toolchain.toml",
+                     "script/bundle-mac", ".github/workflows/release.yml"):
+        original = capture(["git", "show", f"{upstream}:{relative}"], cwd=app, env=None)
+        path = app / relative
+        if path.is_symlink() or not path.is_file() or path.read_text() != original:
+            raise ValueError(f"Compiler recipe differs from selected upstream: {relative}")
+        originals[relative] = original
+    original = tomllib.loads(capture(
+        ["git", "show", f"{upstream}:Cargo.toml"], cwd=app, env=None))
+    if tomllib.loads((app / "Cargo.toml").read_text()).get("profile") != original.get("profile"):
+        raise ValueError("Cargo profiles differ from selected upstream")
+    workflow = originals[".github/workflows/release.yml"]
+    def job(name):
+        match = re.search(rf"(?ms)^  {name}:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", workflow)
+        if not match:
+            raise ValueError(f"Selected upstream has no supported recipe: {name}")
+        return match[1]
+    tests = job("run_tests_mac")
+    if ("run: cargo nextest run --workspace --no-fail-fast --no-tests=warn\n" not in tests
+            or "cp ./.cargo/ci-config.toml ./../.cargo/config.toml" not in tests):
+        raise ValueError("Upstream test recipe changed; port it before compiling")
+    bundle = job("bundle_mac_aarch64")
+    if ("run: ./script/bundle-mac aarch64-apple-darwin\n" not in bundle
+            or "CARGO_INCREMENTAL: 0\n" not in bundle):
+        raise ValueError("Upstream macOS bundle recipe changed; port it before compiling")
+
+
+@contextmanager
+def upstream_test_configuration(app):
+    # Match upstream's parent Cargo configuration and its precedence exactly.
+    directory = app.parent / ".cargo"
+    directory.mkdir()  # Never replace an existing, possibly shared configuration.
+    config = directory / "config.toml"
+    try:
+        config.write_bytes((app / ".cargo/ci-config.toml").read_bytes())
+        yield
+    finally:
+        if config.is_file() and not config.is_symlink():
+            config.unlink()
+        directory.rmdir()
+
+
 def isolated_environment(root):
     keep = ("PATH", "LANG", "LC_ALL", "TZ", "DEVELOPER_DIR", "SDKROOT",
             "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "MACOSX_DEPLOYMENT_TARGET")
@@ -1866,12 +1963,7 @@ def isolated_environment(root):
         path = root / relative
         path.mkdir(mode=0o700, exist_ok=True)
         env[key] = str(path)
-    env.update(CI="true", CARGO_INCREMENTAL="0", CARGO_TERM_COLOR="never",
-               CARGO_PROFILE_RELEASE_DEBUG="line-tables-only")
-    if sys.platform == "darwin":
-        # Match bundle-mac's explicit target so the final tests and shipped build
-        # share Cargo's dependency artifacts instead of compiling two target trees.
-        env["CARGO_BUILD_TARGET"] = "aarch64-apple-darwin"
+    env.update(CI="true", CARGO_TERM_COLOR="never")
     return env
 
 def capture(args, *, cwd, env):
@@ -1895,13 +1987,6 @@ def run_regressions(app, manifest, upstream, candidate):
         diff = capture(["git", "diff", "--no-ext-diff", "--unified=3", upstream, candidate,
                         "--", "crates"], cwd=app, env=env)
         required = manifest_cases(manifest) | added_cases(diff)
-        debug_cases = required & {
-            ("workspace", "test_tab_width_bounds"),
-            ("workspace", "test_title_bar_to_status_bar"),
-            ("workspace", "test_title_bar_to_status_bar_reserves_traffic_lights"),
-            ("workspace", "test_title_bar_to_status_bar_keeps_title_when_status_bar_hidden"),
-        }
-        case_groups = ((required - debug_cases, False), (debug_cases, True))
         packages = sorted({package for package, _ in required})
         metadata = json.loads(capture(
             ["cargo", "metadata", "--locked", "--no-deps", "--format-version=1"],
@@ -1911,59 +1996,56 @@ def run_regressions(app, manifest, upstream, candidate):
         if set(identities.values()) != set(packages):
             raise ValueError("A preserved regression package is missing")
         selected = set()
-        for cases, debug_assertions in case_groups:
-            if not cases:
-                continue
-            compile_env = env | ({"CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS": "true"}
-                                 if debug_assertions else {})
-            command = ["cargo", "test", "--locked", "--release", "--no-run", "--lib",
-                       "--message-format=json-render-diagnostics"]
-            for package in sorted({package for package, _ in cases}):
-                command.extend(("-p", package))
-            artifacts = capture(command, cwd=app, env=compile_env)
-            binaries = {}
-            for line in artifacts.splitlines():
-                record = json.loads(line)
-                if (record.get("reason") == "compiler-artifact"
-                        and record.get("package_id") in identities
-                        and record.get("profile", {}).get("test") is True
-                        and record.get("executable")):
-                    package = identities[record["package_id"]]
-                    binary = Path(record["executable"]).resolve()
-                    if (not binary.is_file() or binary.is_symlink()
-                            or app.resolve() not in binary.parents):
-                        raise ValueError("Rust test executable is outside the source checkout")
-                    binaries.setdefault(package, set()).add(binary)
-            group_selected = set()
-            for package in sorted({package for package, _ in cases}):
-                available = set()
-                for binary in sorted(binaries.get(package, [])):
-                    listing = capture([str(binary), "--list", "--format", "terse"],
-                                      cwd=app, env=compile_env)
-                    for line in listing.splitlines():
-                        if line.endswith(": test"):
-                            available.add((binary, line.removesuffix(": test")))
-                for _, name in sorted(case for case in cases if case[0] == package):
-                    matches = {(binary, full) for binary, full in available
-                               if full.rsplit("::", 1)[-1] == name}
-                    if not matches:
-                        raise ValueError(f"Preserved Rust regression missing: {package}::{name}")
-                    group_selected.update(matches)
-            for binary, name in sorted(group_selected):
-                print(f"Required Rust regression: {name}", flush=True)
-                try:
-                    result = subprocess.run([str(binary), "--exact", name, "--nocapture"],
-                                            cwd=app, env=compile_env, check=True, text=True,
-                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-                except subprocess.CalledProcessError as error:
-                    print(error.stdout or "", end="", flush=True)
-                    raise
-                print(result.stdout, end="", flush=True)
-                summaries = re.findall(r"(?m)^test result: (.+)$", result.stdout)
-                if not summaries or not summaries[-1].startswith(
-                        "ok. 1 passed; 0 failed; 0 ignored;"):
-                    raise ValueError(f"Rust regression did not actually pass: {name}")
-            selected.update(group_selected)
+        command = ["cargo", "test", "--locked", "--no-run", "--lib",
+                   "--message-format=json-render-diagnostics"]
+        for package in sorted({package for package, _ in required}):
+            command.extend(("-p", package))
+        artifacts = capture(command, cwd=app, env=env)
+        binaries = {}
+        for line in artifacts.splitlines():
+            record = json.loads(line)
+            if (record.get("reason") == "compiler-artifact"
+                    and record.get("package_id") in identities
+                    and record.get("profile", {}).get("test") is True
+                    and record.get("executable")):
+                if record["profile"].get("debug_assertions") is not True:
+                    raise ValueError("Upstream test profile must retain selector instrumentation")
+                package = identities[record["package_id"]]
+                binary = Path(record["executable"]).resolve()
+                if (not binary.is_file() or binary.is_symlink()
+                        or app.resolve() not in binary.parents):
+                    raise ValueError("Rust test executable is outside the source checkout")
+                binaries.setdefault(package, set()).add(binary)
+        group_selected = set()
+        for package in sorted({package for package, _ in required}):
+            available = set()
+            for binary in sorted(binaries.get(package, [])):
+                listing = capture([str(binary), "--list", "--format", "terse"],
+                                  cwd=app, env=env)
+                for line in listing.splitlines():
+                    if line.endswith(": test"):
+                        available.add((binary, line.removesuffix(": test")))
+            for _, name in sorted(case for case in required if case[0] == package):
+                matches = {(binary, full) for binary, full in available
+                           if full.rsplit("::", 1)[-1] == name}
+                if not matches:
+                    raise ValueError(f"Preserved Rust regression missing: {package}::{name}")
+                group_selected.update(matches)
+        for binary, name in sorted(group_selected):
+            print(f"Required Rust regression: {name}", flush=True)
+            try:
+                result = subprocess.run([str(binary), "--exact", name, "--nocapture"],
+                                        cwd=app, env=env, check=True, text=True,
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            except subprocess.CalledProcessError as error:
+                print(error.stdout or "", end="", flush=True)
+                raise
+            print(result.stdout, end="", flush=True)
+            summaries = re.findall(r"(?m)^test result: (.+)$", result.stdout)
+            if not summaries or not summaries[-1].startswith(
+                    "ok. 1 passed; 0 failed; 0 ignored;"):
+                raise ValueError(f"Rust regression did not actually pass: {name}")
+        selected.update(group_selected)
         print(f"Passed all {len(selected)} selected downstream Rust regressions", flush=True)
 
 if __name__ == "__main__":

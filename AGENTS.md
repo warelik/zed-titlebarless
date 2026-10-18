@@ -69,9 +69,19 @@ release maintenance.
 - A failed final check blocks publication and stops automatic expensive retries;
   retain its diagnostics and the working release. Do not hide a failure, skip a
   required check, or silently rebuild a changed candidate under an old approval.
-- Preserve the release-profile regressions and put selector-dependent UI
-  regressions in the debug-assertion subgroup. Do not compile away their selector
-  instrumentation or accept a test whose selector never matched a real element.
+  An additional heavy attempt needs an explicit owner decision recorded on the
+  existing source-review PR for the exact application/configuration and latest
+  stopped run. Agents must never create that authorization without the owner
+  granting it. The receipt is consumed by the ordinary final-candidate guard;
+  changing policy alone never refunds a spent attempt.
+- Use the compiler parameters and Cargo configuration of the exact selected
+  upstream snapshot for each stage: upstream CI test parameters for regressions,
+  upstream macOS bundle parameters for the shipped application. Do not invent
+  profile, LTO, codegen-unit, debug-info, debug-assertion, incremental or target
+  overrides. Test selection and downstream update identity remain fork inputs.
+  Verify recipe parity in executable policy before compilation; a note or review
+  alone is insufficient. If upstream changes its recipe, agents port the recipe
+  before the final attempt. Preserve all regressions and real selector coverage.
 - Keep only one active candidate and one repair task for the selected upstream.
   Reuse existing review/repair context and close superseded PRs after preserving
   their exact commits and findings. Bound retained branches and artifacts; never
