@@ -32,7 +32,7 @@ fn same_terminal_remote_connection(
     }
     match (left, right) {
         (Some(RemoteConnectionOptions::Ssh(left)), Some(RemoteConnectionOptions::Ssh(right))) => {
-            left.args == right.args
+            left.args.as_deref().unwrap_or_default() == right.args.as_deref().unwrap_or_default()
         }
         _ => true,
     }
@@ -1394,6 +1394,20 @@ mod tests {
                 "archive cleanup must not treat another SSH destination as a path reference"
             );
         });
+    }
+
+    #[test]
+    fn test_terminal_remote_identity_normalizes_empty_arguments() {
+        let without = RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+            host: "example.com".into(), args: None, ..Default::default()
+        });
+        let mut empty = without.clone();
+        if let RemoteConnectionOptions::Ssh(options) = &mut empty { options.args = Some(Vec::new()); }
+        assert!(same_terminal_remote_connection(Some(&without), Some(&empty)));
+        if let RemoteConnectionOptions::Ssh(options) = &mut empty {
+            options.args = Some(vec!["-F".into(), "other.conf".into()]);
+        }
+        assert!(!same_terminal_remote_connection(Some(&without), Some(&empty)));
     }
 
 }
