@@ -385,6 +385,10 @@
     ],
     [
       "agent_ui",
+      "test_legacy_terminal_password_migration_scrubs_rows_and_loaded_values"
+    ],
+    [
+      "agent_ui",
       "test_new_terminal_prevents_initial_terminal_creation"
     ],
     [
