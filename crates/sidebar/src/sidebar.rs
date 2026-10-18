@@ -5289,7 +5289,7 @@ impl Sidebar {
                 let load = project.update(cx, |project, cx| {
                     project.find_or_create_worktree(path.as_path(), true, cx)
                 });
-                let _ = load.await?;
+                load.await?;
             }
             anyhow::Ok(project)
         })

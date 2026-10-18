@@ -140,6 +140,7 @@ To disable this behavior use:
 ### Titlebar
 
 ```json [settings]
+{
   // Hide the title bar and show its contents in the status bar instead (macOS only)
   "title_bar_to_status_bar": false,
   // Control which items are shown/hidden in the title bar
@@ -154,7 +155,8 @@ To disable this behavior use:
     "show_sign_in": true,             // Show/hide sign-in button
     "show_menus": false,              // Show/hide menus
     "open_menus_on_hover": false      // Automatically open menus on hover
-  },
+  }
+}
 ```
 
 ## Workspace
