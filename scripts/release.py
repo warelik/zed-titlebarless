@@ -2022,6 +2022,7 @@ def run_regressions(app, manifest, upstream, candidate):
                     raise ValueError("Rust test executable is outside the source checkout")
                 binaries.setdefault(package, set()).add(binary)
         group_selected = set()
+        failures = []
         for package in sorted({package for package, _ in required}):
             available = set()
             for binary in sorted(binaries.get(package, [])):
@@ -2034,7 +2035,8 @@ def run_regressions(app, manifest, upstream, candidate):
                 matches = {(binary, full) for binary, full in available
                            if full.rsplit("::", 1)[-1] == name}
                 if not matches:
-                    raise ValueError(f"Preserved Rust regression missing: {package}::{name}")
+                    failures.append((f"{package}::{name}", ValueError(
+                        f"Preserved Rust regression missing: {package}::{name}")))
                 group_selected.update(matches)
         for binary, name in sorted(group_selected):
             print(f"Required Rust regression: {name}", flush=True)
@@ -2047,13 +2049,20 @@ def run_regressions(app, manifest, upstream, candidate):
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             except subprocess.CalledProcessError as error:
                 print(error.stdout or "", end="", flush=True)
-                raise
+                failures.append((name, error))
+                continue
             print(result.stdout, end="", flush=True)
             summaries = re.findall(r"(?m)^test result: (.+)$", result.stdout)
             if not summaries or not summaries[-1].startswith(
                     "ok. 1 passed; 0 failed; 0 ignored;"):
-                raise ValueError(f"Rust regression did not actually pass: {name}")
+                failures.append((name, ValueError(
+                    f"Rust regression did not actually pass: {name}")))
         selected.update(group_selected)
+        if failures:
+            print("Complete required Rust regression failure list:", flush=True)
+            for name, error in failures:
+                print(f"  {name}: {error}", flush=True)
+            raise failures[0][1]
         print(f"Passed all {len(selected)} selected downstream Rust regressions", flush=True)
 
 if __name__ == "__main__":

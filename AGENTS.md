@@ -51,7 +51,9 @@ release maintenance.
 - Freeze one complete candidate after both reviews and every known finding have
   been resolved or explicitly disproved. Run the mandatory policy and application
   tests once in the final validation sequence, then build and inspect that same
-  candidate once, then publish its verified artifacts. Never rebuild just because
+  candidate once, then publish its verified artifacts. Collect all selected runtime
+  regression failures in that final attempt before reporting the complete batch;
+  any required failure blocks the bundle and publication. Never rebuild just because
   a repair was adopted or a callback/schedule repeated. Reuse verified artifacts
   only when their complete source identity matches.
 - In that final sequence, check proposed release policy in the credential-free

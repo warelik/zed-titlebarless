@@ -1,0 +1,458 @@
+From 6d6b43826e88a170af4f49cb9b7ac5645aebb08b Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 19:04:03 +0000
+Subject: [PATCH] Honor configured shells in persistent terminal sessions
+
+Resolve the local worktree or remote terminal shell before constructing shpool attach arguments. Preserve explicit program arguments and titles without forcing a login shell. Quote literal arguments and protect them from shpool template expansion. Retain the real-daemon probe, kill and idempotence checks while exercising the configured command and literal directory.
+---
+ crates/project/src/terminals.rs | 291 +++++++++++++++++++++++++++-----
+ 1 file changed, 253 insertions(+), 38 deletions(-)
+
+diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
+index 19dbd4f..9c9809c 100644
+--- a/crates/project/src/terminals.rs
++++ b/crates/project/src/terminals.rs
+@@ -42,10 +42,11 @@ pub enum PersistentSession {
+     Reattached,
+ }
+ 
+-/// A program that replaces the configured shell of a terminal.
++/// A shpool attach request, resolved after the terminal's shell settings.
+ struct ShellCommand {
+     program: String,
+-    args: Vec<String>,
++    socket: PathBuf,
++    session_name: String,
+     title_override: Option<String>,
+ }
+ 
+@@ -256,28 +257,83 @@ pub(crate) fn parse_shpool_probe_output(
+     parse_shpool_probe(&stdout)
+ }
+ 
++fn shpool_shell_command(shell: &Shell, literal_cwd: Option<&Path>) -> Result<String> {
++    let command = match shell {
++        Shell::System => "/bin/sh -c 'exec \"$SHELL\" -l'".to_string(),
++        _ => {
++            let (program, args) = shell.program_and_args();
++            let words = std::iter::once(program.as_str())
++                .chain(args.iter().map(String::as_str))
++                .map(|word| {
++                    ShellKind::Posix
++                        .try_quote(word)
++                        .context("invalid terminal shell argument")
++                })
++                .collect::<Result<Vec<_>>>()?;
++            words.join(" ")
++        }
++    };
++    if literal_cwd.is_none() && !command.contains('{') && !command.contains('}') {
++        return Ok(command);
++    }
++
++    // shpool templates have no literal-brace escape. Carry a POSIX-quoted
++    // script as octal bytes; decode only in the spawned shell, not in shpool.
++    let directory = literal_cwd
++        .map(|cwd| -> Result<String> {
++            let cwd = cwd.to_string_lossy();
++            Ok(format!(
++                "cd -- {} && ",
++                ShellKind::Posix
++                    .try_quote(&cwd)
++                    .context("invalid terminal working directory")?
++            ))
++        })
++        .transpose()?
++        .unwrap_or_default();
++    let script = format!("{directory}exec {command}");
++    let encoded: String = script
++        .bytes()
++        .map(|byte| format!("\\0{byte:03o}"))
++        .collect();
++    let launcher = format!("exec /bin/sh -c \"$(printf '%b' '{encoded}')\"");
++    Ok(format!(
++        "/bin/sh -c {}",
++        ShellKind::Posix
++            .try_quote(&launcher)
++            .context("invalid persistent shell launcher")?
++    ))
++}
++
+ pub(crate) fn build_shpool_attach_args(
+     socket: &Path,
+     cwd: Option<&Path>,
+     session_name: &str,
+-) -> Vec<String> {
++    shell: &Shell,
++) -> Result<Vec<String>> {
+     let mut args = vec![
+         "-s".to_string(),
+         socket.to_string_lossy().into_owned(),
+         "attach".to_string(),
+         "--force".to_string(),
+     ];
+-    if let Some(cwd) = cwd {
++    let has_template = |path: &Path| {
++        let value = path.to_string_lossy();
++        value.contains('{') || value.contains('}')
++    };
++    if let Some(cwd) = cwd.filter(|path| !has_template(path)) {
+         args.push("--dir".to_string());
+         args.push(cwd.to_string_lossy().into_owned());
+     }
+-    // Always pass --cmd: shpool ignores it on a live session, but a dead-but-listed
+-    // session is respawned with it (preventing sentinel injection and blank line returns).
+-    // shpool's `--cmd` is a template, so avoid `{}` which would trigger invalid var errors.
++    // Pass --cmd even on reattachment: dead listed sessions must respawn
++    // with the configured shell rather than shpool's default command.
+     args.push("--cmd".to_string());
+-    args.push("/bin/sh -c \"exec $SHELL -l\"".to_string());
++    args.push(shpool_shell_command(
++        shell,
++        cwd.filter(|path| has_template(path)),
++    )?);
+     args.push(session_name.to_string());
+-    args
++    Ok(args)
+ }
+ 
+ impl Project {
+@@ -566,8 +622,6 @@ impl Project {
+                     } else {
+                         PersistentSession::Created
+                     };
+-                    let args =
+-                        build_shpool_attach_args(&shpool.socket, cwd.as_deref(), &session_name);
+                     // The foreground process of a local terminal is now the shpool
+                     // client, so a title built from it would name shpool, not the
+                     // program in the session. Remote shells get the same override.
+@@ -584,7 +638,8 @@ impl Project {
+                     (
+                         Some(ShellCommand {
+                             program: shpool.program,
+-                            args,
++                            socket: shpool.socket,
++                            session_name: session_name.clone(),
+                             title_override,
+                         }),
+                         session,
+@@ -600,15 +655,25 @@ impl Project {
+                 .update(cx, |project, cx| {
+                     #[cfg(any(test, feature = "test-support"))]
+                     if let Some(fake) = &project.fake_shpool {
++                        let location = project.terminal_settings_location(cwd.as_deref(), cx);
++                        let settings = TerminalSettings::get(location, cx).clone();
+                         if let Some(command) = &command {
++                            let args = match build_shpool_attach_args(
++                                &command.socket,
++                                cwd.as_deref(),
++                                &command.session_name,
++                                &settings.shell,
++                            ) {
++                                Ok(args) => args,
++                                Err(error) => return Task::ready(Err(error)),
++                            };
+                             let mut state = fake.state.lock();
+-                            state.attach_history.push(session_name.clone());
++                            state.attach_history.push(command.session_name.clone());
+                             state
+                                 .attach_args_history
+-                                .push((session_name.clone(), command.args.clone()));
+-                            state.sessions.insert(session_name);
++                                .push((command.session_name.clone(), args));
++                            state.sessions.insert(command.session_name.clone());
+                         }
+-                        let settings = TerminalSettings::get(None, cx).clone();
+                         let path_style = project.path_style(cx);
+                         let background_executor = cx.background_executor().clone();
+                         let builder = terminal::TerminalBuilder::new_display_only_with_bounds(
+@@ -800,6 +865,18 @@ impl Project {
+     }
+ 
+     /// Internal method for creating terminal shells.
++    fn terminal_settings_location(
++        &self,
++        cwd: Option<&Path>,
++        cx: &App,
++    ) -> Option<SettingsLocation<'static>> {
++        let (worktree, _) = self.find_worktree(cwd?, cx)?;
++        Some(SettingsLocation {
++            worktree_id: worktree.read(cx).id(),
++            path: RelPath::empty(),
++        })
++    }
++
+     /// If force_local is true, creates a local terminal even if the project has a remote client.
+     /// This allows "breaking out" to a local shell in remote projects.
+     /// `command` replaces the configured shell.
+@@ -814,15 +891,7 @@ impl Project {
+         let path = cwd.map(|p| Arc::from(&*p));
+         let is_via_remote = !force_local && self.remote_client.is_some();
+ 
+-        let mut settings_location = None;
+-        if let Some(path) = path.as_ref()
+-            && let Some((worktree, _)) = self.find_worktree(path, cx)
+-        {
+-            settings_location = Some(SettingsLocation {
+-                worktree_id: worktree.read(cx).id(),
+-                path: RelPath::empty(),
+-            });
+-        }
++        let settings_location = self.terminal_settings_location(path.as_deref(), cx);
+         let settings = TerminalSettings::get(settings_location, cx).clone();
+         let detect_venv = settings.detect_venv.as_option().is_some();
+         let local_path = if is_via_remote { None } else { path.clone() };
+@@ -897,6 +966,22 @@ impl Project {
+             } else {
+                 None
+             };
++            let command = command
++                .map(|command| -> Result<_> {
++                    let configured_shell = remote_shell.as_ref().unwrap_or(&settings.shell);
++                    let args = build_shpool_attach_args(
++                        &command.socket,
++                        path.as_deref(),
++                        &command.session_name,
++                        configured_shell,
++                    )?;
++                    let title_override = match configured_shell {
++                        Shell::WithArguments { title_override: Some(title), .. } => Some(title.clone()),
++                        _ => command.title_override,
++                    };
++                    Ok((command.program, args, title_override))
++                })
++                .transpose()?;
+             let shell_program = remote_shell.as_ref().map(Shell::program).unwrap_or(shell);
+             let shell_kind = ShellKind::new(&shell_program, path_style.is_windows());
+             let mut env = env_task.await.unwrap_or_default();
+@@ -928,7 +1013,7 @@ impl Project {
+                             Some(remote_client) => {
+                                 let empty_args = Vec::new();
+                                 let spawn_command = match (&command, remote_shell.as_ref()) {
+-                                    (Some(command), _) => Some((&command.program, &command.args)),
++                                    (Some((program, args, _)), _) => Some((program, args)),
+                                     (None, Some(Shell::System) | None) => None,
+                                     (None, Some(Shell::Program(program))) => {
+                                         Some((program, &empty_args))
+@@ -940,11 +1025,11 @@ impl Project {
+                                 create_remote_shell(spawn_command, env, path, remote_client, cx)?
+                             }
+                             None => match command {
+-                                Some(command) => (
++                                Some((program, args, title_override)) => (
+                                     Shell::WithArguments {
+-                                        program: command.program,
+-                                        args: command.args,
+-                                        title_override: command.title_override,
++                                        program,
++                                        args,
++                                        title_override,
+                                     },
+                                     env,
+                                 ),
+@@ -1463,7 +1548,7 @@ mod tests {
+             .expect("missing --cmd on existing session attach");
+         assert_eq!(
+             existing_args[existing_cmd_index + 1],
+-            "/bin/sh -c \"exec $SHELL -l\""
++            "/bin/sh -c 'exec \"$SHELL\" -l'"
+         );
+         let (new_session, new_args) = &attach_args[1];
+         assert_eq!(new_session, "zed-new");
+@@ -1475,7 +1560,7 @@ mod tests {
+             .iter()
+             .position(|argument| argument == "--cmd")
+             .expect("missing --cmd on new session attach");
+-        assert_eq!(new_args[new_cmd_index + 1], "/bin/sh -c \"exec $SHELL -l\"");
++        assert_eq!(new_args[new_cmd_index + 1], "/bin/sh -c 'exec \"$SHELL\" -l'");
+ 
+         project
+             .update(cx, |p, cx| {
+@@ -1494,12 +1579,105 @@ mod tests {
+         assert!(fake.has_session("zed-new"));
+     }
+ 
++    #[test]
++    fn test_shpool_command_preserves_shell_program_and_arguments() {
++        assert_eq!(
++            shpool_shell_command(&Shell::System, None).unwrap(),
++            "/bin/sh -c 'exec \"$SHELL\" -l'"
++        );
++        assert_eq!(
++            shpool_shell_command(&Shell::Program("nu".into()), None).unwrap(),
++            "nu"
++        );
++        let shell = Shell::WithArguments {
++            program: "zsh".into(),
++            args: vec!["--no-rcs".into(), "-i".into()],
++            title_override: None,
++        };
++        assert_eq!(
++            shpool_shell_command(&shell, None).unwrap(),
++            "zsh --no-rcs -i"
++        );
++        assert!(
++            shpool_shell_command(&Shell::Program("invalid\0shell".into()), None).is_err()
++        );
++    }
++
++    #[test]
++    #[cfg(unix)]
++    fn test_shpool_command_round_trips_literal_shell_arguments() {
++        for values in [
++            vec!["plain", "$HOME", "", "quote'\";$(false)", "trailing\n\n"],
++            vec!["literal {workspace}", "$HOME", "", "Юникод", "trailing\n\n"],
++        ] {
++            let mut args = vec![
++                "-c".into(),
++                r#"printf '%s\0' "$@""#.into(),
++                "configured-shell".into(),
++            ];
++            args.extend(values.iter().map(|value| value.to_string()));
++            let shell = Shell::WithArguments {
++                program: "/bin/sh".into(),
++                args,
++                title_override: None,
++            };
++            let command = shpool_shell_command(&shell, None).unwrap();
++            assert!(!command.contains('{') && !command.contains('}'));
++            let output = std::process::Command::new("/bin/sh")
++                .args(["-c", &command])
++                .output()
++                .expect("execute the configured shell command");
++            assert!(output.status.success(), "{:?}", output);
++            let expected: Vec<u8> = values
++                .iter()
++                .flat_map(|value| value.as_bytes().iter().copied().chain([0]))
++                .collect();
++            assert_eq!(output.stdout, expected);
++        }
++    }
++
++    #[gpui::test]
++    async fn test_persistent_terminal_honors_configured_shell_arguments(
++        cx: &mut gpui::TestAppContext,
++    ) {
++        cx.update(|cx| {
++            let store = settings::SettingsStore::test(cx);
++            cx.set_global(store);
++            TerminalSettings::register(cx);
++            let mut settings = TerminalSettings::get(None, cx).clone();
++            settings.shell = Shell::WithArguments {
++                program: "zsh".into(),
++                args: vec!["--no-rcs".into(), "-i".into()],
++                title_override: None,
++            };
++            TerminalSettings::override_global(settings, cx);
++        });
++        let fs = fs::FakeFs::new(cx.executor());
++        let project = Project::test(fs, [], cx).await;
++        project.update(cx, |project, _| {
++            project.enable_fake_shpool(&[]);
++        });
++        project
++            .update(cx, |project, cx| {
++                project.create_persistent_terminal_shell(
++                    None, "configured-shell".into(), None, cx,
++                )
++            })
++            .await
++            .expect("create the configured persistent terminal");
++        let attached = project.read_with(cx, |project, _| project.fake_shpool_attached_args());
++        assert_eq!(attached.len(), 1);
++        let args = &attached[0].1;
++        let command = args.iter().position(|arg| arg == "--cmd").unwrap();
++        assert_eq!(args[command + 1], "zsh --no-rcs -i");
++    }
++
+     #[test]
+     fn test_build_shpool_attach_args() {
+         let socket = Path::new("/run/user/1000/shpool/shpool.socket");
+         let cwd = Path::new("/home/user/project");
+ 
+-        let attach_args_with_cwd = build_shpool_attach_args(socket, Some(cwd), "zed-thread-1");
++        let attach_args_with_cwd = build_shpool_attach_args(socket, Some(cwd), "zed-thread-1", &Shell::System).unwrap();
+         assert_eq!(
+             attach_args_with_cwd,
+             vec![
+@@ -1510,12 +1688,12 @@ mod tests {
+                 "--dir",
+                 "/home/user/project",
+                 "--cmd",
+-                "/bin/sh -c \"exec $SHELL -l\"",
++                "/bin/sh -c 'exec \"$SHELL\" -l'",
+                 "zed-thread-1",
+             ]
+         );
+ 
+-        let attach_args_without_cwd = build_shpool_attach_args(socket, None, "zed-thread-1");
++        let attach_args_without_cwd = build_shpool_attach_args(socket, None, "zed-thread-1", &Shell::System).unwrap();
+         assert_eq!(
+             attach_args_without_cwd,
+             vec![
+@@ -1524,7 +1702,7 @@ mod tests {
+                 "attach",
+                 "--force",
+                 "--cmd",
+-                "/bin/sh -c \"exec $SHELL -l\"",
++                "/bin/sh -c 'exec \"$SHELL\" -l'",
+                 "zed-thread-1",
+             ]
+         );
+@@ -1950,9 +2128,37 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
+         assert!(probe.socket.is_absolute());
+         assert!(probe.socket.starts_with(&isolated_runtime));
+ 
+-        // 2a. Create real session in the isolated daemon using attach -b
++        // 2a. Exercise the same configured command used by persistent terminals,
++        // including literal template characters in its arguments and directory.
++        let literal_directory = temp_dir.path().join("project-{literal}");
++        std::fs::create_dir(&literal_directory).expect("create literal project directory");
++        let literal_directory = std::fs::canonicalize(literal_directory).unwrap();
++        let marker = temp_dir.path().join("configured-shell-output");
++        let literal_argument = "literal {workspace} $HOME 'quoted'";
++        let configured_shell = Shell::WithArguments {
++            program: "/bin/sh".into(),
++            args: vec![
++                "-c".into(),
++                r#"printf '%s\n' "$PWD" "$1" > "$2"; exec /bin/sh -i"#.into(),
++                "configured-shell".into(),
++                literal_argument.into(),
++                marker.to_string_lossy().into_owned(),
++            ],
++            title_override: None,
++        };
++        let mut attach_args = build_shpool_attach_args(
++            &probe.socket,
++            Some(&literal_directory),
++            "zed-test-isolated",
++            &configured_shell,
++        ).expect("build configured shpool attach arguments");
++        attach_args.insert(4, "-b".into());
++        let arguments = attach_args.iter()
++            .map(|argument| ShellKind::Posix.try_quote(argument).unwrap())
++            .collect::<Vec<_>>()
++            .join(" ");
+         let attach_script = format!(
+-            "export HOME={home_str:?} XDG_RUNTIME_DIR={runtime_str:?}\n{SHPOOL_SCRIPT_PRELUDE}\n\"$SHPOOL_BIN\" -s \"$SHPOOL_SOCK\" attach -b zed-test-isolated\n"
++            "export HOME={home_str:?} XDG_RUNTIME_DIR={runtime_str:?}\n{SHPOOL_SCRIPT_PRELUDE}\n\"$SHPOOL_BIN\" {arguments}\n"
+         );
+         let task = project.update(cx, |p, cx| p.exec_script_in_sh(attach_script, cx));
+         let mut cmd = task.await.expect("attach command creation");
+@@ -1963,6 +2169,15 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
+             String::from_utf8_lossy(&output.stderr)
+         );
+ 
++        let expected_output = format!("{}\n{literal_argument}\n", literal_directory.display());
++        for _ in 0..100 {
++            if std::fs::read_to_string(&marker).ok().as_deref() == Some(expected_output.as_str()) {
++                break;
++            }
++            smol::Timer::after(Duration::from_millis(20)).await;
++        }
++        assert_eq!(std::fs::read_to_string(&marker).unwrap(), expected_output);
++
+         // 2b. Verify session exists in isolated daemon
+         let list_script = format!(
+             "export HOME={home_str:?} XDG_RUNTIME_DIR={runtime_str:?}\n{SHPOOL_SCRIPT_PRELUDE}\n\"$SHPOOL_BIN\" -s \"$SHPOOL_SOCK\" list --json\n"

@@ -1238,6 +1238,7 @@ class RustRegressionRunnerTests(unittest.TestCase):
             }
             commands = []
             test_runs = []
+            self.last_test_runs = test_runs
 
             def capture(args, *, cwd, env):
                 self.assert_isolated(env)
@@ -1335,6 +1336,17 @@ class RustRegressionRunnerTests(unittest.TestCase):
                 self.assertNotIn("Passed all", captured.getvalue())
                 if output is not None:
                     self.assertIn("panic: preserved terminal cleanup failure", captured.getvalue())
+
+    def test_all_runtime_failures_are_reported_in_one_final_attempt(self):
+        captured = io.StringIO()
+        with patch("sys.stdout", captured), self.assertRaises(subprocess.CalledProcessError):
+            self.exercise(result_code=1, result_output="panic: regression failed\n")
+        expected = {"tests::test_historical", "tests::test_preserved", "tests::test_added",
+                    "tests::added_without_prefix"}
+        self.assertEqual({command[2] for command, _ in self.last_test_runs}, expected)
+        summary = captured.getvalue().split("Complete required Rust regression failure list:")[1]
+        self.assertTrue(all(name in summary for name in expected))
+        self.assertNotIn("Passed all", captured.getvalue())
 
     def test_missing_package_case_and_out_of_source_binary_fail_closed(self):
         with self.assertRaisesRegex(ValueError, "package is missing"):

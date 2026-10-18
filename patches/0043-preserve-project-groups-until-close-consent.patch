@@ -1,0 +1,186 @@
+From 12a42e14ff6b44faf2788e3f15fbd480618e098f Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 19:04:03 +0000
+Subject: [PATCH] Preserve project groups until workspace close consent
+ succeeds
+
+Keep cancelled and failed closes intact. Retain a same-group workspace opened during pending consent, and still remove unloaded project rows. Cover cancellation, successful retry and concurrent opening.
+---
+ crates/workspace/src/multi_workspace.rs       | 49 +++++++---
+ crates/workspace/src/multi_workspace_tests.rs | 90 +++++++++++++++++++
+ 2 files changed, 128 insertions(+), 11 deletions(-)
+
+diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
+index 7dc7a10..53500f0 100644
+--- a/crates/workspace/src/multi_workspace.rs
++++ b/crates/workspace/src/multi_workspace.rs
+@@ -1034,9 +1034,8 @@ impl MultiWorkspace {
+     ) -> Task<Result<bool>> {
+         // The active workspace can remain unpinned while the sidebar is
+         // closed. Pin it first: this puts it in the removal set below, and
+-        // stops `activate` from pinning it while switching to the
+-        // replacement, which would recreate the project group row this
+-        // function just deleted.
++        // keeps `activate`'s retention bookkeeping stable while switching
++        // to the replacement. The project row stays until close consent.
+         let active_workspace = self.workspace().clone();
+         if active_workspace.read(cx).project_group_key(cx) == *group_key
+             && !self.is_workspace_retained(&active_workspace)
+@@ -1047,12 +1046,41 @@ impl MultiWorkspace {
+ 
+         let workspaces = self.workspaces_for_project_group(group_key, cx);
+ 
+-        let task = self.remove(workspaces, RemovalIntent::CloseProject, window, cx);
+-
+-        self.project_groups.retain(|group| group.key != *group_key);
+-        cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
++        if workspaces.is_empty() {
++            let previous_len = self.project_groups.len();
++            self.project_groups.retain(|group| group.key != *group_key);
++            if self.project_groups.len() != previous_len {
++                cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
++                self.serialize(cx);
++                cx.notify();
++            }
++            // Keep remove's boolean contract: no workspace was detached.
++            return Task::ready(Ok(false));
++        }
+ 
+-        task
++        let task = self.remove(workspaces, RemovalIntent::CloseProject, window, cx);
++        let group_key = group_key.clone();
++        cx.spawn(async move |this, cx| {
++            let removed = task.await?;
++            if removed {
++                this.update(cx, |this, cx| {
++                    // A workspace opened while consent was pending was not part
++                    // of that close request and must retain its project row.
++                    let has_members = !this.workspaces_for_project_group(&group_key, cx).is_empty()
++                        || this.workspace().read(cx).project_group_key(cx) == group_key;
++                    if !has_members {
++                        let previous_len = this.project_groups.len();
++                        this.project_groups.retain(|group| group.key != group_key);
++                        if this.project_groups.len() != previous_len {
++                            cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
++                            this.serialize(cx);
++                            cx.notify();
++                        }
++                    }
++                })?;
++            }
++            Ok(removed)
++        })
+     }
+ 
+     /// Returns the nearest retained workspace outside the project group at
+@@ -1875,9 +1903,8 @@ impl MultiWorkspace {
+         let original_active = self.workspace().clone();
+         let group_key = original_active.read(cx).project_group_key(cx);
+ 
+-        // Record the neighborhood of the project as the user sees it now:
+-        // callers like `remove_project_group` delete the project row itself
+-        // before the removal task runs.
++        // Record the neighborhood as the user sees it before asynchronous
++        // consent; other project rows may change while a prompt is pending.
+         let group_index = self
+             .project_groups
+             .iter()
+diff --git a/crates/workspace/src/multi_workspace_tests.rs b/crates/workspace/src/multi_workspace_tests.rs
+index 7c9dc56..17f3adc 100644
+--- a/crates/workspace/src/multi_workspace_tests.rs
++++ b/crates/workspace/src/multi_workspace_tests.rs
+@@ -2063,3 +2063,93 @@ async fn test_remove_with_pre_remove_keeps_edits_made_during_guard(cx: &mut Test
+         "membership change must not prompt again"
+     );
+ }
++
++
++#[gpui::test]
++async fn test_remove_project_group_preserves_row_when_close_is_cancelled(cx: &mut TestAppContext) {
++    init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    fs.insert_tree("/project-a", json!({"file.txt": ""})).await;
++    fs.insert_tree("/project-b", json!({})).await;
++    let project_a = Project::test(fs.clone(), ["/project-a".as_ref()], cx).await;
++    let project_b = Project::test(fs, ["/project-b".as_ref()], cx).await;
++    let key_a = project_a.read_with(cx, |project, cx| project.project_group_key(cx));
++    let (multi_workspace, cx) = setup_multi_workspace(&[project_a, project_b], cx);
++    let workspace = multi_workspace.read_with(cx, |mw, cx| {
++        mw.workspaces_for_project_group(&key_a, cx)[0].clone()
++    });
++    multi_workspace.update_in(cx, |mw, window, cx| mw.activate(workspace.clone(), None, window, cx));
++    let dirty = cx.new(|cx| TestItem::new(cx).with_dirty(true));
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.add_item_to_active_pane(Box::new(dirty.clone()), None, true, window, cx);
++    });
++    let before = multi_workspace.read_with(cx, |mw, _| mw.project_group_keys());
++    let task = multi_workspace.update_in(cx, |mw, window, cx| {
++        mw.remove_project_group(&key_a, window, cx)
++    });
++    cx.run_until_parked();
++    assert!(cx.has_pending_prompt());
++    assert_eq!(multi_workspace.read_with(cx, |mw, _| mw.project_group_keys()), before);
++    cx.simulate_prompt_answer("Cancel");
++    cx.run_until_parked();
++    assert!(!task.await.unwrap());
++    assert_eq!(multi_workspace.read_with(cx, |mw, _| mw.project_group_keys()), before);
++    assert!(dirty.read_with(cx, |item, _| item.is_dirty));
++    assert!(multi_workspace.read_with(cx, |mw, _| mw.workspaces().any(|held| held == &workspace)));
++
++    let task = multi_workspace.update_in(cx, |mw, window, cx| {
++        mw.remove_project_group(&key_a, window, cx)
++    });
++    cx.run_until_parked();
++    assert!(cx.has_pending_prompt());
++    cx.simulate_prompt_answer("Don't Save");
++    cx.run_until_parked();
++    assert!(task.await.unwrap());
++    assert!(multi_workspace.read_with(cx, |mw, _| mw.group_state_by_key(&key_a).is_none()));
++    assert!(multi_workspace.read_with(cx, |mw, _| mw.workspaces().all(|held| held != &workspace)));
++}
++
++#[gpui::test]
++async fn test_remove_project_group_keeps_workspace_opened_during_consent(cx: &mut TestAppContext) {
++    init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    fs.insert_tree("/project", json!({"file.txt": ""})).await;
++    let project = Project::test(fs, ["/project".as_ref()], cx).await;
++    let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
++    let (multi_workspace, cx) = setup_multi_workspace(&[project.clone()], cx);
++    let original = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
++    let dirty = cx.new(|cx| TestItem::new(cx).with_dirty(true));
++    original.update_in(cx, |workspace, window, cx| {
++        workspace.add_item_to_active_pane(Box::new(dirty), None, true, window, cx);
++    });
++    let task = multi_workspace.update_in(cx, |mw, window, cx| mw.remove_project_group(&key, window, cx));
++    cx.run_until_parked();
++    assert!(cx.has_pending_prompt());
++    let opened = multi_workspace.update_in(cx, |mw, window, cx| {
++        mw.test_add_workspace(project.clone(), window, cx)
++    });
++    cx.simulate_prompt_answer("Don't Save");
++    cx.run_until_parked();
++    assert!(task.await.unwrap());
++    multi_workspace.read_with(cx, |mw, cx| {
++        assert!(mw.group_state_by_key(&key).is_some());
++        assert!(mw.workspaces_for_project_group(&key, cx).contains(&opened));
++        assert!(!mw.workspaces_for_project_group(&key, cx).contains(&original));
++    });
++}
++
++#[gpui::test]
++async fn test_remove_unloaded_project_group_still_removes_its_row(cx: &mut TestAppContext) {
++    init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    fs.insert_tree("/open", json!({})).await;
++    let project = Project::test(fs, ["/open".as_ref()], cx).await;
++    let (multi_workspace, cx) = setup_multi_workspace(&[project], cx);
++    let key = ProjectGroupKey::new(None, PathList::new(&[PathBuf::from("/unloaded")]));
++    multi_workspace.update(cx, |mw, _| {
++        mw.test_add_project_group(ProjectGroup {key: key.clone(), workspaces: Vec::new(), expanded: true});
++    });
++    let task = multi_workspace.update_in(cx, |mw, window, cx| mw.remove_project_group(&key, window, cx));
++    assert!(!task.await.unwrap(), "no loaded workspace was detached");
++    assert!(multi_workspace.read_with(cx, |mw, _| mw.group_state_by_key(&key).is_none()));
++}
