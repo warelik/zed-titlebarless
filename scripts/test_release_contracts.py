@@ -21,7 +21,7 @@ def metadata_fixture(directory):
     config_sha = "c" * 40
     patchset_sha256 = "d" * 64
     release_id = 1234
-    tag = f"build-{version}-{upstream_sha[:12]}-{patchset_sha256[:12]}"
+    tag = f"build-{version}-{upstream_sha[:12]}-{patchset_sha256[:12]}-{candidate_sha[:12]}"
     symbols_name = f"zed-{version}-titlebarless-debug-symbols-macos-aarch64.tar.gz"
     payloads = {
         "Zed.dmg": b"tiny fake DMG metadata fixture",
@@ -196,7 +196,7 @@ class ReleaseReservationTests(unittest.TestCase):
         self.patchset = "d" * 64
         self.version = "1.24.2"
         self.config = "c" * 40
-        self.tag = f"build-{self.version}-{self.upstream[:12]}-{self.patchset[:12]}"
+        self.tag = f"build-{self.version}-{self.upstream[:12]}-{self.patchset[:12]}-{self.sha[:12]}"
 
     def identity(self, config=None):
         return {
@@ -297,7 +297,7 @@ class BuildIdentityTests(unittest.TestCase):
             "UPSTREAM_SHA": "b" * 40,
             "PATCHSET_SHA256": "d" * 64,
             "APP_VERSION": "1.24.2",
-            "RELEASE_TAG": f"build-1.24.2-{'b' * 12}-{'d' * 12}",
+            "RELEASE_TAG": f"build-1.24.2-{'b' * 12}-{'d' * 12}-{'a' * 12}",
             "RELEASE_ID": "1234",
             "CONFIG_SHA": "c" * 40,
         } | changes
@@ -308,6 +308,18 @@ class BuildIdentityTests(unittest.TestCase):
         self.assertEqual(identity["release_id"], 1234)
         self.assertEqual(identity["version"], "1.24.2")
         self.assertEqual(identity["candidate_sha"], "a" * 40)
+
+    def test_same_source_and_patchset_require_candidate_specific_release_tag(self):
+        old_candidate_tag = f"build-1.24.2-{'b' * 12}-{'d' * 12}-{'e' * 12}"
+        with (
+            patch.dict(
+                os.environ,
+                self.environment(RELEASE_TAG=old_candidate_tag),
+                clear=True,
+            ),
+            self.assertRaisesRegex(ValueError, "Release tag does not identify"),
+        ):
+            release.build_identity()
 
     def test_zero_overflow_and_wrong_release_tag_are_rejected(self):
         for changes in (
@@ -403,7 +415,7 @@ class PublishedReleaseTests(unittest.TestCase):
     def published_record(self, identity, assets):
         tag = (
             f"build-{identity['version']}-{identity['upstream_sha'][:12]}-"
-            f"{identity['patchset_sha256'][:12]}"
+            f"{identity['patchset_sha256'][:12]}-{identity['candidate_sha'][:12]}"
         )
         return {
             "id": identity["release_id"],
@@ -1319,7 +1331,7 @@ class MacBundleInspectionTests(unittest.TestCase):
                 "version": "1.24.2",
                 "release_id": 1234,
             }
-            tag = f"build-1.24.2-{'b' * 12}-{'d' * 12}"
+            tag = f"build-1.24.2-{'b' * 12}-{'d' * 12}-{'a' * 12}"
             binary_uuid = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"
             remote_uuid = "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"
             bundle_environments = []
