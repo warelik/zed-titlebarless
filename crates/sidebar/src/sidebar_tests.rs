@@ -5236,6 +5236,135 @@ async fn test_failed_close_terminal_entry_retains_metadata_until_session_kill_su
 }
 
 #[gpui::test]
+async fn test_close_local_saved_terminal_from_remote_workspace_without_opening_workspace(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+    server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+    let app_state = cx.update(|cx| {
+        let state = workspace::AppState::test(cx);
+        workspace::init(state.clone(), cx);
+        state
+    });
+    let server_fs = FakeFs::new(server_cx.executor());
+    server_fs.insert_tree("/remote-active", serde_json::json!({"file.txt": ""})).await;
+    let (remote_project, _headless, _options) = start_remote_project(
+        &server_fs, Path::new("/remote-active"), &app_state, None, cx, server_cx,
+    ).await;
+    cx.update(|cx| <dyn fs::Fs>::set_global(app_state.fs.clone(), cx));
+    let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+        MultiWorkspace::test_new(remote_project, window, cx)
+    });
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+    let active = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    let fs = active.read_with(cx, |workspace, _| workspace.app_state().fs.clone());
+    fs.as_fake().insert_tree("/saved-local", serde_json::json!({"file.txt": ""})).await;
+    assert!(sidebar.read_with(cx, |sidebar, cx| sidebar.find_project_for_remote_connection(None, cx).is_none()));
+    let id = TerminalId::new();
+    let name = id.session_name();
+    let fake = project::FakeShpoolStore::with_sessions([name.clone()]);
+    let created = Rc::new(RefCell::new(Vec::<Entity<project::Project>>::new()));
+    let created_observer = created.clone();
+    let fake_observer = fake.clone();
+    let _observation = cx.update(|_, cx| cx.observe_new(
+        move |project: &mut project::Project, _: Option<&mut Window>, cx: &mut Context<project::Project>| {
+            if project.remote_connection_options(cx).is_none() {
+                project.set_fake_shpool(fake_observer.clone());
+                created_observer.borrow_mut().push(cx.entity());
+            }
+        },
+    ));
+    let paths = PathList::new(&[PathBuf::from("/saved-local")]);
+    let metadata = TerminalThreadMetadata {
+        terminal_id: id, title: "Saved local terminal".into(), custom_title: None,
+        created_at: chrono::Utc::now(),
+        worktree_paths: WorktreePaths::from_path_lists(paths.clone(), paths.clone()).unwrap(),
+        remote_connection: None, working_directory: None,
+    };
+    cx.update(|_, cx| TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata.clone(), cx)));
+    let before = multi_workspace.read_with(cx, |mw, _| mw.workspaces().count());
+    sidebar.update_in(cx, |sidebar, window, cx| sidebar.close_terminal(
+        &metadata, &ThreadEntryWorkspace::Closed {
+            folder_paths: paths.clone(), project_group_key: ProjectGroupKey::new(None, paths),
+        }, window, cx,
+    ));
+    cx.run_until_parked();
+    assert_eq!(fake.kill_history(), vec![name.clone()]);
+    assert!(!fake.has_session(&name));
+    cx.update(|_, cx| assert!(TerminalThreadMetadataStore::global(cx).read(cx).entry(id).is_none()));
+    assert_eq!(created.borrow().len(), 1);
+    assert_eq!(multi_workspace.read_with(cx, |mw, _| mw.workspace().clone()), active);
+    assert_eq!(multi_workspace.read_with(cx, |mw, _| mw.workspaces().count()), before);
+}
+
+#[gpui::test]
+async fn test_close_remote_saved_terminal_connects_without_opening_workspace(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let local = init_test_project_with_agent_panel("/active-local", cx).await;
+    cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+    server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+    let server_fs = FakeFs::new(server_cx.executor());
+    server_fs.insert_tree("/saved-remote", serde_json::json!({"file.txt": ""})).await;
+    let (options, server_session, _) = remote::RemoteClient::fake_server(cx, server_cx);
+    server_cx.update(remote_server::HeadlessProject::init);
+    let server_executor = server_cx.executor();
+    let _headless = server_cx.new(|cx| remote_server::HeadlessProject::new(
+        remote_server::HeadlessAppState {
+            session: server_session, fs: server_fs,
+            http_client: Arc::new(http_client::BlockedHttpClient),
+            node_runtime: node_runtime::NodeRuntime::unavailable(),
+            languages: Arc::new(language::LanguageRegistry::new(server_executor.clone())),
+            extension_host_proxy: Arc::new(extension::ExtensionHostProxy::new()),
+            startup_time: std::time::Instant::now(),
+        }, false, cx,
+    ));
+    let (multi_workspace, cx) = cx.add_window_view(|window, cx| MultiWorkspace::test_new(local, window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+    let active = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    assert!(sidebar.read_with(cx, |sidebar, cx| sidebar.find_project_for_remote_connection(Some(&options), cx).is_none()));
+    let id = TerminalId::new();
+    let name = id.session_name();
+    let fake = project::FakeShpoolStore::with_sessions([name.clone()]);
+    let created = Rc::new(RefCell::new(Vec::<Entity<project::Project>>::new()));
+    let created_observer = created.clone();
+    let fake_observer = fake.clone();
+    let expected = options.clone();
+    let _observation = cx.update(|_, cx| cx.observe_new(
+        move |project: &mut project::Project, _: Option<&mut Window>, cx: &mut Context<project::Project>| {
+            if same_terminal_remote_connection(project.remote_connection_options(cx).as_ref(), Some(&expected)) {
+                project.set_fake_shpool(fake_observer.clone());
+                created_observer.borrow_mut().push(cx.entity());
+            }
+        },
+    ));
+    let paths = PathList::new(&[PathBuf::from("/saved-remote")]);
+    let metadata = TerminalThreadMetadata {
+        terminal_id: id, title: "Saved remote terminal".into(), custom_title: None,
+        created_at: chrono::Utc::now(),
+        worktree_paths: WorktreePaths::from_path_lists(paths.clone(), paths.clone()).unwrap(),
+        remote_connection: Some(options.clone()), working_directory: None,
+    };
+    cx.update(|_, cx| TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata.clone(), cx)));
+    let before = multi_workspace.read_with(cx, |mw, _| mw.workspaces().count());
+    sidebar.update_in(cx, |sidebar, window, cx| sidebar.close_terminal(
+        &metadata, &ThreadEntryWorkspace::Closed {
+            folder_paths: paths.clone(), project_group_key: ProjectGroupKey::new(Some(options), paths),
+        }, window, cx,
+    ));
+    cx.run_until_parked();
+    assert_eq!(fake.kill_history(), vec![name.clone()]);
+    assert!(!fake.has_session(&name));
+    cx.update(|_, cx| assert!(TerminalThreadMetadataStore::global(cx).read(cx).entry(id).is_none()));
+    assert_eq!(created.borrow().len(), 1);
+    assert_eq!(multi_workspace.read_with(cx, |mw, _| mw.workspace().clone()), active);
+    assert_eq!(multi_workspace.read_with(cx, |mw, _| mw.workspaces().count()), before);
+}
+
+#[gpui::test]
 async fn test_close_terminal_entry_without_matching_project_retains_metadata(
     cx: &mut TestAppContext,
 ) {
@@ -5294,8 +5423,9 @@ async fn test_close_terminal_entry_without_matching_project_retains_metadata(
                 .read(cx)
                 .entry(terminal_id)
                 .is_some(),
-            "missing project must refuse close and retain terminal metadata"
+            "unavailable saved host must retain terminal metadata"
         );
+        assert!(!TerminalThreadMetadataStore::global(cx).read(cx).is_intentionally_closing(terminal_id));
     });
 }
 
