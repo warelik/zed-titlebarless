@@ -1572,6 +1572,12 @@ def run_regressions(app, manifest, upstream, candidate):
         diff = capture(["git", "diff", "--no-ext-diff", "--unified=3", upstream, candidate,
                         "--", "crates"], cwd=app, env=env)
         required = manifest_cases(manifest) | added_cases(diff)
+        debug_cases = required & {
+            ("workspace", "test_tab_width_bounds"),
+            ("workspace", "test_title_bar_to_status_bar"),
+            ("workspace", "test_title_bar_to_status_bar_reserves_traffic_lights"),
+        }
+        case_groups = ((required - debug_cases, False), (debug_cases, True))
         packages = sorted({package for package, _ in required})
         metadata = json.loads(capture(
             ["cargo", "metadata", "--locked", "--no-deps", "--format-version=1"],
@@ -1580,53 +1586,60 @@ def run_regressions(app, manifest, upstream, candidate):
                       if package["name"] in packages}
         if set(identities.values()) != set(packages):
             raise ValueError("A preserved regression package is missing")
-        command = ["cargo", "test", "--locked", "--release", "--no-run", "--lib",
-                   "--message-format=json-render-diagnostics"]
-        for package in packages:
-            command.extend(("-p", package))
-        artifacts = capture(command, cwd=app, env=env)
-        binaries = {}
-        for line in artifacts.splitlines():
-            record = json.loads(line)
-            if (record.get("reason") == "compiler-artifact"
-                    and record.get("package_id") in identities
-                    and record.get("profile", {}).get("test") is True
-                    and record.get("executable")):
-                package = identities[record["package_id"]]
-                binary = Path(record["executable"]).resolve()
-                if (not binary.is_file() or binary.is_symlink()
-                        or app.resolve() not in binary.parents):
-                    raise ValueError("Rust test executable is outside the source checkout")
-                binaries.setdefault(package, set()).add(binary)
         selected = set()
-        for package in packages:
-            available = set()
-            for binary in sorted(binaries.get(package, [])):
-                listing = capture([str(binary), "--list", "--format", "terse"],
-                                  cwd=app, env=env)
-                for line in listing.splitlines():
-                    if line.endswith(": test"):
-                        available.add((binary, line.removesuffix(": test")))
-            for _, name in sorted(case for case in required if case[0] == package):
-                matches = {(binary, full) for binary, full in available
-                           if full.rsplit("::", 1)[-1] == name}
-                if not matches:
-                    raise ValueError(f"Preserved Rust regression missing: {package}::{name}")
-                selected.update(matches)
-        for binary, name in sorted(selected):
-            print(f"Required Rust regression: {name}", flush=True)
-            try:
-                result = subprocess.run([str(binary), "--exact", name, "--nocapture"],
-                                        cwd=app, env=env, check=True, text=True,
-                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            except subprocess.CalledProcessError as error:
-                print(error.stdout or "", end="", flush=True)
-                raise
-            print(result.stdout, end="", flush=True)
-            summaries = re.findall(r"(?m)^test result: (.+)$", result.stdout)
-            if not summaries or not summaries[-1].startswith(
-                    "ok. 1 passed; 0 failed; 0 ignored;"):
-                raise ValueError(f"Rust regression did not actually pass: {name}")
+        for cases, debug_assertions in case_groups:
+            if not cases:
+                continue
+            compile_env = env | ({"CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS": "true"}
+                                 if debug_assertions else {})
+            command = ["cargo", "test", "--locked", "--release", "--no-run", "--lib",
+                       "--message-format=json-render-diagnostics"]
+            for package in sorted({package for package, _ in cases}):
+                command.extend(("-p", package))
+            artifacts = capture(command, cwd=app, env=compile_env)
+            binaries = {}
+            for line in artifacts.splitlines():
+                record = json.loads(line)
+                if (record.get("reason") == "compiler-artifact"
+                        and record.get("package_id") in identities
+                        and record.get("profile", {}).get("test") is True
+                        and record.get("executable")):
+                    package = identities[record["package_id"]]
+                    binary = Path(record["executable"]).resolve()
+                    if (not binary.is_file() or binary.is_symlink()
+                            or app.resolve() not in binary.parents):
+                        raise ValueError("Rust test executable is outside the source checkout")
+                    binaries.setdefault(package, set()).add(binary)
+            group_selected = set()
+            for package in sorted({package for package, _ in cases}):
+                available = set()
+                for binary in sorted(binaries.get(package, [])):
+                    listing = capture([str(binary), "--list", "--format", "terse"],
+                                      cwd=app, env=compile_env)
+                    for line in listing.splitlines():
+                        if line.endswith(": test"):
+                            available.add((binary, line.removesuffix(": test")))
+                for _, name in sorted(case for case in cases if case[0] == package):
+                    matches = {(binary, full) for binary, full in available
+                               if full.rsplit("::", 1)[-1] == name}
+                    if not matches:
+                        raise ValueError(f"Preserved Rust regression missing: {package}::{name}")
+                    group_selected.update(matches)
+            for binary, name in sorted(group_selected):
+                print(f"Required Rust regression: {name}", flush=True)
+                try:
+                    result = subprocess.run([str(binary), "--exact", name, "--nocapture"],
+                                            cwd=app, env=compile_env, check=True, text=True,
+                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                except subprocess.CalledProcessError as error:
+                    print(error.stdout or "", end="", flush=True)
+                    raise
+                print(result.stdout, end="", flush=True)
+                summaries = re.findall(r"(?m)^test result: (.+)$", result.stdout)
+                if not summaries or not summaries[-1].startswith(
+                        "ok. 1 passed; 0 failed; 0 ignored;"):
+                    raise ValueError(f"Rust regression did not actually pass: {name}")
+            selected.update(group_selected)
         print(f"Passed all {len(selected)} selected downstream Rust regressions", flush=True)
 
 if __name__ == "__main__":

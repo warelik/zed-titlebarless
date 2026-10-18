@@ -1126,12 +1126,29 @@ class RustRegressionRunnerTests(unittest.TestCase):
             self.assertTrue(path.is_dir())
             self.assertEqual(path.stat().st_mode & 0o777, 0o700)
 
+    def test_debug_assertions_only_enabled_for_selector_regressions(self):
+        key = "CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS"
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.dict(os.environ, {key: "true"}),
+        ):
+            self.assertNotIn(key, release.isolated_environment(Path(temporary)))
+        commands, test_runs = self.exercise(selector_case=True)
+        cargo_envs = [env for command, env in commands if command[:2] == ["cargo", "test"]]
+        self.assertNotIn(key, cargo_envs[0])
+        self.assertEqual(cargo_envs[1][key], "true")
+        self.assertNotIn(key, next(env for command, env in test_runs
+                                   if command[2] == "tests::test_historical"))
+        self.assertIn(key, next(env for command, env in test_runs
+                                if command[2] == "tests::test_tab_width_bounds"))
+
     def exercise(
         self,
         *,
         missing_package=False,
         listing=None,
         binary_outside=False,
+        selector_case=False,
         result_output="test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out",
         result_code=0,
     ):
@@ -1150,6 +1167,8 @@ class RustRegressionRunnerTests(unittest.TestCase):
                 "test_cases": [["auto_update", "test_historical"]],
                 "regression_cases": [["auto_update", "test_preserved"]],
             }
+            if selector_case:
+                manifest["test_cases"].append(["workspace", "test_tab_width_bounds"])
             diff = """diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs
 --- a/crates/auto_update/src/auto_update.rs
 +++ b/crates/auto_update/src/auto_update.rs
@@ -1164,11 +1183,13 @@ class RustRegressionRunnerTests(unittest.TestCase):
                 "tests::test_preserved: test\n"
                 "tests::test_added: test\n"
                 "tests::added_without_prefix: test\n"
+                "tests::test_tab_width_bounds: test\n"
             )
             injected = {
                 "CARGO_HOME": "/toolchain-cache/cargo",
                 "RUSTUP_HOME": "/toolchain-cache/rustup",
                 "RUSTUP_TOOLCHAIN": "pinned-toolchain",
+                "CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS": "false",
                 "GH_TOKEN": "not-forwarded",
                 "GITHUB_TOKEN": "not-forwarded",
                 "CODEX_REQUEST_TOKEN": "not-forwarded",
@@ -1183,20 +1204,23 @@ class RustRegressionRunnerTests(unittest.TestCase):
 
             def capture(args, *, cwd, env):
                 self.assert_isolated(env)
-                commands.append(args)
+                commands.append((args, env.copy()))
                 if args[:3] == ["git", "rev-parse", "HEAD"]:
                     return candidate
                 if args[:2] == ["git", "diff"]:
                     return diff
                 if args[:3] == ["cargo", "metadata", "--locked"]:
                     packages = [] if missing_package else [
-                        {"id": "auto-update-id", "name": "auto_update"}
+                        {"id": "auto-update-id", "name": "auto_update"},
+                        {"id": "workspace-id", "name": "workspace"},
                     ]
                     return json.dumps({"packages": packages})
                 if args[:2] == ["cargo", "test"] and "--no-run" in args:
+                    package_id = ("workspace-id" if "workspace" in args else
+                                  "auto-update-id")
                     artifact = {
                         "reason": "compiler-artifact",
-                        "package_id": "auto-update-id",
+                        "package_id": package_id,
                         "profile": {"test": True},
                         "executable": str(binary),
                     }
@@ -1207,10 +1231,10 @@ class RustRegressionRunnerTests(unittest.TestCase):
 
             def run(args, *, cwd, env, check=False, text=False, stdout=None, stderr=None):
                 self.assert_isolated(env)
-                commands.append(args)
+                commands.append((args, env.copy()))
                 if args[0] == "git":
                     return SimpleNamespace(returncode=0, stdout="")
-                test_runs.append(args)
+                test_runs.append((args, env.copy()))
                 if result_code and check:
                     raise subprocess.CalledProcessError(result_code, args, output=result_output)
                 return SimpleNamespace(returncode=result_code, stdout=result_output)
@@ -1225,21 +1249,23 @@ class RustRegressionRunnerTests(unittest.TestCase):
 
     def test_unions_preserved_and_added_cases_with_isolated_credentials(self):
         commands, test_runs = self.exercise()
-        self.assertTrue(any(command[:2] == ["cargo", "metadata"] for command in commands))
-        cargo_command = next(command for command in commands if command[:2] == ["cargo", "test"])
+        command_args = [command for command, _ in commands]
+        test_args = [command for command, _ in test_runs]
+        self.assertTrue(any(command[:2] == ["cargo", "metadata"] for command in command_args))
+        cargo_command = next(command for command in command_args if command[:2] == ["cargo", "test"])
         self.assertIn("-p", cargo_command)
         self.assertIn("auto_update", cargo_command)
         self.assertIn("--message-format=json-render-diagnostics", cargo_command)
         self.assertNotIn("--message-format=json", cargo_command)
         self.assertEqual(
-            {command[2] for command in test_runs},
+            {command[2] for command in test_args},
             {"tests::test_historical", "tests::test_preserved", "tests::test_added",
              "tests::added_without_prefix"},
         )
-        nonprefixed = next(command for command in test_runs
+        nonprefixed = next(command for command in test_args
                            if command[2] == "tests::added_without_prefix")
         self.assertEqual(nonprefixed[1:], ["--exact", "tests::added_without_prefix", "--nocapture"])
-        self.assertTrue(all("--exact" in command for command in test_runs))
+        self.assertTrue(all("--exact" in command for command in test_args))
 
     def test_failed_binary_output_is_visible_and_failure_propagates(self):
         for output in (
