@@ -2369,7 +2369,7 @@ impl Terminal {
     /// Call at most once per terminal: a second handshake drops the previous
     /// `Sender`, which would write the init command twice.
     pub fn start_init_command_startup_handshake(&mut self) -> Task<()> {
-        if !self.is_pty() || self.child_exited.is_some() {
+        if !self.is_pty() || self.process_exited {
             return Task::ready(());
         }
 
@@ -2444,7 +2444,7 @@ impl Terminal {
         // fallback), so detection stops scanning on every wakeup.
         self.complete_init_command_startup_handshake();
 
-        if self.keyboard_input_sent || self.child_exited.is_some() {
+        if self.keyboard_input_sent || self.process_exited {
             return false;
         }
 
@@ -4981,6 +4981,43 @@ mod tests {
             input_log.is_empty(),
             "init command should not be written after the child has exited, got {input_log:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn test_init_command_skips_exit_without_child_status(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        for exit_before_handshake in [false, true] {
+            let terminal = build_test_terminal_with_arguments(
+                cx,
+                "sh".to_string(),
+                vec!["-c".to_string(), "while IFS= read -r line; do :; done".to_string()],
+            ).await;
+            let startup = terminal.update(cx, |terminal, cx| {
+                assert!(terminal.is_pty());
+                terminal.take_pty_write_log();
+                terminal.write_output(b"shell failed to start", cx);
+                if exit_before_handshake {
+                    terminal.process_event(TerminalBackendEvent::Exit, cx);
+                }
+                let startup = terminal.start_init_command_startup_handshake();
+                let writes = terminal.take_pty_write_log();
+                assert_eq!(writes.is_empty(), exit_before_handshake);
+                if !exit_before_handshake {
+                    terminal.process_event(TerminalBackendEvent::Exit, cx);
+                }
+                assert!(terminal.child_exited.is_none());
+                assert!(terminal.has_exited());
+                assert!(!terminal.write_init_command_after_startup(b"agent\r".to_vec(), cx));
+                assert!(terminal.get_content().contains("shell failed to start"));
+                assert!(terminal.take_input_log().is_empty());
+                assert!(terminal.take_pty_write_log().is_empty());
+                assert!(terminal.init_command_startup_tx.is_none());
+                terminal.release_pty_resources();
+                startup
+            });
+            startup.await;
+        }
     }
 
     #[gpui::test]
