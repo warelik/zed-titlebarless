@@ -61,12 +61,12 @@ jobs:
           ref: dbf40ff4bd626082e0ad3d9873c5b6ad5fa7f941
           path: gate
           persist-credentials: false
-      # This immutable reviewed baseline includes the owner's new two-review,
-      # candidate-bound release and no-partial-repair contracts. Older fixtures
-      # deliberately expected the superseded release/repair behavior.
+      # Reviewed test data for the owner's upstream-parameter contract, including
+      # the retained identities of two superseded release-profile/target cases.
+      # The executable bootstrap gate above remains immutable and independent.
       - uses: actions/checkout@v4
         with:
-          ref: 71d0f4314a4a9fadc9d404f6879586f6be2d93ae
+          ref: a7c36d9b49c6babc709f215ee2802a5b893b887e
           path: baseline
           persist-credentials: false
       - name: Require Both Complete Exact-Source Reviews Before Any Tests
