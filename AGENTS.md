@@ -91,7 +91,10 @@ release maintenance.
    report, reaction, previous approval, or test of another revision is not proof.
    For changed Rust fields or APIs, inspect every constructor, struct literal and
    caller, including test fixtures and feature/target-gated code, before the final
-   compilation. Keep existing regression fixtures and their assertions intact.
+   compilation. Resolve every added import and qualified symbol against the
+   actual crate exports and module visibility in that snapshot, including test
+   fixtures; prefer the existing public constructors and conversions. Keep
+   existing regression fixtures and their assertions intact.
    A policy correction with unchanged application code may validate again only
    when native metadata across every run attempt proves all earlier macOS jobs
    were skipped. A changed

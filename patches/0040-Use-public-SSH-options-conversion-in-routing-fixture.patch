@@ -1,0 +1,29 @@
+From ca32b64f65ce695e7463786551395756bc039451 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 13:40:48 +0000
+Subject: [PATCH] Use the public SSH options conversion in the routing fixture
+
+SshConnectionHost lives behind remote transport modules and is not exported at the crate root. Construct the existing public options field through its From<&str> implementation, as the remote identity regressions already do. Retain the SSH argument and empty/absent argument assertions unchanged.
+---
+ crates/sidebar/src/sidebar_tests.rs | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
+index ac6a4c3..77a6e7c 100644
+--- a/crates/sidebar/src/sidebar_tests.rs
++++ b/crates/sidebar/src/sidebar_tests.rs
+@@ -17372,11 +17372,11 @@ async fn test_stock_active_entry_not_synced_from_agent_panel_when_not_in_agent_p
+ 
+ #[test]
+ fn test_terminal_remote_connection_match_distinguishes_ssh_arguments() {
+-    use remote::{SshConnectionOptions, SshConnectionHost};
++    use remote::SshConnectionOptions;
+ 
+     let connection = |args: &[&str]| {
+         RemoteConnectionOptions::Ssh(SshConnectionOptions {
+-            host: SshConnectionHost::from("example.com"),
++            host: "example.com".into(),
+             username: Some("developer".into()),
+             port: Some(22),
+             args: Some(args.iter().map(|arg| (*arg).to_string()).collect()),
