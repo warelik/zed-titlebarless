@@ -1435,6 +1435,11 @@ class MacBundleInspectionTests(unittest.TestCase):
                     clear=True,
                 ),
                 patch.object(release, "build_identity", return_value=identity),
+                # Recipe behavior has dedicated tests; this fixture fakes macOS
+                # inspection and intentionally does not contain a Git checkout.
+                patch.object(release, "verify_upstream_recipes",
+                             side_effect=ValueError("upstream recipe mismatch")
+                             if scenario == "recipe" else None) as recipe,
                 patch.object(release, "run", side_effect=run),
                 patch.object(release.subprocess, "run", side_effect=bundle_command),
                 patch.object(
@@ -1443,7 +1448,11 @@ class MacBundleInspectionTests(unittest.TestCase):
                     side_effect=lambda *_args, **_kwargs: DebugInfoProcess(),
                 ),
             ):
-                release.build(app)
+                try:
+                    release.build(app)
+                finally:
+                    self.last_recipe_calls = recipe.call_args_list
+                    self.last_bundle_environments = list(bundle_environments)
             release_directory = workspace / "release"
             return {path.name for path in release_directory.iterdir()}, bundle_environments
 
@@ -1451,6 +1460,12 @@ class MacBundleInspectionTests(unittest.TestCase):
         artifact_names, bundle_environments = self.build_attempt("valid")
         self.assertEqual(len(bundle_environments), 1)
         env = bundle_environments[0]
+        self.assertEqual(len(self.last_recipe_calls), 1)
+        self.assertEqual(self.last_recipe_calls[0].args[1], "b" * 40)
+        self.assertEqual(env["CARGO_INCREMENTAL"], "0")
+        self.assertFalse(any(key.startswith("CARGO_PROFILE_") for key in env))
+        self.assertNotIn("RUSTUP_TOOLCHAIN", env)
+        self.assertNotIn("MACOSX_DEPLOYMENT_TARGET", env)
         self.assertEqual(
             {key for key in env if key.startswith("ZED_")},
             {"ZED_UPDATE_MANIFEST_URL", "ZED_DOWNSTREAM_RELEASE_ID", "ZED_COMMIT_SHA"},
@@ -1471,6 +1486,12 @@ class MacBundleInspectionTests(unittest.TestCase):
                 "zed-1.24.2-titlebarless-debug-symbols-macos-aarch64.tar.gz",
             },
         )
+
+    def test_recipe_refusal_prevents_any_bundle_invocation(self):
+        with self.assertRaisesRegex(ValueError, "upstream recipe mismatch"):
+            self.build_attempt("recipe")
+        self.assertEqual(len(self.last_recipe_calls), 1)
+        self.assertEqual(self.last_bundle_environments, [])
 
     def test_inspector_rejects_wrong_source_version_architecture_and_symbol_uuid(self):
         for scenario in ("source", "version", "architecture", "binary_sha", "symbol_uuid"):
