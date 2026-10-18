@@ -226,6 +226,10 @@ class BatchedReviewTests(unittest.TestCase):
         bootstrap = workflow.split("\n  bootstrap-policy:\n", 1)[1].split("\n  prepare:\n", 1)[0]
         self.assertNotIn("secrets.", bootstrap)
         self.assertIn("Require Both Complete Exact-Source Reviews Before Any Tests", bootstrap)
+        self.assertIn("ref: dbf40ff4bd626082e0ad3d9873c5b6ad5fa7f941", bootstrap)
+        self.assertNotIn("ref: ${{ vars.ZED_TRUSTED_POLICY", bootstrap)
+        self.assertIn("for directory in ['gate/scripts', 'baseline/scripts']:", bootstrap)
+        self.assertIn("if policy != os.environ['GITHUB_SHA']:", bootstrap)
         self.assertIn("ref: 71d0f4314a4a9fadc9d404f6879586f6be2d93ae", bootstrap)
         self.assertIn("/baseline/scripts /candidate/scripts", bootstrap)
         self.assertIn("target=/baseline,readonly", bootstrap)

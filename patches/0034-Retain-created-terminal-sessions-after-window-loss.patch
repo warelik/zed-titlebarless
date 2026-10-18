@@ -1,0 +1,216 @@
+From 953f942328f7a3264229f4f61f394417ce288e38 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 08:18:18 +0000
+Subject: [PATCH] Retain confirmed sessions independently of startup window
+ lifetime
+
+---
+ crates/agent_ui/src/agent_panel.rs            | 146 +++++++++++++-----
+ .../src/terminal_thread_metadata_store.rs     |  12 ++
+ 2 files changed, 119 insertions(+), 39 deletions(-)
+
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index 9d1a06f..47158e3 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -2226,23 +2226,56 @@ impl AgentPanel {
+         let workspace_id = self.workspace_id;
+         let project = self.project.downgrade();
+ 
+-        cx.spawn_in(window, async move |this, cx| {
+-            let PersistentTerminal { terminal, session } = match terminal_task.await {
++        let spawn_project = self.project.clone();
++        let spawn_workspace = workspace.clone();
++        let recovery_metadata = TerminalThreadMetadata {
++            terminal_id,
++            title: initial_title.clone().unwrap_or_else(|| "Terminal".into()),
++            custom_title: custom_title.clone(),
++            created_at: created_at.unwrap_or_else(Utc::now),
++            worktree_paths: self.project.read(cx).worktree_paths(cx),
++            remote_connection: self.project.read(cx).remote_connection_options(cx),
++            working_directory: terminal_working_directory.clone(),
++        };
++        let mut window_cx = window.to_async(cx);
++        cx.spawn(async move |this, cx| {
++            let result = terminal_task.await;
++            let closed = cx.update(|cx| {
++                let store = TerminalThreadMetadataStore::try_global(cx);
++                if result.as_ref().is_ok_and(|terminal| terminal.session == PersistentSession::Created) {
++                    if let Some(store) = &store {
++                        store.update(cx, |store, cx| store.retain_created_session(recovery_metadata, cx));
++                    }
++                }
++                let closed = this.update(cx, |this, cx| {
++                    this.pending_terminal_spawns.remove(&terminal_id);
++                    let closed = this.closed_terminal_spawns.remove(&terminal_id);
++                    cx.notify();
++                    closed
++                }).unwrap_or_else(|_| store.as_ref().is_some_and(|store| {
++                    store.read(cx).is_intentionally_closing(terminal_id)
++                }));
++                if closed {
++                    let no_session = result.as_ref().is_ok_and(|terminal| {
++                        terminal.session == PersistentSession::Unavailable
++                    }) && store.as_ref().is_some_and(|store| store.read(cx).entry(terminal_id).is_none());
++                    if no_session {
++                        if let Some(store) = store {
++                            store.update(cx, |store, cx| store.complete_intentional_close(terminal_id, true, cx));
++                        }
++                    } else {
++                        kill_persistent_terminal_session_and_delete_metadata(
++                            spawn_project, spawn_workspace, terminal_id, true, cx,
++                        );
++                    }
++                }
++                closed
++            });
++            if closed { return anyhow::Ok(()); }
++            let PersistentTerminal { terminal, session } = match result {
+                 Ok(terminal) => terminal,
+                 Err(error) => {
+-                    this.update_in(cx, |this, window, cx| {
+-                        this.pending_terminal_spawns.remove(&terminal_id);
+-                        cx.notify();
+-                        if this.closed_terminal_spawns.remove(&terminal_id) {
+-                            kill_persistent_terminal_session_and_delete_metadata(
+-                                this.project.clone(),
+-                                this.workspace.clone(),
+-                                terminal_id,
+-                                true,
+-                                cx,
+-                            );
+-                            return;
+-                        }
++                    this.update_in(&mut window_cx, |this, window, cx| {
+                         log::error!("failed to spawn agent panel terminal: {error:#}");
+                         let is_remote_disconnected = project.upgrade().is_some_and(|project| {
+                             is_remote_connection_disconnected(project.read(cx), cx)
+@@ -2330,29 +2363,7 @@ impl AgentPanel {
+             // A reattached session already ran the init command when it started,
+             // and its program would receive the command as input.
+             let init_command = init_command.filter(|_| session != PersistentSession::Reattached);
+-            this.update_in(cx, |this, window, cx| {
+-                this.pending_terminal_spawns.remove(&terminal_id);
+-                cx.notify();
+-                if this.closed_terminal_spawns.remove(&terminal_id) {
+-                    let unavailable_without_metadata = session == PersistentSession::Unavailable
+-                        && TerminalThreadMetadataStore::try_global(cx)
+-                            .is_some_and(|store| store.read(cx).entry(terminal_id).is_none());
+-                    if unavailable_without_metadata {
+-                        if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+-                            store.update(cx, |store, cx| store.complete_intentional_close(terminal_id, true, cx));
+-                        }
+-                    } else {
+-                        kill_persistent_terminal_session_and_delete_metadata(
+-                            this.project.clone(),
+-                            this.workspace.clone(),
+-                            terminal_id,
+-                            true,
+-                            cx,
+-                        );
+-                    }
+-                    return;
+-                }
+-
++            this.update_in(&mut window_cx, |this, window, cx| {
+                 let terminal_for_init_command = terminal.clone();
+                 let terminal_view = cx.new(|cx| {
+                     let mut view =
+@@ -2375,7 +2386,7 @@ impl AgentPanel {
+                     cx,
+                 );
+                 Self::write_terminal_init_command(&terminal_for_init_command, init_command, cx);
+-            })?;
++            }).log_err();
+             anyhow::Ok(())
+         })
+         .detach_and_log_err(cx);
+@@ -18543,4 +18554,61 @@ mod tests {
+         assert!(fake.kill_history().is_empty(), "an exited unmanaged shell needs no shpool cleanup");
+     }
+ 
++    #[gpui::test]
++    async fn test_created_terminal_survives_window_drop_during_startup(cx: &mut TestAppContext) {
++        let (panel, mut cx) = setup_panel(cx).await;
++        cx.update(|_, cx| TerminalThreadMetadataStore::init_global(cx));
++        let project = panel.read_with(&cx, |panel, _| panel.project.clone());
++        let fake = project.update(&mut cx, |project, _| project.enable_fake_shpool(&[]));
++        let (release, gate) = futures::channel::oneshot::channel();
++        let id = panel.update_in(&mut cx, |panel, window, cx| {
++            panel.test_terminal_spawn_gate = Some(gate);
++            panel.new_terminal(None, AgentThreadSource::AgentPanel, window, cx);
++            *panel.pending_terminal_spawns.iter().next().expect("startup must be gated")
++        });
++        cx.run_until_parked();
++        cx.update(|window, _| window.remove_window());
++        drop(panel);
++        drop(project);
++        release.send(()).expect("app-scoped startup must survive its window");
++        cx.cx.run_until_parked();
++        assert!(fake.has_session(&id.session_name()));
++        cx.cx.update(|cx| {
++            let store = TerminalThreadMetadataStore::global(cx);
++            assert!(store.read(cx).entry(id).is_some(), "created session must remain discoverable");
++            assert!(!store.read(cx).is_restore_blocked(id));
++        });
++    }
++
++    #[gpui::test]
++    async fn test_failed_close_of_new_pending_session_keeps_retry_metadata(cx: &mut TestAppContext) {
++        let (panel, mut cx) = setup_panel(cx).await;
++        cx.update(|_, cx| TerminalThreadMetadataStore::init_global(cx));
++        let project = panel.read_with(&cx, |panel, _| panel.project.clone());
++        let fake = project.update(&mut cx, |project, _| project.enable_fake_shpool(&[]));
++        fake.state.lock().kill_error = Some("injected cleanup failure".to_string());
++        let (release, gate) = futures::channel::oneshot::channel();
++        let id = panel.update_in(&mut cx, |panel, window, cx| {
++            panel.test_terminal_spawn_gate = Some(gate);
++            panel.new_terminal(None, AgentThreadSource::AgentPanel, window, cx);
++            let id = *panel.pending_terminal_spawns.iter().next().expect("startup must be gated");
++            panel.close_terminal(id, window, cx);
++            id
++        });
++        assert!(fake.kill_history().is_empty());
++        release.send(()).unwrap();
++        cx.run_until_parked();
++        assert!(fake.has_session(&id.session_name()));
++        cx.update(|_, cx| {
++            let store = TerminalThreadMetadataStore::global(cx);
++            assert!(store.read(cx).entry(id).is_some());
++            assert!(!store.read(cx).is_restore_blocked(id));
++        });
++        fake.state.lock().kill_error = None;
++        panel.update_in(&mut cx, |panel, window, cx| panel.close_terminal(id, window, cx));
++        cx.run_until_parked();
++        assert!(!fake.has_session(&id.session_name()));
++        cx.update(|_, cx| assert!(TerminalThreadMetadataStore::global(cx).read(cx).entry(id).is_none()));
++    }
++
+ }
+diff --git a/crates/agent_ui/src/terminal_thread_metadata_store.rs b/crates/agent_ui/src/terminal_thread_metadata_store.rs
+index 80a51f1..5164704 100644
+--- a/crates/agent_ui/src/terminal_thread_metadata_store.rs
++++ b/crates/agent_ui/src/terminal_thread_metadata_store.rs
+@@ -312,6 +312,18 @@ impl TerminalThreadMetadataStore {
+         cx.notify();
+     }
+ 
++    /// A confirmed newly created session must stay recoverable even if its
++    /// window disappeared or a close is waiting for creation to finish.
++    pub fn retain_created_session(&mut self, metadata: TerminalThreadMetadata, cx: &mut Context<Self>) {
++        let id = metadata.terminal_id;
++        if self.intentionally_closed_terminal_ids.contains(&id) || self.entry(id).is_some() {
++            return;
++        }
++        self.deleted_terminal_ids.remove(&id);
++        self.save_internal(metadata);
++        cx.notify();
++    }
++
+     pub fn begin_intentional_close(&mut self, terminal_id: TerminalId) -> bool {
+         !self.intentionally_closed_terminal_ids.contains(&terminal_id)
+             && self.closing_terminal_ids.insert(terminal_id)
+-- 
+2.43.0
+

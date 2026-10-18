@@ -353,7 +353,15 @@
     ],
     [
       "agent_ui",
+      "test_created_terminal_survives_window_drop_during_startup"
+    ],
+    [
+      "agent_ui",
       "test_empty_workspace_keeps_agent_toolbar_with_threads_in_panel"
+    ],
+    [
+      "agent_ui",
+      "test_failed_close_of_new_pending_session_keeps_retry_metadata"
     ],
     [
       "agent_ui",
@@ -422,6 +430,10 @@
     [
       "auto_update",
       "test_fork_same_version_with_newer_release_id_updates_stable_binary"
+    ],
+    [
+      "crashes",
+      "test_crash_handler_child_uses_the_resolved_log_directory"
     ],
     [
       "project",

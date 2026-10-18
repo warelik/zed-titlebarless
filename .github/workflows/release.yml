@@ -10,7 +10,7 @@ on:
         type: boolean
         default: false
       policy_ref:
-        description: Exact reviewed policy commit (defaults to this workflow revision)
+        description: Exact reviewed policy commit (must match the dispatched downstream revision)
         required: false
       full_pr:
         description: Completed complete-project review PR for bootstrap
@@ -51,7 +51,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          ref: ${{ vars.ZED_TRUSTED_POLICY || 'dbf40ff4bd626082e0ad3d9873c5b6ad5fa7f941' }}
+          ref: dbf40ff4bd626082e0ad3d9873c5b6ad5fa7f941
           path: gate
           persist-credentials: false
       # This immutable reviewed baseline includes the owner's new two-review,
@@ -75,6 +75,8 @@ jobs:
           import release as gate
           repo = os.environ['GITHUB_REPOSITORY']
           policy = subprocess.check_output(['git', '-C', 'candidate', 'rev-parse', 'HEAD'], text=True).strip()
+          if policy != os.environ['GITHUB_SHA']:
+              raise SystemExit('Bootstrap policy must match the dispatched downstream revision')
           patchset = gate.patch_identity(pathlib.Path('candidate/patches'))[1]
           if os.environ['FULL_PR'] == os.environ['DELTA_PR']:
               raise SystemExit('Bootstrap requires two distinct review PRs')
@@ -114,10 +116,11 @@ jobs:
           def identities(text):
               return {(c.name, f.name) for c in ast.parse(text).body if isinstance(c, ast.ClassDef)
                       for f in c.body if isinstance(f, ast.FunctionDef) and f.name.startswith('test_')}
-          for old in pathlib.Path('gate/scripts').glob('test_*.py'):
-              proposed = pathlib.Path('candidate/scripts') / old.name
-              if not proposed.is_file() or identities(old.read_text()) - identities(proposed.read_text()):
-                  raise SystemExit('Bootstrap must retain every trusted test identity')
+          for directory in ['gate/scripts', 'baseline/scripts']:
+              for old in pathlib.Path(directory).glob('test_*.py'):
+                  proposed = pathlib.Path('candidate/scripts') / old.name
+                  if not proposed.is_file() or identities(old.read_text()) - identities(proposed.read_text()):
+                      raise SystemExit('Bootstrap must retain every trusted and pinned baseline test identity')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write('policy_ref=' + policy + '\n')
               out.write('delta_base=' + delta_base + '\n')
