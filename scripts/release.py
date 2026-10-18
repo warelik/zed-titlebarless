@@ -1565,6 +1565,8 @@ def run_regressions(app, manifest, upstream, candidate):
         raise ValueError("Rust regressions require exact source commits")
     with tempfile.TemporaryDirectory(prefix="zed-regressions-") as directory:
         env = isolated_environment(Path(directory))
+        # GPUI records the selectors used by render regressions only with debug assertions.
+        env["CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS"] = "true"
         if capture(["git", "rev-parse", "HEAD"], cwd=app, env=env).strip() != candidate:
             raise ValueError("Rust regression checkout differs from the reviewed candidate")
         subprocess.run(["git", "merge-base", "--is-ancestor", upstream, candidate],

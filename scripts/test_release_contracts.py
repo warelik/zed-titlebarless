@@ -1126,6 +1126,15 @@ class RustRegressionRunnerTests(unittest.TestCase):
             self.assertTrue(path.is_dir())
             self.assertEqual(path.stat().st_mode & 0o777, 0o700)
 
+    def test_debug_assertions_only_enabled_for_regression_compilation(self):
+        key = "CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS"
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.dict(os.environ, {key: "true"}),
+        ):
+            self.assertNotIn(key, release.isolated_environment(Path(temporary)))
+        self.exercise()
+
     def exercise(
         self,
         *,
@@ -1169,6 +1178,7 @@ class RustRegressionRunnerTests(unittest.TestCase):
                 "CARGO_HOME": "/toolchain-cache/cargo",
                 "RUSTUP_HOME": "/toolchain-cache/rustup",
                 "RUSTUP_TOOLCHAIN": "pinned-toolchain",
+                "CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS": "false",
                 "GH_TOKEN": "not-forwarded",
                 "GITHUB_TOKEN": "not-forwarded",
                 "CODEX_REQUEST_TOKEN": "not-forwarded",
@@ -1194,6 +1204,7 @@ class RustRegressionRunnerTests(unittest.TestCase):
                     ]
                     return json.dumps({"packages": packages})
                 if args[:2] == ["cargo", "test"] and "--no-run" in args:
+                    self.assertEqual(env.get("CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS"), "true")
                     artifact = {
                         "reason": "compiler-artifact",
                         "package_id": "auto-update-id",
