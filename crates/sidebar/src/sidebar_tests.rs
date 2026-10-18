@@ -17492,11 +17492,11 @@ async fn test_stock_active_entry_not_synced_from_agent_panel_when_not_in_agent_p
 
 #[test]
 fn test_terminal_remote_connection_match_distinguishes_ssh_arguments() {
-    use remote::{SshConnectionOptions, SshConnectionHost};
+    use remote::SshConnectionOptions;
 
     let connection = |args: &[&str]| {
         RemoteConnectionOptions::Ssh(SshConnectionOptions {
-            host: SshConnectionHost::from("example.com"),
+            host: "example.com".into(),
             username: Some("developer".into()),
             port: Some(22),
             args: Some(args.iter().map(|arg| (*arg).to_string()).collect()),
