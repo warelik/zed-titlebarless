@@ -155,7 +155,8 @@ fi
     };
 }
 
-/// Prelude searching for shpool binary and socket path.
+/// Prelude searching for shpool binary and socket path in script regressions.
+#[cfg(test)]
 const SHPOOL_SCRIPT_PRELUDE: &str = shpool_script_prelude!("0");
 
 /// Prelude used for destructive operations, which must fail when shpool is unavailable.
