@@ -2119,6 +2119,8 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
     #[gpui::test]
     #[cfg(unix)]
     async fn test_isolated_shpool_daemon_probe_and_kill(cx: &mut gpui::TestAppContext) {
+        // Real processes need wall time. With parking enabled, executor timers
+        // advance by elapsed real time instead of simulating daemon progress.
         cx.executor().allow_parking();
         if std::env::var("ZED_TEST_REAL_SHPOOL").is_err() {
             assert!(
@@ -2233,7 +2235,7 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
             if std::fs::read_to_string(&marker).ok().as_deref() == Some(expected_output.as_str()) {
                 break;
             }
-            smol::Timer::after(Duration::from_millis(20)).await;
+            cx.background_executor.timer(Duration::from_millis(20)).await;
         }
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), expected_output);
 
