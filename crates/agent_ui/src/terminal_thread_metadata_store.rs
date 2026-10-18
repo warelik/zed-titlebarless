@@ -23,6 +23,21 @@ pub fn init(cx: &mut App) {
     TerminalThreadMetadataStore::init_global(cx);
 }
 
+fn same_terminal_remote_connection(
+    left: Option<&RemoteConnectionOptions>,
+    right: Option<&RemoteConnectionOptions>,
+) -> bool {
+    if !same_remote_connection_identity(left, right) {
+        return false;
+    }
+    match (left, right) {
+        (Some(RemoteConnectionOptions::Ssh(left)), Some(RemoteConnectionOptions::Ssh(right))) => {
+            left.args == right.args
+        }
+        _ => true,
+    }
+}
+
 struct GlobalTerminalThreadMetadataStore(Entity<TerminalThreadMetadataStore>);
 impl Global for GlobalTerminalThreadMetadataStore {}
 
@@ -239,7 +254,7 @@ impl TerminalThreadMetadataStore {
             .flatten()
             .filter_map(|id| self.terminals.get(id))
             .filter(move |terminal| {
-                same_remote_connection_identity(
+                same_terminal_remote_connection(
                     terminal.remote_connection.as_ref(),
                     remote_connection,
                 )
@@ -257,7 +272,7 @@ impl TerminalThreadMetadataStore {
             .flatten()
             .filter_map(|id| self.terminals.get(id))
             .filter(move |terminal| {
-                same_remote_connection_identity(
+                same_terminal_remote_connection(
                     terminal.remote_connection.as_ref(),
                     remote_connection,
                 )
@@ -272,7 +287,7 @@ impl TerminalThreadMetadataStore {
     ) -> bool {
         self.entries().any(|terminal| {
             Some(terminal.terminal_id) != terminal_id
-                && same_remote_connection_identity(
+                && same_terminal_remote_connection(
                     terminal.remote_connection.as_ref(),
                     remote_connection,
                 )
@@ -323,7 +338,7 @@ impl TerminalThreadMetadataStore {
             .flatten()
             .filter(|id| {
                 self.terminals.get(id).is_some_and(|terminal| {
-                    same_remote_connection_identity(
+                    same_terminal_remote_connection(
                         terminal.remote_connection.as_ref(),
                         remote_connection,
                     )
@@ -360,7 +375,7 @@ impl TerminalThreadMetadataStore {
         for terminal_id in terminal_ids {
             if let Some(terminal) = self.terminals.get(&terminal_id).cloned() {
                 if terminal.folder_paths().is_empty()
-                    && same_remote_connection_identity(
+                    && same_terminal_remote_connection(
                         terminal.remote_connection.as_ref(),
                         remote_connection,
                     )
@@ -1238,4 +1253,81 @@ mod tests {
             );
         });
     }
+
+    #[gpui::test]
+    async fn test_ssh_routing_arguments_scope_terminal_project_assignment(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let connection = |configuration: &str| {
+            RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+                host: "same-host".into(),
+                username: Some("developer".into()),
+                port: Some(22),
+                args: Some(vec!["-F".into(), configuration.into()]),
+                ..Default::default()
+            })
+        };
+        let project_connection = connection("work.conf");
+        let other_connection = connection("personal.conf");
+        let project_paths = PathList::new(&[Path::new("/repo")]);
+        let project_worktree_paths = WorktreePaths::from_folder_paths(&project_paths);
+
+        let mut matching = metadata("Matching", WorktreePaths::default());
+        matching.working_directory = Some(PathBuf::from("/repo"));
+        matching.remote_connection = Some(project_connection.clone());
+        let matching_id = matching.terminal_id;
+
+        let mut other_destination = metadata("Other destination", WorktreePaths::default());
+        other_destination.working_directory = Some(PathBuf::from("/repo"));
+        other_destination.remote_connection = Some(other_connection.clone());
+        let other_destination_id = other_destination.terminal_id;
+
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(matching, cx);
+                store.save(other_destination, cx);
+                store.update_worktree_paths_for_project(
+                    &project_worktree_paths,
+                    Some(&project_connection),
+                    cx,
+                );
+            });
+        });
+
+        cx.update(|cx| {
+            let store = TerminalThreadMetadataStore::global(cx);
+            let store = store.read(cx);
+            assert_eq!(
+                store.entry(matching_id).unwrap().worktree_paths,
+                project_worktree_paths
+            );
+            assert!(
+                store
+                    .entry(other_destination_id)
+                    .unwrap()
+                    .worktree_paths
+                    .is_empty(),
+                "an SSH destination with different routing arguments must not be assigned to the project"
+            );
+            assert_eq!(
+                store
+                    .entries_for_path(&project_paths, Some(&project_connection))
+                    .map(|entry| entry.terminal_id)
+                    .collect::<Vec<_>>(),
+                vec![matching_id],
+                "grouping and activation lookups must exclude the other SSH destination"
+            );
+            assert!(
+                !store.path_is_referenced_by_terminal(
+                    None,
+                    Path::new("/repo"),
+                    Some(&other_connection),
+                ),
+                "archive cleanup must not treat another SSH destination as a path reference"
+            );
+        });
+    }
+
 }
