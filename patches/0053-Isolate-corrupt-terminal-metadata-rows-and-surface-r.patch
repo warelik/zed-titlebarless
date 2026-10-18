@@ -1,0 +1,248 @@
+From d48f38c5a7ccbe7f64f08ee4315d028e16f6e5aa Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 21:49:21 +0000
+Subject: [PATCH] Isolate corrupt terminal metadata rows and surface
+ restoration failures
+
+Keep each malformed saved row intact, restore every valid row independently, and show a persistent sidebar warning. Cover malformed and unknown remote JSON, invalid timestamps, raw-data preservation, and recovery after repair without changing existing regression assertions.
+---
+ .../src/terminal_thread_metadata_store.rs     | 125 ++++++++++++++++--
+ crates/sidebar/src/sidebar.rs                 |  11 ++
+ 2 files changed, 128 insertions(+), 8 deletions(-)
+
+diff --git a/crates/agent_ui/src/terminal_thread_metadata_store.rs b/crates/agent_ui/src/terminal_thread_metadata_store.rs
+index a36b04e..4b003c8 100644
+--- a/crates/agent_ui/src/terminal_thread_metadata_store.rs
++++ b/crates/agent_ui/src/terminal_thread_metadata_store.rs
+@@ -175,6 +175,7 @@ pub struct TerminalThreadMetadataStore {
+     terminals_by_paths: HashMap<PathList, HashSet<TerminalId>>,
+     terminals_by_main_paths: HashMap<PathList, HashSet<TerminalId>>,
+     reload_task: Option<Shared<Task<()>>>,
++    load_error: Option<SharedString>,
+     pending_terminal_ops_tx: async_channel::Sender<DbOperation>,
+     _db_operations_task: Task<()>,
+     deleted_terminal_ids: HashSet<TerminalId>,
+@@ -234,6 +235,10 @@ impl TerminalThreadMetadataStore {
+         self.terminals.values()
+     }
+ 
++    pub fn load_error(&self) -> Option<&SharedString> {
++        self.load_error.as_ref()
++    }
++
+     pub fn reload_task(&self) -> Shared<Task<()>> {
+         self.reload_task
+             .clone()
+@@ -554,6 +559,7 @@ impl TerminalThreadMetadataStore {
+             closing_terminal_ids: HashSet::default(),
+             intentionally_closed_terminal_ids: HashSet::default(),
+             reload_task: None,
++            load_error: None,
+             pending_terminal_ops_tx: tx,
+             _db_operations_task,
+         };
+@@ -581,11 +587,23 @@ impl TerminalThreadMetadataStore {
+                         db.list()
+                             .context("Failed to fetch terminal thread metadata")
+                     })
+-                    .await
+-                    .log_err()
+-                    .unwrap_or_default();
++                    .await;
+ 
+                 this.update(cx, |this, cx| {
++                    let rows = match rows {
++                        Ok(loaded) => {
++                            this.load_error = (loaded.failed_rows > 0).then(|| {
++                                log::warn!("Unable to decode {} saved terminal metadata rows; originals retained", loaded.failed_rows);
++                                format!("Some saved terminals could not be restored ({}). Their saved data was kept.", loaded.failed_rows).into()
++                            });
++                            loaded.rows
++                        }
++                        Err(error) => {
++                            log::error!("Failed to fetch terminal thread metadata: {error:#}");
++                            this.load_error = Some("Saved terminals could not be loaded. Their saved data was kept.".into());
++                            Vec::new()
++                        }
++                    };
+                     for row in rows {
+                         if !this.deleted_terminal_ids.contains(&row.terminal_id)
+                             && !this.terminals.contains_key(&row.terminal_id)
+@@ -607,6 +625,11 @@ impl TerminalThreadMetadataStore {
+ 
+ struct TerminalThreadMetadataDb(ThreadSafeConnection);
+ 
++struct LoadedTerminalMetadata {
++    rows: Vec<TerminalThreadMetadata>,
++    failed_rows: usize,
++}
++
+ impl Domain for TerminalThreadMetadataDb {
+     const NAME: &str = stringify!(TerminalThreadMetadataDb);
+ 
+@@ -647,14 +670,26 @@ fn remote_connection_for_persistence(
+ }
+ 
+ impl TerminalThreadMetadataDb {
+-    pub fn list(&self) -> anyhow::Result<Vec<TerminalThreadMetadata>> {
+-        self.select::<TerminalThreadMetadata>(
++    fn list(&self) -> anyhow::Result<LoadedTerminalMetadata> {
++        let mut statement = Statement::prepare(
++            &self.0,
+             "SELECT terminal_id, title, custom_title, created_at, \
+             working_directory, folder_paths, folder_paths_order, main_worktree_paths, \
+             main_worktree_paths_order, remote_connection \
+             FROM sidebar_terminal_threads \
+             ORDER BY created_at DESC",
+-        )?()
++        )?;
++        // Decode each row independently. Never treat an invalid remote host as
++        // local, rewrite its payload, or let it hide unrelated valid terminals.
++        let decoded = statement.map(|row| Ok(row.column::<TerminalThreadMetadata>()))?;
++        let mut loaded = LoadedTerminalMetadata { rows: Vec::new(), failed_rows: 0 };
++        for row in decoded {
++            match row {
++                Ok(row) => loaded.rows.push(row),
++                Err(_) => loaded.failed_rows += 1,
++            }
++        }
++        Ok(loaded)
+     }
+ 
+     pub async fn save(&self, row: TerminalThreadMetadata) -> anyhow::Result<()> {
+@@ -898,7 +933,9 @@ mod tests {
+         let mut expected = legacy;
+         expected.remote_connection = remote_connection_for_persistence(expected.remote_connection);
+         // Loading must never expose the historical password, even before scrub.
+-        assert_eq!(db.list().unwrap(), vec![expected.clone()]);
++        let loaded = db.list().unwrap();
++        assert_eq!(loaded.failed_rows, 0);
++        assert_eq!(loaded.rows, vec![expected.clone()]);
+         let before = db.select::<String>("SELECT remote_connection FROM sidebar_terminal_threads").unwrap()().unwrap();
+         assert!(before[0].contains("synthetic-legacy-secret"));
+         for _ in 0..2 {
+@@ -910,7 +947,9 @@ mod tests {
+         assert!(!after[0].contains("synthetic-legacy-secret"));
+         let decoded: serde_json::Value = serde_json::from_str(&after[0]).unwrap();
+         assert!(decoded["Ssh"].get("password").is_none());
+-        assert_eq!(db.list().unwrap(), vec![expected]);
++        let loaded = db.list().unwrap();
++        assert_eq!(loaded.failed_rows, 0);
++        assert_eq!(loaded.rows, vec![expected]);
+         // Malformed legacy payloads and unrelated connection variants must not
+         // abort the scrub or silently become a local connection.
+         for raw in [Some("not-json".to_string()), Some(r#"{"Mock":{"id":7}}"#.to_string()), None] {
+@@ -928,6 +967,75 @@ mod tests {
+         }
+     }
+ 
++    #[gpui::test]
++    async fn test_corrupt_terminal_metadata_rows_are_isolated_and_recoverable(cx: &mut TestAppContext) {
++        init_test(cx);
++        let store = cx.update(|cx| TerminalThreadMetadataStore::global(cx));
++        let db = store.read_with(cx, |store, _| store.db.clone());
++        let paths = PathList::new(&[Path::new("/saved-project")]);
++        let valid = metadata("Valid", WorktreePaths::from_folder_paths(&paths));
++        let malformed = metadata("Malformed remote", WorktreePaths::from_folder_paths(&paths));
++        let unknown = metadata("Unknown remote", WorktreePaths::from_folder_paths(&paths));
++        let bad_date = metadata("Invalid date", WorktreePaths::from_folder_paths(&paths));
++        let all = [valid.clone(), malformed.clone(), unknown.clone(), bad_date.clone()];
++        for row in &all {
++            db.save(row.clone()).await.unwrap();
++        }
++        for (id, raw) in [
++            (malformed.terminal_id, "not-json"),
++            (unknown.terminal_id, r#"{"UnknownFutureTransport":{"host":"example.com"}}"#),
++        ] {
++            let key = id.to_key_string();
++            let raw = raw.to_string();
++            db.write(move |conn| {
++                let mut statement = Statement::prepare(conn, "UPDATE sidebar_terminal_threads SET remote_connection = ?1 WHERE terminal_id = ?2")?;
++                let next = statement.bind(&raw, 1)?;
++                statement.bind(&key, next)?;
++                statement.exec()
++            }).await.unwrap();
++        }
++        let key = bad_date.terminal_id.to_key_string();
++        db.write(move |conn| {
++            let mut statement = Statement::prepare(conn, "UPDATE sidebar_terminal_threads SET created_at = 'invalid-date' WHERE terminal_id = ?1")?;
++            statement.bind(&key, 1)?;
++            statement.exec()
++        }).await.unwrap();
++        store.update(cx, |store, cx| store.reload(cx));
++        store.read_with(cx, |store, _| store.reload_task()).await;
++        store.read_with(cx, |store, _| {
++            assert_eq!(store.entry(valid.terminal_id), Some(&valid));
++            assert_eq!(store.entries().count(), 1);
++            assert!(store.entries_for_path(&paths, None).any(|row| row.terminal_id == valid.terminal_id));
++            for row in [&malformed, &unknown, &bad_date] {
++                assert!(store.entry(row.terminal_id).is_none(), "corrupt metadata must not become a local terminal");
++            }
++            assert!(store.load_error().unwrap().contains("(3)"));
++        });
++        // Loading is read-only: preserve the exact original payloads for recovery.
++        let raw = db.select::<String>("SELECT remote_connection FROM sidebar_terminal_threads WHERE remote_connection IS NOT NULL ORDER BY title").unwrap()().unwrap();
++        assert_eq!(raw, vec!["not-json", r#"{"UnknownFutureTransport":{"host":"example.com"}}"#]);
++        let date = db.select::<String>("SELECT created_at FROM sidebar_terminal_threads WHERE title = 'Invalid date'").unwrap()().unwrap();
++        assert_eq!(date, vec!["invalid-date"]);
++        // Once the stored values are repaired, reload restores every row and
++        // clears the visible error without restarting or deleting anything.
++        let restored_date = bad_date.created_at.to_rfc3339();
++        db.write(move |conn| {
++            Statement::prepare(conn, "UPDATE sidebar_terminal_threads SET remote_connection = NULL")?.exec()?;
++            let mut statement = Statement::prepare(conn, "UPDATE sidebar_terminal_threads SET created_at = ?1 WHERE title = 'Invalid date'")?;
++            statement.bind(&restored_date, 1)?;
++            statement.exec()
++        }).await.unwrap();
++        store.update(cx, |store, cx| store.reload(cx));
++        store.read_with(cx, |store, _| store.reload_task()).await;
++        store.read_with(cx, |store, _| {
++            assert!(store.load_error().is_none());
++            assert_eq!(store.entries().count(), all.len());
++            for row in &all {
++                assert_eq!(store.entry(row.terminal_id), Some(row));
++            }
++        });
++    }
++
+     #[test]
+     fn test_terminal_title_prefix_preserves_non_alphanumeric_prefixes() {
+         assert_eq!(terminal_title_prefix("✳ Thinking"), Some("✳ "));
+@@ -1175,6 +1283,7 @@ mod tests {
+                 terminals_by_paths: HashMap::default(),
+                 terminals_by_main_paths: HashMap::default(),
+                 reload_task: None,
++                load_error: None,
+                 pending_terminal_ops_tx,
+                 _db_operations_task: Task::ready(()),
+                 deleted_terminal_ids: HashSet::default(),
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index 30a6df4..50a2cc6 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -8816,6 +8816,8 @@ impl Render for Sidebar {
+ 
+         let no_open_projects = !self.contents.has_open_projects;
+         let no_search_results = self.contents.entries.is_empty();
++        let terminal_load_error = TerminalThreadMetadataStore::try_global(cx)
++            .and_then(|store| store.read(cx).load_error().cloned());
+ 
+         v_flex()
+             .id("workspace-sidebar")
+@@ -8898,6 +8900,15 @@ impl Render for Sidebar {
+             .map(|this| match &self.view {
+                 SidebarView::ThreadList => this
+                     .child(self.render_sidebar_header(no_open_projects, window, cx))
++                    .when_some(terminal_load_error, |this, error| {
++                        this.child(
++                            div()
++                                .id("terminal-metadata-load-error")
++                                .p_2()
++                                .flex_shrink_0()
++                                .child(Label::new(error).size(LabelSize::Small).color(Color::Warning)),
++                        )
++                    })
+                     .map(|this| {
+                         if no_open_projects {
+                             this.child(self.render_empty_state(cx))

@@ -357,6 +357,10 @@
     ],
     [
       "agent_ui",
+      "test_corrupt_terminal_metadata_rows_are_isolated_and_recoverable"
+    ],
+    [
+      "agent_ui",
       "test_created_terminal_survives_window_drop_during_startup"
     ],
     [
