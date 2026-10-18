@@ -1346,6 +1346,8 @@ class RustRegressionRunnerTests(unittest.TestCase):
                 commands.append((args, env.copy()))
                 if args[0] == "git":
                     return SimpleNamespace(returncode=0, stdout="")
+                if args[1:3] == ["--list", "--format"]:
+                    return SimpleNamespace(returncode=0, stdout=listing)
                 test_runs.append((args, env.copy()))
                 if runtime_timeout:
                     raise subprocess.TimeoutExpired(args, 60, output=result_output)
