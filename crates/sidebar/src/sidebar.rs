@@ -8861,6 +8861,8 @@ impl Render for Sidebar {
 
         let no_open_projects = !self.contents.has_open_projects;
         let no_search_results = self.contents.entries.is_empty();
+        let terminal_load_error = TerminalThreadMetadataStore::try_global(cx)
+            .and_then(|store| store.read(cx).load_error().cloned());
 
         v_flex()
             .id("workspace-sidebar")
@@ -8943,6 +8945,15 @@ impl Render for Sidebar {
             .map(|this| match &self.view {
                 SidebarView::ThreadList => this
                     .child(self.render_sidebar_header(no_open_projects, window, cx))
+                    .when_some(terminal_load_error, |this, error| {
+                        this.child(
+                            div()
+                                .id("terminal-metadata-load-error")
+                                .p_2()
+                                .flex_shrink_0()
+                                .child(Label::new(error).size(LabelSize::Small).color(Color::Warning)),
+                        )
+                    })
                     .map(|this| {
                         if no_open_projects {
                             this.child(self.render_empty_state(cx))
