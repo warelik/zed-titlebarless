@@ -5594,6 +5594,7 @@ impl Sidebar {
         let close_guard = Rc::new(RefCell::new(Some(consent_guard)));
         let callback_kill_succeeded = kill_succeeded.clone();
         let callback_close_guard = close_guard.clone();
+        let callback_metadata = metadata.clone();
         let remove_task = multi_workspace.update(cx, |multi_workspace, cx| {
             multi_workspace.remove_with_pre_remove(
                 workspaces_to_remove,
@@ -5613,7 +5614,7 @@ impl Sidebar {
                         return Ok(false);
                     }
                     if sidebar.update(cx, |this, cx| {
-                        this.close_terminal_with_other_owners(&metadata, close_window_id, cx)
+                        this.close_terminal_with_other_owners(&callback_metadata, close_window_id, cx)
                     })? { return Ok(false); }
                     if !gpui::AsyncApp::update(cx, |cx| begin_terminal_close(terminal_id, cx)) {
                         return Ok(false);
