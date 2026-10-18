@@ -294,12 +294,12 @@ def unspent_heavy_attempt(repo, sha, body):
                 or (info.get("head_sha") != expected_revision and not pull_target)
                 or info.get("path", "").split("@", 1)[0] != ".github/workflows/release.yml"):
             return None
-        record = api(f"repos/{repo}/actions/runs/{run[1]}/jobs?per_page=100")
+        record = api(f"repos/{repo}/actions/runs/{run[1]}/jobs?filter=all&per_page=100")
         jobs = record.get("jobs", [])
         macos = [job for job in jobs if job.get("name") == "Test, Build And Inspect One macOS Application"]
-        if (record.get("total_count", 101) > 100 or len(macos) != 1
-                or macos[0].get("status") != "completed"
-                or macos[0].get("conclusion") != "skipped" or macos[0].get("steps")):
+        if (record.get("total_count", 101) > 100 or len(jobs) != record.get("total_count")
+                or not macos or any(job.get("status") != "completed"
+                    or job.get("conclusion") != "skipped" or job.get("steps") for job in macos)):
             return None
     except (subprocess.CalledProcessError, KeyError, TypeError, ValueError):
         return None
@@ -328,8 +328,10 @@ def final_attempt(repo, pr, sha, config, *, policy_only=False):
             if old_configuration and old_configuration != config:
                 continue
             output(final_failed=old_configuration is None)
+        recorded = re.search(rf"https://github\.com/{re.escape(repo)}/actions/runs/[1-9][0-9]*", body)
         raise ValueError("Final validation was already started for this frozen candidate; "
-                         "inspect its recorded run and reuse its artifacts, do not rebuild")
+                         "inspect its recorded run and reuse its artifacts, do not rebuild. "
+                         + (f"Recorded attempt: {recorded[0]}" if recorded else f"Receipt on PR #{pr}"))
     revision = os.environ.get("GITHUB_SHA", config)
     api(f"repos/{repo}/issues/{pr}/comments", method="POST", data={
         "body": (f"Final validation and single build of `{sha}` / `{config}`: "

@@ -43,6 +43,7 @@ jobs:
       policy_ref: ${{ steps.review.outputs.policy_ref }}
       validation_started: ${{ steps.tests.outputs.started }}
       delta_base: ${{ steps.review.outputs.delta_base }}
+      upstream: ${{ steps.review.outputs.upstream }}
     steps:
       - name: Require The Trusted Default Branch
         env:
@@ -116,6 +117,7 @@ jobs:
                       raise SystemExit('Delta PR must compare against the last published configuration')
                   delta_base = base
               if kind == 'full':
+                  full_upstream = base
                   if sha == policy or pull['head']['ref'] != f'review/{base}-{patchset}':
                       raise SystemExit('Complete-project PR has the wrong review scope')
                   app_manifest = gate.api(f'repos/{repo}/contents/crates/zed/Cargo.toml?ref={sha}')
@@ -147,6 +149,7 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write('policy_ref=' + policy + '\n')
               out.write('delta_base=' + delta_base + '\n')
+              out.write('upstream=' + full_upstream + '\n')
           PY
       - name: Run The Final Approved Policy Suite Once Without Credentials
         id: tests
@@ -513,7 +516,8 @@ jobs:
       always() && github.ref == 'refs/heads/downstream' &&
       github.event.repository.default_branch == 'downstream' &&
       (contains(needs.*.result, 'failure') || needs.prepare.outputs.followup == 'true') &&
-      (vars.ZED_TRUSTED_POLICY != '' || needs.bootstrap-policy.result == 'success') &&
+      ((vars.ZED_TRUSTED_POLICY != '' || needs.bootstrap-policy.result == 'success') ||
+       needs.bootstrap-policy.outputs.validation_started == 'true') &&
       !(needs.bootstrap-policy.result == 'failure' &&
         needs.bootstrap-policy.outputs.validation_started != 'true')
     runs-on: ubuntu-24.04
@@ -538,12 +542,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
-          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream }}
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream || needs.bootstrap-policy.outputs.upstream }}
           CANDIDATE_PR: ${{ needs.prepare.outputs.pr }}
           CANDIDATE_SHA: ${{ needs.prepare.outputs.sha }}
           REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}
           NONBLOCKING_FOLLOWUP: ${{ !contains(needs.*.result, 'failure') && needs.prepare.outputs.followup == 'true' }}
           FINAL_VALIDATION_FAILED: ${{ needs.bootstrap-policy.result == 'failure' || needs.test.result == 'failure' || needs.publish.result == 'failure' || needs.prepare.outputs.final_failed == 'true' }}
+          BOOTSTRAP_VALIDATION_FAILED: ${{ needs.bootstrap-policy.result == 'failure' && needs.bootstrap-policy.outputs.validation_started == 'true' }}
+          BOOTSTRAP_FULL_PR: ${{ inputs.full_pr }}
+          BOOTSTRAP_DELTA_PR: ${{ inputs.delta_pr }}
           CONFIG_SHA: ${{ needs.land.outputs.config || github.sha }}
           DELTA_PR: ${{ needs.prepare.outputs.delta_pr }}
           DELTA_SHA: ${{ needs.prepare.outputs.delta_sha }}
@@ -553,6 +560,21 @@ jobs:
           sys.path.insert(0, str(pathlib.Path('trusted/scripts').resolve()))
           import release
           release.ROOT = pathlib.Path('configuration').resolve()
-          release.request_repair(pathlib.Path(os.environ['RUNNER_TEMP']) / 'zed-repair',
-                                 config=os.environ['CONFIG_SHA'])
+          if os.environ['BOOTSTRAP_VALIDATION_FAILED'] == 'true':
+              # The immutable fallback predates FINAL_VALIDATION_FAILED. Invoke
+              # its verified escalation directly; never create a coding task or
+              # import the failed candidate merely to report bootstrap failure.
+              repo, upstream = os.environ['GITHUB_REPOSITORY'], os.environ['UPSTREAM_SHA']
+              if not release.SHA.fullmatch(upstream):
+                  raise ValueError('Bootstrap failure has no exact reviewed upstream')
+              evidence = release.failure_evidence(repo)
+              links = (f"\n\nFull workflow: https://github.com/{repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+                       f"\nComplete review: https://github.com/{repo}/pull/{os.environ['BOOTSTRAP_FULL_PR']}"
+                       f"\nDelta review: https://github.com/{repo}/pull/{os.environ['BOOTSTRAP_DELTA_PR']}")
+              release.escalation(repo, os.environ['CONFIG_SHA'], upstream,
+                                 'Read-only policy bootstrap validation failed; macOS never started.\n'
+                                 + evidence + links)
+          else:
+              release.request_repair(pathlib.Path(os.environ['RUNNER_TEMP']) / 'zed-repair',
+                                     config=os.environ['CONFIG_SHA'])
           PY

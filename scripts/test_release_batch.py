@@ -128,7 +128,8 @@ class BatchedReviewTests(unittest.TestCase):
         api.assert_not_called()
         self.assertTrue(output.call_args.kwargs["final_failed"])
 
-    def final_receipt_fixture(self, *, macos="skipped", revision_matches=True, pull_target=False):
+    def final_receipt_fixture(self, *, macos="skipped", revision_matches=True, pull_target=False,
+                              earlier_started=False):
         sha, old_config, revision = "c" * 40, "a" * 40, "d" * 40
         receipt = {"body": f"Final validation and single build of `{sha}` / `{old_config}`: "
                            "https://github.com/maintainer/zed-fork/actions/runs/123.\n"
@@ -148,12 +149,17 @@ class BatchedReviewTests(unittest.TestCase):
                         "head_branch": "repair/checked-policy" if pull_target else "downstream",
                         "head_repository": {"full_name": "maintainer/zed-fork"},
                         "path": ".github/workflows/release.yml"}
-            if path.endswith("/jobs?per_page=100"):
-                return {"total_count": 1, "jobs": [{
+            if path.endswith("/jobs?filter=all&per_page=100"):
+                jobs = [{
                     "name": "Test, Build And Inspect One macOS Application",
                     "status": "completed", "conclusion": macos,
                     "steps": [] if macos == "skipped" else [{"name": "Compile"}],
-                }]}
+                }]
+                if earlier_started:
+                    jobs.insert(0, {"name": "Test, Build And Inspect One macOS Application",
+                                    "status": "completed", "conclusion": "failure",
+                                    "steps": [{"name": "Compile", "conclusion": "failure"}]})
+                return {"total_count": len(jobs), "jobs": jobs}
             raise AssertionError(path)
 
         return receipt, api, created
@@ -172,9 +178,11 @@ class BatchedReviewTests(unittest.TestCase):
                 self.assertIn(f"<!-- zed-final:{sha} -->", created[0])
 
     def test_new_configuration_cannot_refund_started_or_unverifiable_heavy_attempt(self):
-        for macos, matching in [("failure", True), ("success", True), ("skipped", False)]:
-            with self.subTest(macos=macos, matching=matching):
-                receipt, api, created = self.final_receipt_fixture(macos=macos, revision_matches=matching)
+        for macos, matching, earlier in [("failure", True, False), ("success", True, False),
+                                         ("skipped", False, False), ("skipped", True, True)]:
+            with self.subTest(macos=macos, matching=matching, earlier=earlier):
+                receipt, api, created = self.final_receipt_fixture(
+                    macos=macos, revision_matches=matching, earlier_started=earlier)
                 with (patch.object(release, "pages", return_value=[receipt]),
                       patch.object(release, "api", side_effect=api),
                       patch.object(release, "output") as output,
@@ -344,6 +352,36 @@ class BatchedReviewTests(unittest.TestCase):
                                                          "merge_base_commit": {"sha": commit}})):
             cutoff = release.adoption_time("maintainer/zed-fork", {"state": "closed", "number": 1}, commit)
         self.assertEqual(cutoff, datetime(2026, 10, 18, 1, tzinfo=timezone.utc))
+
+    def test_missing_pin_bootstrap_failure_uses_verified_escalation_not_a_coding_task(self):
+        import ast
+        import textwrap
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
+        repair = workflow.split("\n  repair:\n", 1)[1]
+        self.assertIn("needs.bootstrap-policy.outputs.validation_started == 'true'", repair)
+        self.assertIn("needs.bootstrap-policy.result == 'failure' && 'dbf40ff4bd626082e0ad3d9873c5b6ad5fa7f941'", repair)
+        script = textwrap.dedent(repair.split("python3 -B - <<'PY'\n", 1)[1].rsplit("\n          PY", 1)[0])
+        guard = next(node for node in ast.parse(script).body if isinstance(node, ast.If))
+        controller = SimpleNamespace(
+            SHA=release.SHA, failure_evidence=Mock(return_value="actual bootstrap failure"),
+            escalation=Mock(side_effect=ValueError("protected escalation")),
+            request_repair=Mock(side_effect=AssertionError("old fallback must not start a coding task")),
+        )
+        environment = {"BOOTSTRAP_VALIDATION_FAILED": "true", "GITHUB_REPOSITORY": "maintainer/zed-fork",
+                       "UPSTREAM_SHA": "b" * 40, "CONFIG_SHA": "a" * 40, "GITHUB_RUN_ID": "123",
+                       "BOOTSTRAP_FULL_PR": "1", "BOOTSTRAP_DELTA_PR": "2"}
+        with patch.dict(os.environ, environment, clear=True), self.assertRaisesRegex(ValueError, "protected escalation"):
+            exec(compile(ast.fix_missing_locations(ast.Module(body=[guard], type_ignores=[])),
+                         "release-workflow-bootstrap-report", "exec"), {"os": os, "release": controller})
+        controller.request_repair.assert_not_called()
+        controller.escalation.assert_called_once()
+        self.assertEqual(controller.escalation.call_args.args[:3],
+                         ("maintainer/zed-fork", "a" * 40, "b" * 40))
+        self.assertIn("/actions/runs/123", controller.escalation.call_args.args[3])
+        self.assertIn("actual bootstrap failure", controller.escalation.call_args.args[3])
 
     def test_inflight_snapshot_is_not_replaced_by_new_upstream_discovery(self):
         sha, patchset = "b" * 40, "d" * 64
