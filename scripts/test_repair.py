@@ -1301,6 +1301,29 @@ class AdoptionTests(unittest.TestCase):
             release.land_repair(Path(directory))
         self.assertTrue(commands)
 
+    def test_missing_delta_review_cannot_reach_index_or_publication(self):
+        commands = []
+
+        def execute(args, **kwargs):
+            commands.append(args)
+            self.assertNotEqual(args[:2], ["git", "apply"], "unreviewed delta must never reach the index")
+            return SimpleNamespace(stdout="", returncode=1)
+
+        with (tempfile.TemporaryDirectory() as directory,
+              patch.dict(os.environ, ENV, clear=True),
+              patch.object(release, "repair_pull", return_value=STATE),
+              patch.object(release, "repair_changes", return_value=(["patches/0009-fix.patch"], False)),
+              patch.object(release, "check_review", return_value=(True, "reviewed")),
+              patch.object(release, "minor_findings", return_value=[]),
+              patch.object(release, "api", return_value={"sha": CONFIG}),
+              patch.object(release, "run", return_value="") as run,
+              patch.object(release.subprocess, "check_output", return_value=b"delta"),
+              patch.object(release.subprocess, "run", side_effect=execute),
+              self.assertRaisesRegex(ValueError, "Delta review does not identify")):
+            release.land_repair(Path(directory))
+        self.assertTrue(commands)
+        self.assertFalse(any(call.args[:2] == ("git", "push") for call in run.call_args_list))
+
     def test_policy_checks_use_only_disposable_paths_and_no_inherited_credentials(self):
         paths = []
         suites = []

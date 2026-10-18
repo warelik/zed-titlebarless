@@ -1653,7 +1653,6 @@ def land_repair(directory):
     changed, policy = repair_changes(state)
     if not changed:
         raise ValueError("Context-only repair must not be adopted")
-    check_delta_for_publication(repo, state["head"])
     ready, reason = check_review(repo, int(os.environ["CANDIDATE_PR"]),
                                  os.environ["CANDIDATE_SHA"], state["upstream"])
     if not ready:
@@ -1679,6 +1678,10 @@ def land_repair(directory):
         if subprocess.run(["git", "check-ignore", "--no-index", "--quiet", path],
                           cwd=work).returncode != 1:
             raise ValueError(f"Repair changes an ignored path: {path}")
+    # Preserve the existing refusal order (source review, stale configuration,
+    # repository path rules), then require the independent delta review before
+    # applying anything to the index or creating/pushing an adopted commit.
+    check_delta_for_publication(repo, state["head"])
     subprocess.run(["git", "apply", "--index", "-"], cwd=work, input=delta, check=True)
     if not policy:
         series = copy_patch_series(state["head"], directory / "patches")
