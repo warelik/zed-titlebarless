@@ -5378,6 +5378,70 @@ async fn test_terminal_close_coordinates_live_owners_in_all_windows(cx: &mut Tes
 }
 
 #[gpui::test]
+async fn test_terminal_close_coordinates_same_window_live_and_pending_owners(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/shared", cx).await;
+    let id = TerminalId::new();
+    let name = id.session_name();
+    let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
+    fake.add_session(&name);
+    let (multi_workspace, cx) = cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let (sidebar, first) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+    let first_workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    let metadata = TerminalThreadMetadata {
+        terminal_id: id, title: "Same-window shared session".into(), custom_title: None,
+        created_at: chrono::Utc::now(),
+        worktree_paths: project.read_with(cx, |project, cx| project.worktree_paths(cx)),
+        remote_connection: None, working_directory: None,
+    };
+    cx.update(|_, cx| TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata.clone(), cx)));
+    first.update_in(cx, |panel, window, cx| panel.restore_terminal(
+        metadata.clone(), false, AgentThreadSource::AgentPanel, None, window, cx,
+    ));
+    cx.run_until_parked();
+    assert!(first.read_with(cx, |panel, _| panel.has_terminal(id)));
+    let second_workspace = multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.retain_active_workspace(cx);
+        mw.test_add_workspace(project.clone(), window, cx)
+    });
+    let second = add_agent_panel(&second_workspace, cx);
+    fake.state.lock().probe_delay = Some(Duration::from_secs(1));
+    second.update_in(cx, |panel, window, cx| panel.restore_terminal(
+        metadata.clone(), false, AgentThreadSource::AgentPanel, None, window, cx,
+    ));
+    cx.run_until_parked();
+    assert!(second.read_with(cx, |panel, _| panel.is_terminal_spawn_pending(id)));
+    assert_eq!(multi_workspace.read_with(cx, |mw, _| mw.workspaces().count()), 2);
+    sidebar.update_in(cx, |sidebar, window, cx| sidebar.close_terminal(
+        &metadata, &ThreadEntryWorkspace::Open(first_workspace.clone()), window, cx,
+    ));
+    cx.run_until_parked();
+    assert!(fake.kill_history().is_empty(), "the second workspace's startup must settle before killing the shared session");
+    cx.update(|_, cx| {
+        let store = TerminalThreadMetadataStore::global(cx);
+        assert!(store.read(cx).entry(id).is_some());
+        assert!(store.read(cx).is_intentionally_closing(id));
+    });
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert_eq!(fake.kill_history(), vec![name.clone()]);
+    assert!(!fake.has_session(&name));
+    for panel in [first, second] {
+        assert!(!panel.read_with(cx, |panel, _| panel.has_terminal(id) || panel.is_terminal_spawn_pending(id)));
+    }
+    multi_workspace.read_with(cx, |mw, _| {
+        assert_eq!(mw.workspace(), &second_workspace);
+        assert_eq!(mw.workspaces().count(), 2);
+        assert!(mw.workspaces().any(|workspace| workspace == &first_workspace));
+        assert!(mw.workspaces().any(|workspace| workspace == &second_workspace));
+    });
+    cx.update(|_, cx| {
+        let store = TerminalThreadMetadataStore::global(cx);
+        assert!(store.read(cx).entry(id).is_none());
+        assert!(!store.read(cx).is_intentionally_closing(id));
+    });
+}
+
+#[gpui::test]
 async fn test_terminal_close_waits_for_pending_owner_in_another_window(cx: &mut TestAppContext) {
     let project = init_test_project_with_agent_panel("/shared", cx).await;
     let id = TerminalId::new();
