@@ -179,7 +179,7 @@ jobs:
               status=$?
               echo "Policy suite failed: $suite (exit $status)"
               if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
-                if ! timeout --signal=KILL 20s docker rm --force "$container" > "$lint/cleanup" 2>&1; then
+                if ! timeout --signal=KILL 20s docker stop --timeout=0 "$container" > "$lint/cleanup" 2>&1; then
                   # A CLI signal may already have stopped the --rm container.
                   if ! grep -F "No such container: $container" "$lint/cleanup"; then
                     cat "$lint/cleanup"

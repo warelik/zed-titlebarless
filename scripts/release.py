@@ -920,8 +920,8 @@ def check_policy(candidate):
                 subprocess.run(command, cwd=root, env=env, check=True, timeout=180)
             except subprocess.TimeoutExpired as error:
                 # Killing the Docker CLI alone leaves its daemon-owned container
-                # running. Stop only this invocation before starting another.
-                cleanup = subprocess.run(["docker", "rm", "--force", container], cwd=root, env=env,
+                # running. Stop this invocation; --rm handles daemon-side removal.
+                cleanup = subprocess.run(["docker", "stop", "--timeout=0", container], cwd=root, env=env,
                                          text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                          check=False, timeout=20)
                 if cleanup.returncode and f"No such container: {container}" not in cleanup.stderr:

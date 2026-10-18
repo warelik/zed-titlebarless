@@ -1366,7 +1366,7 @@ class AdoptionTests(unittest.TestCase):
         calls = []
         def execute(args, **kwargs):
             calls.append(args)
-            if args[:3] == ["docker", "rm", "--force"]:
+            if args[:3] == ["docker", "stop", "--timeout=0"]:
                 self.assertEqual(args[-1], calls[0][calls[0].index("--name") + 1])
                 self.assertEqual(kwargs["timeout"], 20)
                 return SimpleNamespace(returncode=0)
