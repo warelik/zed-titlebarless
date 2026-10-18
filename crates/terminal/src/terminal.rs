@@ -1125,6 +1125,17 @@ impl TerminalBuilder {
         }
     }
 
+    /// Attach a real paired task state to a display-only regression fixture.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_test_task(mut self, spawned_task: SpawnInTerminal) -> Self {
+        let TerminalModeKind::Task { state, completion_tx } = TerminalMode::task(spawned_task).0 else {
+            unreachable!("task constructor must return task mode");
+        };
+        self.terminal.task = Some(state);
+        self.terminal.completion_tx = Some(completion_tx);
+        self
+    }
+
     pub fn new(
         working_directory: Option<PathBuf>,
         mode: TerminalMode,
@@ -4700,6 +4711,40 @@ mod tests {
                 .any(|event| event == &Event::CloseTerminal),
             "Wrong shell command should update the title but not should not close the terminal to show the error message, but got events: {all_events:?}",
         );
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn test_task_exit_preserves_output_and_emits_only_its_hide_decision(cx: &mut TestAppContext) {
+        use std::os::unix::process::ExitStatusExt;
+        init_test(cx);
+        for (hide, code, should_close) in [
+            (HideStrategy::Never, 0, false), (HideStrategy::Never, 1, false),
+            (HideStrategy::Always, 0, true), (HideStrategy::Always, 1, true),
+            (HideStrategy::OnSuccess, 0, true), (HideStrategy::OnSuccess, 1, false),
+        ] {
+            let terminal = cx.new(|cx| TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(), AlternateScroll::On, None, 0,
+                cx.background_executor(), PathStyle::local(),
+            ).with_test_task(SpawnInTerminal { hide, ..Default::default() }).subscribe(cx));
+            let events = Arc::new(Mutex::new(Vec::<Event>::new()));
+            let recorded = events.clone();
+            let _subscription = cx.update(|cx| {
+                cx.subscribe(&terminal, move |_, event, _| recorded.lock().push(event.clone()))
+            });
+            terminal.update(cx, |terminal, cx| {
+                terminal.write_output(b"retained task output", cx);
+                terminal.register_task_finished(Some(ExitStatus::from_raw(code << 8)), cx);
+            });
+            cx.run_until_parked();
+            let recorded = events.lock();
+            assert!(recorded.contains(&Event::ProcessExited));
+            assert_eq!(recorded.contains(&Event::CloseTerminal), should_close, "{hide:?}, exit {code}");
+            terminal.read_with(cx, |terminal, _| {
+                assert_eq!(terminal.task().unwrap().status, TaskStatus::Completed { success: code == 0 });
+                assert!(terminal.get_content().contains("retained task output"));
+            });
+        }
     }
 
     #[test]
