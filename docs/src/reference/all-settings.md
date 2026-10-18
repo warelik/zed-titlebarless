@@ -179,6 +179,19 @@ Widths saved by older versions of Zed are preserved if they differ from the prev
 
 `boolean` values
 
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "agent": {
+    "threads_sidebar": {
+      "compact": true
+    }
+  }
+}
+```
+
 ### Threads Sidebar in Agent Panel
 
 - Description: Whether projects, threads, and terminals appear as two rows of tabs at the top of the agent panel instead of in the Threads Sidebar.
@@ -188,6 +201,19 @@ Widths saved by older versions of Zed are preserved if they differ from the prev
 **Options**
 
 `boolean` values
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "agent": {
+    "threads_sidebar": {
+      "in_agent_panel": true
+    }
+  }
+}
+```
 
 ### Threads Sidebar Auto Open {#agent-threads-sidebar-auto-open}
 
@@ -1698,6 +1724,17 @@ or
 
 `boolean` values
 
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "tab_bar": {
+    "pinned_tab_chips": true
+  }
+}
+```
+
 ### Unpinned Tab Chips
 
 - Description: Whether unpinned tabs are rendered as compact, borderless chips that hug their contents.
@@ -1707,6 +1744,17 @@ or
 **Options**
 
 `boolean` values
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "tab_bar": {
+    "unpinned_tab_chips": true
+  }
+}
+```
 
 ## Editor Tabs
 
@@ -1739,6 +1787,17 @@ or
 
 A pixel value or `null`.
 
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "tabs": {
+    "min_width": 120
+  }
+}
+```
+
 ### Maximum Width
 
 - Description: Maximum width of an editor tab in pixels. Longer titles are truncated in the middle. `null` keeps tabs as wide as their title.
@@ -1748,6 +1807,17 @@ A pixel value or `null`.
 **Options**
 
 A pixel value or `null`.
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "tabs": {
+    "max_width": 240
+  }
+}
+```
 
 ### Close Position
 
@@ -1993,6 +2063,17 @@ When trusted, project settings are synchronized automatically, language and MCP 
 Each display option controls a particular toolbar element. If all elements are hidden, the editor toolbar is not displayed.
 
 - `compact`: Whether to shrink pane toolbars to the height of the tab bar. The default is `false`.
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "toolbar": {
+    "compact": true
+  }
+}
+```
 
 ## Use System Tabs
 
@@ -5472,10 +5553,22 @@ Processing stops at the first regex that matches the terminal line, even if the 
 
 `boolean` values
 
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "panel_rows_tab_height": true
+}
+```
+
 ## Shadows
 
 - Description: Controls individual shadows in the user interface.
 - Setting: `shadows`
+Open the Settings Editor and choose **Edit in settings.json**. Configure these
+shadow options in JSON.
+
 - Default:
 
 ```json [settings]
@@ -5625,6 +5718,15 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 **Options**
 
 `boolean` values
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "title_bar_to_status_bar": true
+}
+```
 
 ## Window Title Format
 
