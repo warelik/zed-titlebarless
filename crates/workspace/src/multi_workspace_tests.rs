@@ -2153,3 +2153,42 @@ async fn test_remove_unloaded_project_group_still_removes_its_row(cx: &mut TestA
     assert!(!task.await.unwrap(), "no loaded workspace was detached");
     assert!(multi_workspace.read_with(cx, |mw, _| mw.group_state_by_key(&key).is_none()));
 }
+
+
+#[gpui::test]
+async fn test_cancel_project_close_preserves_transient_retention(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/transient", json!({"file.txt": ""})).await;
+    let project = Project::test(fs, ["/transient".as_ref()], cx).await;
+    let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+    let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+        MultiWorkspace::test_new(project, window, cx)
+    });
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    let dirty = cx.new(|cx| TestItem::new(cx).with_dirty(true));
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_item_to_active_pane(Box::new(dirty), None, true, window, cx);
+    });
+    assert!(!multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&workspace)));
+    let before = multi_workspace.read_with(cx, |mw, _| mw.project_group_keys());
+    let task = multi_workspace.update_in(cx, |mw, window, cx| mw.remove_project_group(&key, window, cx));
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt());
+    assert!(!multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&workspace)));
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(!task.await.unwrap());
+    assert!(!multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&workspace)));
+    assert_eq!(multi_workspace.read_with(cx, |mw, _| mw.project_group_keys()), before);
+
+    // An explicit user retention made while a second close is pending survives.
+    let task = multi_workspace.update_in(cx, |mw, window, cx| mw.remove_project_group(&key, window, cx));
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt());
+    multi_workspace.update(cx, |mw, cx| mw.retain_active_workspace(cx));
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(!task.await.unwrap());
+    assert!(multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&workspace)));
+}
