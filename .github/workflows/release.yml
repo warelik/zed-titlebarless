@@ -159,8 +159,10 @@ jobs:
           lint=$(mktemp -d)
           trap 'rm -rf "$state" "$lint"' EXIT
           mkdir "$state/home" "$state/tmp" "$state/config" "$state/data" "$state/cache" "$state/state"
+          failed=0
           for suite in /baseline/scripts /candidate/scripts; do
-            docker run --rm --read-only --network=none --cap-drop=ALL \
+            container="zed-policy-$(basename "$state")-$(basename "$(dirname "$suite")")"
+            if timeout --signal=TERM --kill-after=10s 180s docker run --rm --name "$container" --read-only --network=none --cap-drop=ALL \
             --security-opt=no-new-privileges --pids-limit=256 --cpus=2 --memory=2g \
             --user "$(id -u):$(id -g)" --workdir /state \
             --mount "type=bind,source=$GITHUB_WORKSPACE/candidate,target=/candidate,readonly" \
@@ -171,8 +173,24 @@ jobs:
             --env XDG_CACHE_HOME=/state/cache --env DATA_DIR=/state/data \
             --env CI=true --env PYTHONDONTWRITEBYTECODE=1 \
             docker.io/library/python@sha256:5560e9ab8709f459489e5b8aa696eda8a07ef821e14bb122be62d91234bfa98b \
-            python3 -B -c 'import sys,unittest;sys.path.insert(0,"/candidate/scripts");import release;suite=unittest.defaultTestLoader.discover(sys.argv[1],pattern="test_*.py");sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())' "$suite"
+            python3 -B -c 'import sys,unittest;sys.path.insert(0,"/candidate/scripts");import release;suite=unittest.defaultTestLoader.discover(sys.argv[1],pattern="test_*.py");sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())' "$suite"; then
+              :
+            else
+              status=$?
+              echo "Policy suite failed: $suite (exit $status)"
+              if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+                if ! timeout --signal=KILL 20s docker rm --force "$container" > "$lint/cleanup" 2>&1; then
+                  # A CLI signal may already have stopped the --rm container.
+                  if ! grep -F "No such container: $container" "$lint/cleanup"; then
+                    cat "$lint/cleanup"
+                    exit 1
+                  fi
+                fi
+              fi
+              failed=1
+            fi
           done
+          test "$failed" -eq 0
           curl -fsSL https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz -o "$lint/archive.tar.gz"
           printf '%s  %s\n' 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 "$lint/archive.tar.gz" | sha256sum -c -
           tar -xzf "$lint/archive.tar.gz" -C "$lint" actionlint

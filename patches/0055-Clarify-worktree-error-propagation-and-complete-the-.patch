@@ -1,0 +1,48 @@
+From cdd4659d3c1d425916aaeb221832f95a3fb0d5af Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 22:03:04 +0000
+Subject: [PATCH] Clarify worktree error propagation and complete the titlebar
+ settings example
+
+Use the direct await question-mark form required by upstream coding conventions; behavior and error propagation are unchanged. Wrap the documented titlebar properties in a complete settings object and remove its final trailing comma.
+---
+ crates/sidebar/src/sidebar.rs    | 2 +-
+ docs/src/visual-customization.md | 4 +++-
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index 50a2cc6..05aa62e 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -5289,7 +5289,7 @@ impl Sidebar {
+                 let load = project.update(cx, |project, cx| {
+                     project.find_or_create_worktree(path.as_path(), true, cx)
+                 });
+-                let _ = load.await?;
++                load.await?;
+             }
+             anyhow::Ok(project)
+         })
+diff --git a/docs/src/visual-customization.md b/docs/src/visual-customization.md
+index 5ff018a..3cf5fa0 100644
+--- a/docs/src/visual-customization.md
++++ b/docs/src/visual-customization.md
+@@ -140,6 +140,7 @@ To disable this behavior use:
+ ### Titlebar
+ 
+ ```json [settings]
++{
+   // Hide the title bar and show its contents in the status bar instead (macOS only)
+   "title_bar_to_status_bar": false,
+   // Control which items are shown/hidden in the title bar
+@@ -154,7 +155,8 @@ To disable this behavior use:
+     "show_sign_in": true,             // Show/hide sign-in button
+     "show_menus": false,              // Show/hide menus
+     "open_menus_on_hover": false      // Automatically open menus on hover
+-  },
++  }
++}
+ ```
+ 
+ ## Workspace

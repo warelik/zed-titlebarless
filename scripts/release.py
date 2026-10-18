@@ -892,9 +892,11 @@ def check_policy(candidate):
                      for suite in suites]
         if snapshots[0] and snapshots[0] == snapshots[1]:
             suites = suites[:1]
+    failures = []
     for tests in suites:
         with tempfile.TemporaryDirectory(prefix="zed-policy-tests-") as temporary:
             root = Path(temporary)
+            container = "zed-policy-" + root.name
             env = {name: os.environ[name] for name in ("PATH", "LANG", "LC_ALL", "TZ") if name in os.environ}
             for name, path in {"HOME": root / "home", "TMPDIR": root / "tmp",
                                "DATA_DIR": root / "data", "XDG_CONFIG_HOME": root / "config",
@@ -905,7 +907,7 @@ def check_policy(candidate):
             env.update(CI="true", PYTHONDONTWRITEBYTECODE="1")
             command = ["docker", "run", "--rm", "--read-only", "--network=none",
                        "--cap-drop=ALL", "--security-opt=no-new-privileges",
-                       "--pids-limit=256", "--cpus=2", "--memory=2g",
+                       "--pids-limit=256", "--cpus=2", "--memory=2g", "--name", container,
                        "--user", f"{os.getuid()}:{os.getgid()}", "--workdir", str(root)]
             for source in dict.fromkeys((ROOT.resolve(), candidate.resolve())):
                 command += ["--mount", f"type=bind,source={source},target={source},readonly"]
@@ -914,7 +916,25 @@ def check_policy(candidate):
                 command += ["--env", f"{name}={value}"]
             command += [POLICY_IMAGE, "python3", "-B", "-c", launcher,
                         str(candidate / "scripts"), str(tests)]
-            subprocess.run(command, cwd=root, env=env, check=True)
+            try:
+                subprocess.run(command, cwd=root, env=env, check=True, timeout=180)
+            except subprocess.TimeoutExpired as error:
+                # Killing the Docker CLI alone leaves its daemon-owned container
+                # running. Stop only this invocation before starting another.
+                cleanup = subprocess.run(["docker", "rm", "--force", container], cwd=root, env=env,
+                                         text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                         check=False, timeout=20)
+                if cleanup.returncode and f"No such container: {container}" not in cleanup.stderr:
+                    raise subprocess.CalledProcessError(cleanup.returncode, cleanup.args,
+                                                        cleanup.stdout, cleanup.stderr)
+                failures.append(error)
+                print(f"Policy suite timed out after 180 seconds: {tests}", flush=True)
+            except subprocess.CalledProcessError as error:
+                failures.append(error)
+                print(f"Policy suite failed: {tests} (exit {error.returncode})", flush=True)
+    if failures:
+        # Preserve the mandatory policy failure gate and original exception type.
+        raise failures[0]
     # The linter's directory is never writable by candidate code.
     with tempfile.TemporaryDirectory(prefix="zed-policy-") as temporary:
         root = Path(temporary)

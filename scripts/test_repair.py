@@ -1362,6 +1362,40 @@ class AdoptionTests(unittest.TestCase):
         self.assertEqual(suites[1], str(Path(directory) / "scripts"))
         self.assertTrue(all(not path.exists() for path in paths))
 
+    def test_policy_timeout_stops_owned_container_and_collects_next_suite(self):
+        calls = []
+        def execute(args, **kwargs):
+            calls.append(args)
+            if args[:3] == ["docker", "rm", "--force"]:
+                self.assertEqual(args[-1], calls[0][calls[0].index("--name") + 1])
+                self.assertEqual(kwargs["timeout"], 20)
+                return SimpleNamespace(returncode=0)
+            self.assertEqual(kwargs["timeout"], 180)
+            if len(calls) == 1:
+                raise subprocess.TimeoutExpired(args, 180)
+            return SimpleNamespace(returncode=0)
+        with (tempfile.TemporaryDirectory() as directory,
+              patch.object(release.subprocess, "run", side_effect=execute),
+              patch.object(release, "urlopen", side_effect=AssertionError("Failed policy cannot reach lint")),
+              self.assertRaises(subprocess.TimeoutExpired)):
+            release.check_policy(Path(directory))
+        self.assertEqual(len(calls), 3)
+        self.assertNotEqual(calls[0][-1], calls[2][-1])
+
+    def test_policy_timeout_refuses_to_continue_when_container_cleanup_fails(self):
+        calls = []
+        def execute(args, **kwargs):
+            calls.append(args)
+            if len(calls) == 1:
+                raise subprocess.TimeoutExpired(args, 180)
+            return SimpleNamespace(returncode=1, args=args, stdout="", stderr="daemon unavailable")
+        with (tempfile.TemporaryDirectory() as directory,
+              patch.object(release.subprocess, "run", side_effect=execute),
+              patch.object(release, "urlopen", side_effect=AssertionError("Cleanup failure blocks lint")),
+              self.assertRaises(subprocess.CalledProcessError)):
+            release.check_policy(Path(directory))
+        self.assertEqual(len(calls), 2)
+
     def test_failed_policy_tests_cannot_reach_linting_or_write_credentials(self):
         with (patch.object(release.subprocess, "run",
                           side_effect=subprocess.CalledProcessError(1, "unittest")),
