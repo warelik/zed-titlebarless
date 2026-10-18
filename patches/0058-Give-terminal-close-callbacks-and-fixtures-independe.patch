@@ -1,0 +1,47 @@
+From 2b0305be9590c737ddfba07c5ad3fb76d3f0818e Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 23:30:04 +0000
+Subject: [PATCH] Give terminal close callbacks and fixtures independent owned
+ snapshots
+
+Resolve all three E0382 diagnostics from final run39174552818: clone metadata for the asynchronous pre-remove owner guard while retaining the original for post-remove UI cleanup; clone both path lists at the earlier fixture insertion before their later reuse. Preserve every fixture row, consent and ownership guard, and regression assertion. No compiler flags or test selection changed.
+---
+ crates/sidebar/src/sidebar.rs       | 3 ++-
+ crates/sidebar/src/sidebar_tests.rs | 2 +-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index b491c8a..15d6ed6 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -5594,6 +5594,7 @@ impl Sidebar {
+         let close_guard = Rc::new(RefCell::new(Some(consent_guard)));
+         let callback_kill_succeeded = kill_succeeded.clone();
+         let callback_close_guard = close_guard.clone();
++        let callback_metadata = metadata.clone();
+         let remove_task = multi_workspace.update(cx, |multi_workspace, cx| {
+             multi_workspace.remove_with_pre_remove(
+                 workspaces_to_remove,
+@@ -5613,7 +5614,7 @@ impl Sidebar {
+                         return Ok(false);
+                     }
+                     if sidebar.update(cx, |this, cx| {
+-                        this.close_terminal_with_other_owners(&metadata, close_window_id, cx)
++                        this.close_terminal_with_other_owners(&callback_metadata, close_window_id, cx)
+                     })? { return Ok(false); }
+                     if !gpui::AsyncApp::update(cx, |cx| begin_terminal_close(terminal_id, cx)) {
+                         return Ok(false);
+diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
+index edb108e..b980a4d 100644
+--- a/crates/sidebar/src/sidebar_tests.rs
++++ b/crates/sidebar/src/sidebar_tests.rs
+@@ -4992,7 +4992,7 @@ async fn test_timed_out_terminal_close_keeps_metadata_and_allows_retry(cx: &mut
+     cx.update(|_, cx| {
+         TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx));
+     });
+-    save_thread_metadata_with_main_paths("blocking-thread", "Blocking Thread", closed_paths, main_paths,
++    save_thread_metadata_with_main_paths("blocking-thread", "Blocking Thread", closed_paths.clone(), main_paths.clone(),
+                                          chrono::Utc::now(), cx);
+     // Keep this a closed-workspace kill test, not an archive auto-load test.
+     save_thread_metadata_with_main_paths("timeout-blocker", "Blocking Thread",
