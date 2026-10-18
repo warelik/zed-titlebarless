@@ -263,6 +263,7 @@ class BatchedReviewTests(unittest.TestCase):
         policy = workflow.split("\n  policy-check:\n", 1)[1].split("\n  test:\n", 1)[0]
         self.assertIn("always() && needs.prepare.result == 'success'", policy)
         repair = workflow.split("\n  repair:\n", 1)[1]
+        self.assertIn("ref: ${{ needs.activate-policy.outputs.policy_ref || needs.prepare.outputs.trusted_policy", repair)
         self.assertIn("github.ref == 'refs/heads/downstream'", repair)
         self.assertIn("(vars.ZED_TRUSTED_POLICY != '' || needs.bootstrap-policy.result == 'success')", repair)
 

@@ -525,7 +525,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.trusted_policy || (needs.bootstrap-policy.result == 'success' && needs.bootstrap-policy.outputs.policy_ref) || vars.ZED_TRUSTED_POLICY || 'dbf40ff4bd626082e0ad3d9873c5b6ad5fa7f941' }}
+          ref: ${{ needs.activate-policy.outputs.policy_ref || needs.prepare.outputs.trusted_policy || (needs.bootstrap-policy.result == 'success' && needs.bootstrap-policy.outputs.policy_ref) || vars.ZED_TRUSTED_POLICY || 'dbf40ff4bd626082e0ad3d9873c5b6ad5fa7f941' }}
           path: trusted
           persist-credentials: false
       - uses: actions/checkout@v4
