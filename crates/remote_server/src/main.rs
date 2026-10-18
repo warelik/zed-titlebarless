@@ -16,6 +16,8 @@ struct Cli {
     /// process communicating over a socket.
     #[arg(long, hide = true)]
     crash_handler: Option<PathBuf>,
+    #[arg(long, hide = true, requires = "crash_handler")]
+    crash_handler_logs_dir: Option<PathBuf>,
     /// Used for loading the environment from the project.
     #[arg(long, hide = true)]
     printenv: bool,
@@ -30,7 +32,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     if let Some(socket) = &cli.crash_handler {
-        crashes::crash_server(socket.as_path(), paths::logs_dir().clone());
+        crashes::crash_server(socket.as_path(), cli.crash_handler_logs_dir.clone()
+            .unwrap_or_else(|| paths::logs_dir().clone()));
         return Ok(());
     }
 
