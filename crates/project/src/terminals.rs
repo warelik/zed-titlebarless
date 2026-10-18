@@ -172,11 +172,12 @@ const SHPOOL_PROBE_SCRIPT: &str = concat!(
 echo "=== ZED_SHPOOL_PROBE_START ==="
 echo "$SHPOOL_BIN"
 echo "$SHPOOL_SOCK"
-"$SHPOOL_BIN" -s "$SHPOOL_SOCK" list --json
+exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" list --json
 "#
 );
 
 pub(crate) const SHPOOL_PROBE_TIMEOUT: Duration = Duration::from_secs(17);
+pub(crate) const SHPOOL_KILL_TIMEOUT: Duration = Duration::from_secs(17);
 
 pub struct ShpoolProbe {
     pub program: String,
@@ -711,8 +712,28 @@ impl Project {
     }
 
     /// Ends the shpool session `session_name` and everything running in it.
-    /// Does nothing on a host without shpool.
+    /// Unavailable or timed-out kills return an error so the close can be retried.
     pub fn kill_persistent_terminal_session(
+        &mut self,
+        session_name: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let kill = self.kill_persistent_terminal_session_unbounded(session_name.clone(), cx);
+        let executor = cx.background_executor().clone();
+        cx.background_spawn(async move {
+            let timeout = executor.timer(SHPOOL_KILL_TIMEOUT);
+            futures::pin_mut!(kill, timeout);
+            match futures::future::select(kill, timeout).await {
+                futures::future::Either::Left((result, _)) => result,
+                futures::future::Either::Right(((), _)) => Err(anyhow::anyhow!(
+                    "shpool session {session_name} kill timed out after {}s",
+                    SHPOOL_KILL_TIMEOUT.as_secs()
+                )),
+            }
+        })
+    }
+
+    fn kill_persistent_terminal_session_unbounded(
         &mut self,
         session_name: String,
         cx: &mut Context<Self>,
@@ -755,12 +776,15 @@ impl Project {
         };
         let script = format!(
             r#"{SHPOOL_KILL_SCRIPT_PRELUDE}
-"$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
+exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
 "#
         );
         let command = self.exec_script_in_sh(script, cx);
         cx.background_spawn(async move {
-            let output = command.await?.output().await?;
+            let mut command = command.await?;
+            // Cancel only this client; the shared daemon and SSH master must survive.
+            command.kill_on_drop(true);
+            let output = command.output().await?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 if !Self::shpool_session_not_found(&stderr, &session_name) {
@@ -836,7 +860,10 @@ impl Project {
         }
         let command = self.exec_script_in_sh(SHPOOL_PROBE_SCRIPT.to_string(), cx);
         cx.background_spawn(async move {
-            let output = command.await?.output().await?;
+            let mut command = command.await?;
+            // Cancel only this client; the shared daemon and SSH master must survive.
+            command.kill_on_drop(true);
+            let output = command.output().await?;
             parse_shpool_probe_output(&output)
         })
     }
@@ -1812,6 +1839,38 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
             err_msg.contains("shpool daemon socket connection refused"),
             "expected daemon connection refused error, got: {err_msg}"
         );
+    }
+
+    #[gpui::test]
+    async fn test_shpool_kill_timeout_is_retryable_and_cancels_delayed_kill(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            let store = settings::SettingsStore::test(cx);
+            cx.set_global(store);
+            TerminalSettings::register(cx);
+        });
+        let project = Project::test(fs::FakeFs::new(cx.executor()), [], cx).await;
+        let fake = FakeShpoolStore::new();
+        fake.add_session("zed-timeout-kill");
+        fake.state.lock().kill_delay = Some(Duration::from_secs(60));
+        project.update(cx, |project, _| project.set_fake_shpool(fake.clone()));
+        let task = project.update(cx, |project, cx| {
+            project.kill_persistent_terminal_session("zed-timeout-kill".into(), cx)
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(SHPOOL_KILL_TIMEOUT + Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(task.await.unwrap_err().to_string().contains("kill timed out after 17s"));
+        assert!(fake.has_session("zed-timeout-kill"));
+        cx.executor().advance_clock(Duration::from_secs(60));
+        cx.run_until_parked();
+        assert!(fake.has_session("zed-timeout-kill"), "cancelled kill must not complete late");
+        fake.state.lock().kill_delay = None;
+        project.update(cx, |project, cx| {
+            project.kill_persistent_terminal_session("zed-timeout-kill".into(), cx)
+        }).await.unwrap();
+        assert_eq!(fake.kill_history().len(), 2);
+        assert!(!fake.has_session("zed-timeout-kill"));
     }
 
     #[gpui::test]
