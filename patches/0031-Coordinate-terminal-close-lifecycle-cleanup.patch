@@ -1,0 +1,519 @@
+From 7a6238492026ca8d50affd85d090c9cae4ff628b Mon Sep 17 00:00:00 2001
+From: Codex Repair <codex-repair@example.invalid>
+Date: Sun, 18 Oct 2026 06:34:09 +0000
+Subject: [PATCH] Coordinate terminal close lifecycle cleanup
+
+---
+ crates/agent_ui/src/agent_panel.rs            | 49 ++++++++++++++--
+ .../src/terminal_thread_metadata_store.rs     | 58 +++++++++++++++++++
+ crates/sidebar/src/sidebar.rs                 | 56 +++++++++++++++++-
+ crates/sidebar/src/sidebar_tests.rs           | 13 ++++-
+ crates/workspace/src/item.rs                  | 14 ++++-
+ crates/workspace/src/multi_workspace.rs       | 23 +++++++-
+ crates/workspace/src/multi_workspace_tests.rs | 27 +++++++++
+ 7 files changed, 231 insertions(+), 9 deletions(-)
+
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index 19c4525..d960606 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -149,19 +149,46 @@ fn reconnect_if_remote_disconnected(project: Entity<Project>, cx: &mut App) {
+ 
+ fn kill_persistent_terminal_session_and_delete_metadata(
+     project: Entity<Project>,
++    workspace: WeakEntity<Workspace>,
+     terminal_id: TerminalId,
+     cx: &mut App,
+ ) {
++    let Some(store) = TerminalThreadMetadataStore::try_global(cx) else {
++        return;
++    };
++    if !store.update(cx, |store, _| store.begin_intentional_close(terminal_id)) {
++        return;
++    }
+     let kill = project.update(cx, |project, cx| {
+         project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
+     });
+     cx.spawn(async move |cx| {
+-        kill.await?;
++        let result = kill.await;
+         cx.update(|cx| {
+-            if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+-                store.update(cx, |store, cx| store.delete(terminal_id, cx));
++            store.update(cx, |store, cx| {
++                store.complete_intentional_close(terminal_id, result.is_ok(), cx)
++            });
++            if let Err(error) = &result {
++                log::error!(
++                    "failed to kill persistent terminal session for terminal {terminal_id}: {error:#}"
++                );
++                workspace
++                    .update(cx, |workspace, cx| {
++                        struct CloseTerminalErrorToast;
++                        workspace.show_toast(
++                            workspace::Toast::new(
++                                workspace::notifications::NotificationId::unique::<CloseTerminalErrorToast>(),
++                                format!(
++                                    "Failed to stop terminal session {terminal_id}; close it again to retry"
++                                ),
++                            )
++                            .autohide(),
++                            cx,
++                        );
++                    })
++                    .ok();
+             }
+-        });
++        })?;
+         anyhow::Ok(())
+     })
+     .detach_and_log_err(cx);
+@@ -2200,6 +2227,7 @@ impl AgentPanel {
+                         if this.closed_terminal_spawns.remove(&terminal_id) {
+                             kill_persistent_terminal_session_and_delete_metadata(
+                                 this.project.clone(),
++                                this.workspace.clone(),
+                                 terminal_id,
+                                 cx,
+                             );
+@@ -2305,6 +2333,7 @@ impl AgentPanel {
+                     } else {
+                         kill_persistent_terminal_session_and_delete_metadata(
+                             this.project.clone(),
++                            this.workspace.clone(),
+                             terminal_id,
+                             cx,
+                         );
+@@ -2670,6 +2699,7 @@ impl AgentPanel {
+         } else if kill_persistent_session && should_kill_persistent_session {
+             kill_persistent_terminal_session_and_delete_metadata(
+                 self.project.clone(),
++                self.workspace.clone(),
+                 terminal_id,
+                 cx,
+             );
+@@ -2975,7 +3005,10 @@ impl AgentPanel {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
+-        if self.is_terminal_spawn_pending(metadata.terminal_id) {
++        if TerminalThreadMetadataStore::try_global(cx).is_some_and(|store| {
++            store.read(cx).is_intentionally_closing(metadata.terminal_id)
++        }) || self.is_terminal_spawn_pending(metadata.terminal_id)
++        {
+             return;
+         }
+         if self.has_terminal(metadata.terminal_id)
+@@ -16397,6 +16430,12 @@ mod tests {
+             );
+         });
+         assert!(fake.has_session(&terminal_id.session_name()));
++        workspace.read_with(cx, |workspace, _| {
++            assert!(
++                !workspace.notification_ids().is_empty(),
++                "a failed direct kill must show retryable workspace feedback"
++            );
++        });
+ 
+         fake.state.lock().kill_error = None;
+         panel.update_in(cx, |panel, window, cx| {
+diff --git a/crates/agent_ui/src/terminal_thread_metadata_store.rs b/crates/agent_ui/src/terminal_thread_metadata_store.rs
+index 4ca941d..7254229 100644
+--- a/crates/agent_ui/src/terminal_thread_metadata_store.rs
++++ b/crates/agent_ui/src/terminal_thread_metadata_store.rs
+@@ -178,6 +178,8 @@ pub struct TerminalThreadMetadataStore {
+     pending_terminal_ops_tx: async_channel::Sender<DbOperation>,
+     _db_operations_task: Task<()>,
+     deleted_terminal_ids: HashSet<TerminalId>,
++    closing_terminal_ids: HashSet<TerminalId>,
++    intentionally_closed_terminal_ids: HashSet<TerminalId>,
+ }
+ 
+ #[derive(Debug, PartialEq)]
+@@ -300,11 +302,39 @@ impl TerminalThreadMetadataStore {
+     }
+ 
+     pub fn save(&mut self, metadata: TerminalThreadMetadata, cx: &mut Context<Self>) {
++        if self.closing_terminal_ids.contains(&metadata.terminal_id)
++            || self.intentionally_closed_terminal_ids.contains(&metadata.terminal_id)
++        {
++            return;
++        }
+         self.deleted_terminal_ids.remove(&metadata.terminal_id);
+         self.save_internal(metadata);
+         cx.notify();
+     }
+ 
++    pub fn begin_intentional_close(&mut self, terminal_id: TerminalId) -> bool {
++        self.closing_terminal_ids.insert(terminal_id)
++    }
++
++    pub fn is_intentionally_closing(&self, terminal_id: TerminalId) -> bool {
++        self.closing_terminal_ids.contains(&terminal_id)
++    }
++
++    pub fn complete_intentional_close(
++        &mut self,
++        terminal_id: TerminalId,
++        succeeded: bool,
++        cx: &mut Context<Self>,
++    ) {
++        self.closing_terminal_ids.remove(&terminal_id);
++        if succeeded {
++            self.intentionally_closed_terminal_ids.insert(terminal_id);
++            self.delete(terminal_id, cx);
++        } else {
++            cx.notify();
++        }
++    }
++
+     pub fn rename_terminal(
+         &mut self,
+         terminal_id: TerminalId,
+@@ -503,6 +533,8 @@ impl TerminalThreadMetadataStore {
+             terminals_by_paths: HashMap::default(),
+             terminals_by_main_paths: HashMap::default(),
+             deleted_terminal_ids: HashSet::default(),
++            closing_terminal_ids: HashSet::default(),
++            intentionally_closed_terminal_ids: HashSet::default(),
+             reload_task: None,
+             pending_terminal_ops_tx: tx,
+             _db_operations_task,
+@@ -759,6 +791,32 @@ mod tests {
+         }
+     }
+ 
++    #[gpui::test]
++    async fn test_intentional_close_blocks_restore_and_tombstones_stale_snapshots(
++        cx: &mut TestAppContext,
++    ) {
++        init_test(cx);
++        let metadata = metadata("Closing", WorktreePaths::default());
++        let terminal_id = metadata.terminal_id;
++        cx.update(|cx| {
++            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
++                store.save(metadata.clone(), cx);
++                assert!(store.begin_intentional_close(terminal_id));
++                assert!(store.is_intentionally_closing(terminal_id));
++                store.save(metadata.clone(), cx);
++                store.complete_intentional_close(terminal_id, false, cx);
++                assert!(!store.is_intentionally_closing(terminal_id));
++                assert!(store.begin_intentional_close(terminal_id));
++                store.complete_intentional_close(terminal_id, true, cx);
++                store.save(metadata, cx);
++                assert!(
++                    store.entry(terminal_id).is_none(),
++                    "a stale restore snapshot must not resurrect an intentionally closed terminal"
++                );
++            });
++        });
++    }
++
+     #[test]
+     fn test_terminal_metadata_persistence_strips_ssh_password() {
+         let connection = RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index d4251df..931f86c 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -609,6 +609,24 @@ fn workspace_has_terminal_metadata_except(
+         .any(|terminal| except_terminal_id != Some(terminal.terminal_id))
+ }
+ 
++fn begin_terminal_close(terminal_id: TerminalId, cx: &mut App) -> bool {
++    TerminalThreadMetadataStore::try_global(cx).is_some_and(|store| {
++        store.update(cx, |store, _| store.begin_intentional_close(terminal_id))
++    })
++}
++
++fn complete_terminal_close_metadata(
++    terminal_id: TerminalId,
++    succeeded: bool,
++    cx: &mut App,
++) {
++    if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
++        store.update(cx, |store, cx| {
++            store.complete_intentional_close(terminal_id, succeeded, cx)
++        });
++    }
++}
++
+ #[derive(Clone)]
+ struct WorkspaceMenuWorktreeLabel {
+     icon: Option<IconName>,
+@@ -5292,6 +5310,8 @@ impl Sidebar {
+         let roots_to_archive = roots_to_archive.clone();
+ 
+         if workspaces_to_remove.is_empty() {
++            let dirty_before_consent =
++                Self::dirty_archived_worktree_items(&mixed_item_targets, cx);
+             cx.spawn_in(window, async move |this, cx| {
+                 if !Self::consent_to_close_archived_worktree_items(&mixed_item_targets, cx).await? {
+                     return anyhow::Ok(());
+@@ -5299,16 +5319,21 @@ impl Sidebar {
+                 let (guard, item_ids) = cx.update(|window, cx| {
+                     Self::guard_archived_worktree_items(
+                         &mixed_item_targets,
++                        &dirty_before_consent,
+                         &mixed_workspaces,
+                         window,
+                         cx,
+                     )
+                 })?;
++                if !begin_terminal_close(terminal_id, cx) {
++                    return anyhow::Ok(());
++                }
+                 if should_kill_persistent_session {
+                     let kill = project.update(cx, |project, cx| {
+                         project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
+                     });
+                     if let Err(error) = kill.await {
++                        complete_terminal_close_metadata(terminal_id, false, cx);
+                         log::error!(
+                             "failed to kill persistent terminal session for terminal {terminal_id}: {error:#}"
+                         );
+@@ -5316,6 +5341,7 @@ impl Sidebar {
+                         return anyhow::Ok(());
+                     }
+                 }
++                complete_terminal_close_metadata(terminal_id, true, cx);
+                 this.update_in(cx, |this, window, cx| {
+                     let cleanup_is_safe = !guard.changed(cx)
+                         && Self::archived_worktree_item_membership_matches(&item_ids, cx);
+@@ -5345,6 +5371,8 @@ impl Sidebar {
+         };
+         let sidebar = cx.weak_entity();
+         let consent_targets = mixed_item_targets.clone();
++        let dirty_before_consent =
++            Self::dirty_archived_worktree_items(&consent_targets, cx);
+         let consent_mixed_workspaces = mixed_workspaces.clone();
+         let kill_succeeded = Rc::new(Cell::new(false));
+         let close_guard = Rc::new(RefCell::new(None));
+@@ -5363,17 +5391,22 @@ impl Sidebar {
+                     let guard = cx.update(|window, cx| {
+                         Self::guard_archived_worktree_items(
+                             &consent_targets,
++                            &dirty_before_consent,
+                             &consent_mixed_workspaces,
+                             window,
+                             cx,
+                         )
+                     })?;
+                     *callback_close_guard.borrow_mut() = Some(guard);
++                    if !begin_terminal_close(terminal_id, cx) {
++                        return Ok(false);
++                    }
+                     if should_kill_persistent_session {
+                         let kill = project.update(cx, |project, cx| {
+                             project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
+                         });
+                         if let Err(error) = kill.await {
++                            complete_terminal_close_metadata(terminal_id, false, cx);
+                             log::error!(
+                                 "failed to kill persistent terminal session for terminal {terminal_id}: {error:#}"
+                             );
+@@ -5383,6 +5416,7 @@ impl Sidebar {
+                             return Err(error);
+                         }
+                     }
++                    complete_terminal_close_metadata(terminal_id, true, cx);
+                     callback_kill_succeeded.set(true);
+                     let cleanup_is_safe = cx.update(|_, cx| {
+                         let guard = callback_close_guard.borrow();
+@@ -5716,8 +5750,25 @@ impl Sidebar {
+         targets
+     }
+ 
++    fn dirty_archived_worktree_items(
++        targets: &ArchivedWorktreeItemTargets,
++        cx: &App,
++    ) -> HashSet<EntityId> {
++        targets
++            .iter()
++            .flat_map(|(_, pane, item_ids)| {
++                pane.read(cx)
++                    .items()
++                    .filter(|item| item_ids.contains(&item.item_id()) && item.is_dirty(cx))
++                    .map(|item| item.item_id())
++                    .collect::<Vec<_>>()
++            })
++            .collect()
++    }
++
+     fn guard_archived_worktree_items(
+         targets: &ArchivedWorktreeItemTargets,
++        dirty_before_consent: &HashSet<EntityId>,
+         mixed_workspaces: &[(Entity<Workspace>, Vec<WorktreeId>)],
+         window: &mut Window,
+         cx: &mut App,
+@@ -5746,7 +5797,10 @@ impl Sidebar {
+                 (workspace, item_ids)
+             })
+             .collect();
+-        (ItemCloseGuard::new(items, window, cx), workspaces)
++        (
++            ItemCloseGuard::new_after_consent(items, dirty_before_consent, window, cx),
++            workspaces,
++        )
+     }
+ 
+     fn archived_worktree_item_membership_matches(
+diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
+index 9d32d7b..b42e2a7 100644
+--- a/crates/sidebar/src/sidebar_tests.rs
++++ b/crates/sidebar/src/sidebar_tests.rs
+@@ -4753,7 +4753,7 @@ async fn test_closing_active_agent_panel_terminal_activates_neighbor(cx: &mut Te
+ }
+ 
+ #[gpui::test]
+-async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes_metadata(
++async fn test_successful_delayed_terminal_kill_deletes_metadata_after_sidebar_is_dropped(
+     cx: &mut TestAppContext,
+ ) {
+     let main_project = init_test_project_with_agent_panel("/main-project", cx).await;
+@@ -4765,6 +4765,7 @@ async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes
+     let terminal_id = TerminalId::new();
+     let session_name = terminal_id.session_name();
+     fake.add_session(&session_name);
++    fake.state.lock().kill_delay = Some(Duration::from_secs(1));
+ 
+     let main_paths = PathList::new(&[PathBuf::from("/main-project")]);
+     let closed_worktree_paths = PathList::new(&[PathBuf::from("/worktrees/feature-a")]);
+@@ -4823,6 +4824,16 @@ async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes
+         sidebar.close_terminal(&terminal_metadata, &terminal_workspace, window, cx);
+     });
+     cx.run_until_parked();
++    assert!(
++        TerminalThreadMetadataStore::global(cx)
++            .read(cx)
++            .is_intentionally_closing(terminal_id)
++    );
++    drop(sidebar);
++    drop(multi_workspace);
++    cx.update(|window, _cx| window.remove_window());
++    cx.executor().advance_clock(Duration::from_secs(1));
++    cx.run_until_parked();
+ 
+     assert_eq!(
+         fake.kill_history(),
+diff --git a/crates/workspace/src/item.rs b/crates/workspace/src/item.rs
+index 908cddc..e837953 100644
+--- a/crates/workspace/src/item.rs
++++ b/crates/workspace/src/item.rs
+@@ -26,6 +26,7 @@ use smallvec::SmallVec;
+ use std::{
+     any::{Any, TypeId},
+     cell::{Cell, RefCell},
++    collections::HashSet,
+     path::Path,
+     rc::Rc,
+     sync::Arc,
+@@ -485,7 +486,18 @@ pub struct ItemCloseGuard {
+ 
+ impl ItemCloseGuard {
+     pub fn new(items: Vec<Box<dyn ItemHandle>>, window: &mut Window, cx: &mut App) -> Self {
+-        let changed = Rc::new(Cell::new(false));
++        Self::new_after_consent(items, &HashSet::default(), window, cx)
++    }
++
++    pub fn new_after_consent(
++        items: Vec<Box<dyn ItemHandle>>,
++        dirty_before_consent: &HashSet<EntityId>,
++        window: &mut Window,
++        cx: &mut App,
++    ) -> Self {
++        let changed = Rc::new(Cell::new(items.iter().any(|item| {
++            item.is_dirty(cx) && !dirty_before_consent.contains(&item.item_id())
++        })));
+         let subscriptions = items
+             .iter()
+             .map(|item| {
+diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
+index f2f1800..a0b6ff1 100644
+--- a/crates/workspace/src/multi_workspace.rs
++++ b/crates/workspace/src/multi_workspace.rs
+@@ -12,6 +12,7 @@ use remote::RemoteConnectionOptions;
+ use settings::Settings;
+ pub use settings::SidebarSide;
+ use std::cell::Cell;
++use std::collections::HashSet;
+ use std::path::PathBuf;
+ use std::rc::Rc;
+ use ui::prelude::*;
+@@ -1895,6 +1896,24 @@ impl MultiWorkspace {
+         });
+ 
+         cx.spawn_in(window, async move |this, cx| {
++            let dirty_before_consent = workspaces
++                .iter()
++                .flat_map(|workspace| {
++                    workspace.read_with(cx, |workspace, cx| {
++                        workspace
++                            .panes()
++                            .iter()
++                            .flat_map(|pane| {
++                                pane.read(cx)
++                                    .items()
++                                    .filter(|item| item.is_dirty(cx))
++                                    .map(|item| item.item_id())
++                                    .collect::<Vec<_>>()
++                            })
++                            .collect::<HashSet<_>>()
++                    })
++                })
++                .collect::<HashSet<_>>();
+             // Consent phase: run the standard close lifecycle for every
+             // workspace being removed. Prompts only; no state changes.
+             for workspace in &workspaces {
+@@ -1938,7 +1957,9 @@ impl MultiWorkspace {
+                     })
+                 })
+                 .collect();
+-            let guard = cx.update(|window, cx| ItemCloseGuard::new(items, window, cx))?;
++            let guard = cx.update(|window, cx| {
++                ItemCloseGuard::new_after_consent(items, &dirty_before_consent, window, cx)
++            })?;
+ 
+             if !before_remove(cx).await? {
+                 return Ok(false);
+diff --git a/crates/workspace/src/multi_workspace_tests.rs b/crates/workspace/src/multi_workspace_tests.rs
+index db91d13..9d7cc53 100644
+--- a/crates/workspace/src/multi_workspace_tests.rs
++++ b/crates/workspace/src/multi_workspace_tests.rs
+@@ -1846,6 +1846,33 @@ async fn test_nearest_retained_workspace_skips_disconnected_workspace(cx: &mut T
+     });
+ }
+ 
++#[gpui::test]
++async fn test_item_close_guard_rejects_item_dirtied_after_consent(cx: &mut TestAppContext) {
++    init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    let project = Project::test(fs, [], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    let item = cx.new(|cx| TestItem::new(cx));
++
++    // Consent was obtained while the item was clean, but another update dirtied
++    // it before the post-consent guard could be installed.
++    item.update(cx, |item, _| item.is_dirty = true);
++    multi_workspace.update_in(cx, |_multi_workspace, window, cx| {
++        let guard = ItemCloseGuard::new_after_consent(
++            vec![Box::new(item.clone())],
++            &HashSet::default(),
++            window,
++            cx,
++        );
++        assert!(
++            guard.changed(cx),
++            "an item already dirty at post-consent guard construction is unsafe to close"
++        );
++    });
++    assert!(item.read_with(cx, |item, _| item.is_dirty));
++}
++
+ #[gpui::test]
+ async fn test_remove_with_pre_remove_keeps_edits_made_during_guard(cx: &mut TestAppContext) {
+     use crate::item::ItemEvent;
+-- 
+2.43.0
+
