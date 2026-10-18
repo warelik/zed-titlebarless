@@ -14,7 +14,8 @@ import release
 
 
 class BatchedReviewTests(unittest.TestCase):
-    def prepare_candidate(self, full, delta, findings=(), *, published=False, changed_policy=False):
+    def prepare_candidate(self, full, delta, findings=(), *, published=False, changed_policy=False,
+                          recipe_failure=False):
         config, upstream, candidate = "a" * 40, "b" * 40, "c" * 40
         outputs = {}
         order = []
@@ -67,6 +68,9 @@ class BatchedReviewTests(unittest.TestCase):
             stack.enter_context(patch.object(release, "output", side_effect=lambda **v: outputs.update(v)))
             stack.enter_context(patch.object(release, "api", side_effect=lambda path, **kw:
                                 {"sha": config if path.endswith("/downstream") else upstream}))
+            recipe = stack.enter_context(patch.object(
+                release, "verify_upstream_recipes",
+                side_effect=ValueError("upstream recipe drift") if recipe_failure else None))
             final = stack.enter_context(patch.object(release, "final_attempt",
                                        side_effect=lambda *a, **kw: order.append("final")))
             reserve = stack.enter_context(patch.object(release, "reserve_release",
@@ -77,7 +81,17 @@ class BatchedReviewTests(unittest.TestCase):
             except ValueError as error:
                 failure = str(error)
             self.last_order = order
+            self.last_recipe_checks = recipe.call_args_list
             return outputs, final.call_count, reserve.call_count, failure
+
+    def test_upstream_recipe_drift_stops_before_reservation_and_heavy_receipt(self):
+        outputs, final, reserve, failure = self.prepare_candidate(
+            (True, "complete"), (True, "complete"), recipe_failure=True)
+        self.assertFalse(outputs["ready"])
+        self.assertEqual(failure, "upstream recipe drift")
+        self.assertEqual((final, reserve), (0, 0))
+        self.assertEqual(len(self.last_recipe_checks), 1)
+        self.assertEqual(self.last_recipe_checks[0].args[1], "b" * 40)
 
     def test_one_blocking_report_waits_for_the_other_complete_list(self):
         for full, delta in (

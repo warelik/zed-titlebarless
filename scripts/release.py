@@ -1216,6 +1216,8 @@ def prepare(app):
     if (patched["package"]["version"] != version
             or api(f"repos/{UPSTREAM}/commits/v{version}")["sha"] != upstream):
         raise ValueError("Patch series must preserve the exact supported upstream version")
+    # Recipe porting is ordinary machine work, before spending a final attempt.
+    verify_upstream_recipes(app, upstream)
     ensure_forward_release(repo, version, upstream)
     release = release_tag(version, upstream, patchset, sha)
     base, head = f"review-base/{upstream}", f"review/{upstream}-{patchset}"
