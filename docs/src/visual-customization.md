@@ -139,6 +139,9 @@ To disable this behavior use:
 
 ### Titlebar
 
+To configure `title_bar_to_status_bar` (macOS only), open the Settings Editor and
+choose **Edit in settings.json**, then add it to your settings:
+
 ```json [settings]
 {
   // Hide the title bar and show its contents in the status bar instead (macOS only)
