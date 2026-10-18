@@ -1034,9 +1034,8 @@ impl MultiWorkspace {
     ) -> Task<Result<bool>> {
         // The active workspace can remain unpinned while the sidebar is
         // closed. Pin it first: this puts it in the removal set below, and
-        // stops `activate` from pinning it while switching to the
-        // replacement, which would recreate the project group row this
-        // function just deleted.
+        // keeps `activate`'s retention bookkeeping stable while switching
+        // to the replacement. The project row stays until close consent.
         let active_workspace = self.workspace().clone();
         if active_workspace.read(cx).project_group_key(cx) == *group_key
             && !self.is_workspace_retained(&active_workspace)
@@ -1047,9 +1046,19 @@ impl MultiWorkspace {
 
         let workspaces = self.workspaces_for_project_group(group_key, cx);
 
-        let task = self.remove(workspaces, RemovalIntent::CloseProject, window, cx);
+        if workspaces.is_empty() {
+            let previous_len = self.project_groups.len();
+            self.project_groups.retain(|group| group.key != *group_key);
+            if self.project_groups.len() != previous_len {
+                cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
+                self.serialize(cx);
+                cx.notify();
+            }
+            // Keep remove's boolean contract: no workspace was detached.
+            return Task::ready(Ok(false));
+        }
 
-        task
+        self.remove(workspaces, RemovalIntent::CloseProject, window, cx)
     }
 
     /// Returns the nearest retained workspace outside the project group at
@@ -1872,9 +1881,8 @@ impl MultiWorkspace {
         let original_active = self.workspace().clone();
         let group_key = original_active.read(cx).project_group_key(cx);
 
-        // Record the neighborhood of the project as the user sees it now:
-        // callers like `remove_project_group` delete the project row itself
-        // before the removal task runs.
+        // Record the neighborhood as the user sees it before asynchronous
+        // consent; other project rows may change while a prompt is pending.
         let group_index = self
             .project_groups
             .iter()
@@ -1974,13 +1982,24 @@ impl MultiWorkspace {
 
                 // wait for should_continue to be true before removing project groups
                 if intent == RemovalIntent::CloseProject {
+                    let projects_to_delete: collections::HashSet<_> = workspaces
+                        .iter()
+                        .map(|workspace| workspace.read(cx).project().entity_id())
+                        .collect();
                     let workspace_to_delete_keys = workspaces
                         .iter()
                         .map(|workspace| workspace.read(cx).project_group_key(cx))
                         .collect::<Vec<_>>();
 
-                    this.project_groups
-                        .retain(|group| !workspace_to_delete_keys.contains(&group.key));
+                    let retained_projects: collections::HashSet<_> = this
+                        .workspaces()
+                        .filter(|workspace| !workspaces.contains(workspace))
+                        .map(|workspace| workspace.read(cx).project().entity_id())
+                        .collect();
+                    this.project_groups.retain(|group| {
+                        !workspace_to_delete_keys.contains(&group.key)
+                            || !retained_projects.is_disjoint(&projects_to_delete)
+                    });
                     cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
                 }
 
