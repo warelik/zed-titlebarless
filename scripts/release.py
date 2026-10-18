@@ -187,6 +187,110 @@ def patch_identity(directory):
         digest.update(patch.name.encode() + b"\0" + patch.read_bytes() + b"\0")
     return patches, digest.hexdigest()
 
+def release_tag(version, upstream, patchset, candidate):
+    return f"build-{version}-{upstream[:12]}-{patchset[:12]}-{candidate[:12]}"
+
+def shipped_configuration(repo, *, with_source=False):
+    releases = [item for item in pages(f"repos/{repo}/releases")
+                if not item["draft"] and not item["prerelease"]]
+    if not releases:
+        raise ValueError("Delta review requires the last shipped patch configuration")
+    previous = max(releases, key=lambda item: item["id"])
+    if re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+-titlebarless", previous["tag_name"]):
+        config = previous["target_commitish"]
+        source = None
+    else:
+        assets = {item["name"]: item for item in previous["assets"]}
+        provenance = json.loads(asset_bytes(repo, assets["provenance.json"]))
+        if (provenance.get("repository") != repo
+                or provenance.get("release_id") != previous["id"]):
+            raise ValueError("Shipped configuration provenance belongs to another release")
+        config = provenance["config_sha"]
+        source = provenance["candidate_sha"]
+    if not SHA.fullmatch(config):
+        raise ValueError("Shipped configuration is not an exact commit")
+    return (config, source) if with_source else config
+
+def delta_review(repo, config, application, *, allow_closed=False):
+    base, shipped_source = shipped_configuration(repo, with_source=True)
+    review_sha = config
+    scope = "ALL new or modified downstream patches and release-policy changes"
+    if base == config:
+        if not isinstance(shipped_source, str) or not SHA.fullmatch(shipped_source):
+            raise ValueError("Upstream-only delta review requires the last shipped application SHA")
+        base, review_sha = shipped_source, application
+        scope = ("the application delta against the last shipped source; no downstream patch "
+                 "bytes changed, so inspect the new upstream changes and patch reapplication")
+    base_ref, head_ref = f"review-base/{base}", f"review/changes-{review_sha}"
+    for ref, commit in ((base_ref, base), (head_ref, review_sha)):
+        records = api(f"repos/{repo}/git/matching-refs/heads/{ref}")
+        exact = [record for record in records if record["ref"] == f"refs/heads/{ref}"]
+        if exact:
+            if len(exact) != 1 or exact[0]["object"]["sha"] != commit:
+                raise ValueError("Delta review ref changed; refusing to overwrite it")
+        else:
+            api(f"repos/{repo}/git/refs", method="POST",
+                data={"ref": f"refs/heads/{ref}", "sha": commit}, token=owner_token(repo))
+    query = urlencode({"state": "all", "head": f"{repo.split('/')[0]}:{head_ref}",
+                       "base": base_ref})
+    pulls = pages(f"repos/{repo}/pulls?{query}")
+    pull = pulls[0] if pulls else api(f"repos/{repo}/pulls", method="POST", data={
+        "title": f"Review all unshipped Zed changes {config[:12]}",
+        "head": head_ref, "base": base_ref,
+        "body": (f"Delta review `{review_sha}` against last shipped `{base}`; configuration `{config}`. "
+                 f"Paired complete application `{application}`. Review only; never merge.")})
+    pr = pull["number"]
+    marker = f"<!-- zed-codex:{review_sha} -->"
+    comments = pages(f"repos/{repo}/issues/{pr}/comments")
+    if not any(marker in (item.get("body") or "")
+               and item.get("user", {}).get("login") == repo.split('/')[0]
+               for item in comments):
+        api(f"repos/{repo}/issues/{pr}/comments", method="POST", token=owner_token(repo), data={
+            "body": (f"@codex review\n\nReview {scope} at exact `{review_sha}` "
+                     f"against last shipped `{base}`. Configuration: `{config}`. "
+                     f"The paired complete application is `{application}`. Read every changed "
+                     "patch and affected caller. Return the COMPLETE actionable list in one "
+                     "response, all severities together; do not stop after the first finding. "
+                     "Check actual APIs, cancellation/failure paths, source identity, immutable "
+                     "updates, mandatory tests and credential isolation. Preserve upstream "
+                     "behavior and the exact upstream version/official SSH compatibility. "
+                     "Do not compile, run tests, install dependencies, build, push or publish. "
+                     "All runtime validation is deferred to one final sequence after both "
+                     "reviews and the complete repair batch. Upstream README/manual "
+                     "author-confirmation procedures do not apply to this downstream. "
+                     "Identify the reviewed commit in normal native review format.\n\n" + marker)})
+    ready, reason = check_review(repo, pr, review_sha, base, allow_closed=allow_closed)
+    return pr, base, review_sha, ready, reason
+
+def final_attempt(repo, pr, sha, config):
+    """One final validation/build sequence; callbacks cannot spend it again."""
+    marker = f"<!-- zed-final:{sha}:{config} -->"
+    comments = pages(f"repos/{repo}/issues/{pr}/comments")
+    for item in comments:
+        user = item.get("user") or {}
+        if (marker in (item.get("body") or "")
+                and user.get("login") in {repo.split('/')[0], "github-actions[bot]"}):
+            output(final_failed=True)
+            raise ValueError("Final validation was already started for this frozen candidate; "
+                             "inspect its recorded run and reuse its artifacts, do not rebuild")
+    api(f"repos/{repo}/issues/{pr}/comments", method="POST", data={
+        "body": (f"Final validation and single build of `{sha}` / `{config}`: "
+                 f"https://github.com/{repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}. "
+                 "Both reviews and the full repair batch are complete. A failure blocks "
+                 "publication and automatic expensive retries.\n\n" + marker)})
+
+def check_delta_for_publication(repo, config, *, allow_closed=False):
+    commit = os.environ.get("DELTA_SHA", "")
+    if commit != config and not (
+            commit == os.environ.get("CANDIDATE_SHA") and shipped_configuration(repo) == config):
+        raise ValueError("Delta review does not identify the exact configuration")
+    base, number = os.environ.get("DELTA_BASE", ""), os.environ.get("DELTA_PR", "")
+    if not SHA.fullmatch(base) or not number.isdigit():
+        raise ValueError("Missing exact delta review identity")
+    ready, reason = check_review(repo, int(number), commit, base, allow_closed=allow_closed)
+    if not ready or minor_findings(repo, int(number), commit):
+        raise ValueError(f"Delta review has outstanding findings: {reason}")
+
 def copy_patch_series(commit, directory):
     directory.mkdir(parents=True)
     tree = run("git", "ls-tree", "-r", "--name-only", commit, "--", "patches", cwd=ROOT)
@@ -237,7 +341,10 @@ def cleanup_closed_pull_refs(repo, number, head_sha, *, upstream=None):
     candidates = []
     if upstream is not None:
         match = re.fullmatch(r"review/([0-9a-f]{40})-([0-9a-f]{64})", head.get("ref") or "")
-        if (not SHA.fullmatch(upstream) or not match or match.group(1) != upstream
+        delta = re.fullmatch(r"review/changes-([0-9a-f]{40})", head.get("ref") or "")
+        valid_head = ((match is not None and match.group(1) == upstream)
+                      or (delta is not None and delta.group(1) == head_sha))
+        if (not SHA.fullmatch(upstream) or not valid_head
                 or base.get("ref") != f"review-base/{upstream}"
                 or base.get("sha") != upstream):
             return
@@ -322,6 +429,31 @@ def close_published_reviews(repo, sha, upstream, head):
             if pull["state"] == "open":
                 api(f"repos/{repo}/pulls/{pull['number']}", method="PATCH", data={"state": "closed"})
             cleanup_closed_pull_refs(repo, pull["number"], sha, upstream=upstream)
+    if os.environ.get("DELTA_PR"):
+        number, commit, baseline = (int(os.environ["DELTA_PR"]), os.environ["DELTA_SHA"],
+                                    os.environ["DELTA_BASE"])
+        pull = api(f"repos/{repo}/pulls/{number}")
+        if pull["head"]["sha"] != commit or pull["base"]["sha"] != baseline:
+            raise ValueError("Delta review identity changed before cleanup")
+        if pull["state"] == "open":
+            api(f"repos/{repo}/pulls/{number}", method="PATCH", data={"state": "closed"})
+        cleanup_closed_pull_refs(repo, number, commit, upstream=baseline)
+
+def retire_superseded_reviews(repo, keep):
+    """Pull refs retain exact commits and findings before temporary heads retire."""
+    for pull in pages(f"repos/{repo}/pulls?state=open"):
+        if (pull["number"] in keep or not pull["head"]["ref"].startswith("review/")
+                or not pull["base"]["ref"].startswith("review-base/")
+                or (pull["head"].get("repo") or {}).get("full_name") != repo
+                or pull.get("user", {}).get("login") not in
+                {repo.split('/')[0], "github-actions[bot]"}):
+            continue
+        archived = api(f"repos/{repo}/git/ref/pull/{pull['number']}/head")["object"]
+        if archived.get("sha") != pull["head"]["sha"] or archived.get("type") != "commit":
+            raise ValueError("Superseded review does not retain its exact pull head")
+        api(f"repos/{repo}/pulls/{pull['number']}", method="PATCH", data={"state": "closed"})
+        cleanup_closed_pull_refs(repo, pull["number"], pull["head"]["sha"],
+                                 upstream=pull["base"]["sha"])
 
 def repair_pull(repo, config):
     for pull in pages(f"repos/{repo}/pulls?state=open&base=downstream"):
@@ -467,30 +599,8 @@ def proposal(repo, config, directory):
         output(ready=False, mode="waiting", reason="Codex is repairing the patch series",
                repair_pr=state["number"], repair_head=state["head"], upstream=state["upstream"])
         return {**state, "waiting": True, "deferred": True}
-    if policy:
-        marker = f"<!-- zed-policy:{state['head']} -->"
-        review_requests = [c for c in comments if marker in (c.get("body") or "")]
-        if not review_requests:
-            review_requests = [api(f"repos/{repo}/issues/{state['number']}/comments", method="POST",
-                data={"body": (
-                    f"@codex review\n\nReview the complete release-policy diff at exact commit "
-                    f"`{state['head']}` against trusted configuration `{config}`. "
-                    "Reject weakened tests, altered review criteria/prompts, provenance or "
-                    "source-identity bypasses, lost isolation and new deployment behavior. "
-                    "This is a review only; do not modify code.\n\n" + marker)},
-                token=owner_token(repo))]
-        ready, reason = policy_review(repo, state, review_requests[0]["created_at"])
-        output(ready=ready, mode="policy", reason=reason, repair_pr=state["number"],
-               repair_head=state["head"], upstream=state["upstream"],
-               pr=state["number"], sha=state["head"],
-               followup=ready and bool(minor_findings(repo, state["number"], state["head"])))
-        if not ready and reason != WAITING_REVIEW:
-            raise ValueError(reason)
-        if not ready:
-            pending_review(review_requests[0]["created_at"])
-        return {**state, "waiting": True}
     patches = copy_patch_series(state["head"], directory / "proposal")
-    return {**state, "patches": patches, "waiting": False}
+    return {**state, "patches": patches, "waiting": False, "policy": policy}
 
 def policy_review(repo, state, requested_at):
     pull = api(f"repos/{repo}/pulls/{state['number']}")
@@ -609,7 +719,7 @@ def check_policy(candidate):
         "suite=unittest.defaultTestLoader.discover(sys.argv[2],pattern='test_*.py');"
         "sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())"
     )
-    for tests in (ROOT / "scripts", candidate / "scripts"):
+    for tests in dict.fromkeys((ROOT / "scripts", candidate / "scripts")):
         with tempfile.TemporaryDirectory(prefix="zed-policy-tests-") as temporary:
             root = Path(temporary)
             env = {name: os.environ[name] for name in ("PATH", "LANG", "LC_ALL", "TZ") if name in os.environ}
@@ -652,7 +762,7 @@ def file_digest(path):
 def request_text(sha, upstream, config):
     return (
         "@codex review\n\n"
-        f"Review the complete application diff at exact commit `{sha}`.\n"
+        f"Review the COMPLETE assembled project at exact application commit `{sha}`.\n"
         f"Base: `{UPSTREAM}@{upstream}`. Patch configuration: `{config}`.\n"
         f"Apply the existing downstream maintenance contract in `AGENTS.md` at `{config}`. "
         "It already requires independent exact-SHA Codex review and excludes upstream "
@@ -675,7 +785,12 @@ def request_text(sha, upstream, config):
         "label unverified redundancy as a hypothesis, not a confirmed finding. "
         "Removal requires its regression to pass without that fix while retaining "
         "useful coverage; clean patch application or similar code is not proof.\n"
-        "Report findings in the normal Codex review format and identify the "
+        "Read the entire downstream diff and its integration with upstream, including "
+        "unchanged affected callers. Also inspect the release policy at the pinned "
+        "configuration. Return the COMPLETE actionable list in one response, all "
+        "severities together; do not stop at the first finding. Do not compile, run "
+        "tests, build or install dependencies: those run once after both reviews "
+        "and the complete repair batch. Report findings in the normal Codex review format and identify the "
         "reviewed commit. Do not modify code, push commits, merge, publish or "
         "change a running editor or remote session.\n\n"
         f"<!-- zed-codex:{sha} -->"
@@ -732,7 +847,11 @@ def repair_text(state, attempt, failure, prepared=None):
         "Do not weaken checks, change prompt/review criteria or task markers, "
         "edit the historical source manifest or AGENTS files, invent credentials, "
         "force-push, merge, deploy, close a live editor or disrupt active work.\n\n"
-        "The macOS regression/build/inspection gates run in GitHub Actions. "
+        "Fix the COMPLETE consolidated finding list in one batch. Do not compile, "
+        "run tests, build or install dependencies during repair; inspect source and "
+        "add the regressions without executing them. Runtime checks run ONCE at the "
+        "end, after both fresh reviews and all repairs. The macOS "
+        "regression/build/inspection gates run in GitHub Actions. "
         "Do not claim macOS validation from a Linux check. A false-positive review "
         "needs reproducible evidence and a fresh review of the resulting SHA. "
         "A report or unpublished commit is not a fix. Verify the actual pushed "
@@ -871,7 +990,9 @@ def prepare(app):
     if not SHA.fullmatch(upstream):
         raise ValueError("Expected a full upstream commit")
     patches, patchset = patch_identity(state["patches"] if state else ROOT / "patches")
-    output(ready=False, mode="application", upstream=upstream, patchset=patchset,
+    mode = "policy" if state and state.get("policy") else "application"
+    review_config = state["head"] if state else config
+    output(ready=False, mode=mode, upstream=upstream, patchset=patchset,
            source_depth=len(patches) + 1,
            repair_pr=state["number"] if state else "",
            repair_head=state["head"] if state else deferred["head"] if deferred else "")
@@ -896,7 +1017,7 @@ def prepare(app):
             or api(f"repos/{UPSTREAM}/commits/v{version}")["sha"] != upstream):
         raise ValueError("Patch series must preserve the exact supported upstream version")
     ensure_forward_release(repo, version, upstream)
-    release = f"build-{version}-{upstream[:12]}-{patchset[:12]}"
+    release = release_tag(version, upstream, patchset, sha)
     base, head = f"review-base/{upstream}", f"review/{upstream}-{patchset}"
     output(sha=sha, version=version, release=release)
     existing = next((item for item in pages(f"repos/{repo}/releases")
@@ -940,18 +1061,31 @@ def prepare(app):
             data={"body": request_text(sha, upstream, f"{repo}@{state['head'] if state else config}")},
             token=owner_token(repo))
     ready, reason = check_review(repo, pr, sha, upstream)
-    output(ready=ready, reason=reason, sha=sha, upstream=upstream, patchset=patchset,
-           version=version, release=release, pr=pr,
-           followup=ready and (bool(minor_findings(repo, pr, sha))
-                              or bool(deferred and deferred.get("nonblocking"))))
-    if not ready:
-        if reason != WAITING_REVIEW:
-            raise ValueError(reason)
+    delta_pr, delta_base, delta_sha, delta_ready, delta_reason = delta_review(repo, review_config, sha)
+    retire_superseded_reviews(repo, {pr, delta_pr})
+    output(delta_pr=delta_pr, delta_base=delta_base, delta_sha=delta_sha)
+    # Wait for both complete lists before any repair. A callback from the first
+    # reviewer must not dispatch a partial fix or start expensive validation.
+    if reason == WAITING_REVIEW or delta_reason == WAITING_REVIEW:
+        output(ready=False, reason="Waiting for both complete review reports", pr=pr)
         comments = pages(f"repos/{repo}/issues/{pr}/comments")
         requested = [comment for comment in comments if marker in (comment.get("body") or "")
                      and comment.get("user", {}).get("login") == repo.split("/")[0]]
         pending_review(min(comment["created_at"] for comment in requested))
-    elif not state:
+        return
+    findings = minor_findings(repo, pr, sha) + minor_findings(repo, delta_pr, delta_sha)
+    if not ready or not delta_ready or findings:
+        output(ready=False, reason="Both review reports complete; repairing the entire finding batch")
+        details = []
+        for number, commit in ((pr, sha), (delta_pr, delta_sha)):
+            details.extend(f"{item.get('path')}:{item.get('line')}\n{item.get('body', '')}"
+                           for item in review_records(repo, number, commit))
+        raise ValueError("Consolidated review batch:\n" + "\n\n".join(dict.fromkeys(details)))
+    output(ready=True, reason="Both complete reviews accepted; no outstanding findings",
+           sha=sha, upstream=upstream, patchset=patchset, version=version,
+           release=release, pr=pr, followup=False)
+    if not state:
+        final_attempt(repo, pr, sha, config)
         output(release_id=reserve_release(repo, release, sha, upstream, patchset, version, config))
 
 def build_identity():
@@ -971,8 +1105,8 @@ def build_identity():
     result["release_id"] = int(os.environ["RELEASE_ID"])
     if result["release_id"] >= 2 ** 64:
         raise ValueError("Release ID exceeds the updater's native identifier range")
-    expected = (f"build-{result['version']}-{result['upstream_sha'][:12]}-"
-                f"{result['patchset_sha256'][:12]}")
+    expected = release_tag(result['version'], result['upstream_sha'],
+                           result['patchset_sha256'], result['candidate_sha'])
     if os.environ["RELEASE_TAG"] != expected:
         raise ValueError("Release tag does not identify this upstream and patch set")
     return result
@@ -1127,8 +1261,8 @@ def validate_metadata(provenance, manifest, sums, expected, assets, tag):
         if not re.fullmatch(r"[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}",
                             provenance.get(key, "")):
             raise ValueError("Artifact provenance has no inspected Mach-O UUID")
-    expected_tag = (f"build-{provenance['version']}-{provenance['upstream_sha'][:12]}-"
-                    f"{provenance['patchset_sha256'][:12]}")
+    expected_tag = release_tag(provenance['version'], provenance['upstream_sha'],
+                               provenance['patchset_sha256'], provenance['candidate_sha'])
     if expected_tag != tag:
         raise ValueError("Artifact provenance does not identify the release tag")
     digests = {}
@@ -1175,7 +1309,7 @@ def asset_bytes(repo, asset):
     return data
 
 def verify_published_release(repo, release, sha, upstream, patchset, version):
-    tag = f"build-{version}-{upstream[:12]}-{patchset[:12]}"
+    tag = release_tag(version, upstream, patchset, sha)
     if (release["draft"] or release["prerelease"] or release["tag_name"] != tag
             or release["target_commitish"] != sha):
         raise ValueError("Published release does not identify the reviewed source")
@@ -1212,6 +1346,10 @@ def request_repair(directory, *, config=None, upstream=None, evidence=None, nonb
     if not SHA.fullmatch(config) or not SHA.fullmatch(upstream):
         raise ValueError("Machine repair requires exact source commits")
     failure = evidence if evidence is not None else failure_evidence(repo)
+    if os.environ.get("FINAL_VALIDATION_FAILED") == "true":
+        escalation(repo, config, upstream,
+                   "The single final validation/build sequence failed. Automatic expensive "
+                   "retries are stopped; retain its exact diagnostics and artifacts.\n\n" + failure)
     try:
         token = owner_token(repo)
     except (ValueError, subprocess.CalledProcessError) as error:
@@ -1311,6 +1449,7 @@ def publish(directory):
     patchset, version = identity["patchset_sha256"], identity["version"]
     tag = os.environ["RELEASE_TAG"]
     release = api(f"repos/{repo}/releases/{identity['release_id']}")
+    check_delta_for_publication(repo, config, allow_closed=not release["draft"])
     if not release["draft"]:
         verify_published_release(repo, release, sha, upstream, patchset, version)
         ready, reason = check_review(repo, int(os.environ["CANDIDATE_PR"]), sha, upstream,
@@ -1369,6 +1508,9 @@ def publish(directory):
     ready, reason = check_review(repo, int(os.environ["CANDIDATE_PR"]), sha, upstream)
     if not ready or api(f"repos/{repo}/commits/downstream")["sha"] != config:
         raise ValueError(f"Publication was invalidated after upload: {reason}")
+    check_delta_for_publication(repo, config)
+    if minor_findings(repo, int(os.environ["CANDIDATE_PR"]), sha):
+        raise ValueError("The full-project review has unresolved findings")
     notes = (
         f"Upstream `{UPSTREAM}@{upstream}`; application `{sha}`; "
         f"configuration `{config}`; patch SHA-256 `{patchset}`.\n\n"
@@ -1406,20 +1548,13 @@ def land_repair(directory):
     changed, policy = repair_changes(state)
     if not changed:
         raise ValueError("Context-only repair must not be adopted")
-    if policy:
-        marker = f"<!-- zed-policy:{state['head']} -->"
-        requests = [comment for comment in repair_comments(repo, state["number"])
-                    if marker in (comment.get("body") or "")]
-        if not requests:
-            raise ValueError("No exact-source policy review request")
-        ready, reason = policy_review(repo, state, requests[0]["created_at"])
-    else:
-        ready, reason = check_review(repo, int(os.environ["CANDIDATE_PR"]),
-                                     os.environ["CANDIDATE_SHA"], state["upstream"])
+    check_delta_for_publication(repo, state["head"])
+    ready, reason = check_review(repo, int(os.environ["CANDIDATE_PR"]),
+                                 os.environ["CANDIDATE_SHA"], state["upstream"])
     if not ready:
         raise ValueError(reason)
-    finding_pr = state["number"] if policy else int(os.environ["CANDIDATE_PR"])
-    finding_sha = state["head"] if policy else os.environ["CANDIDATE_SHA"]
+    finding_pr = int(os.environ["CANDIDATE_PR"])
+    finding_sha = os.environ["CANDIDATE_SHA"]
     followup = minor_findings(repo, finding_pr, finding_sha)
     if api(f"repos/{repo}/commits/downstream")["sha"] != config:
         raise ValueError("Default configuration changed; do not land stale repairs")
@@ -1463,7 +1598,8 @@ def land_repair(directory):
     run("git", "push", f"https://github.com/{repo}.git", f"{commit}:refs/heads/downstream",
         cwd=work, env=env)
     api(f"repos/{repo}/issues/{state['number']}/comments", method="POST",
-        data={"body": f"Verified repair adopted as `{commit}`; source-context files were not merged."})
+        data={"body": f"Reviewed repair consolidated as `{commit}`; source-context files were not merged. "
+                       "Runtime verification is deferred to the single final validation/build sequence."})
     api(f"repos/{repo}/pulls/{state['number']}", method="PATCH", data={"state": "closed"})
     marker = f"<!-- zed-escalation:{config}:{state['upstream']} -->"
     for issue in pages(f"repos/{repo}/issues?state=open"):

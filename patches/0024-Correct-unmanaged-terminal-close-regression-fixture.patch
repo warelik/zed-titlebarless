@@ -1,0 +1,27 @@
+From ae7ccc360bd1ef5bc5b59e494f02148ff0beba28 Mon Sep 17 00:00:00 2001
+From: Codex Repair <codex@example.invalid>
+Date: Sat, 17 Oct 2026 21:56:27 +0000
+Subject: [PATCH] Correct unmanaged terminal close regression fixture
+
+---
+ crates/agent_ui/src/agent_panel.rs | 4 ----
+ 1 file changed, 4 deletions(-)
+
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index cd8d2c2..19c4525 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -17330,10 +17330,6 @@ mod tests {
+             remote_connection: None,
+             working_directory: None,
+         };
+-        cx.update(|_, cx| {
+-            TerminalThreadMetadataStore::global(cx)
+-                .update(cx, |store, cx| store.save(metadata.clone(), cx));
+-        });
+         panel.update_in(&mut cx, |panel, window, cx| {
+             panel.restore_terminal(
+                 metadata,
+-- 
+2.43.0
+

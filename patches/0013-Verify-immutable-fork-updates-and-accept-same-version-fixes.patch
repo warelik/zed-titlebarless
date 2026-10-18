@@ -554,7 +554,7 @@ index 6afd897..80c6250 100644
 +        asset_body: Vec<u8>,
 +        manifest_requests: Arc<AtomicUsize>,
 +        asset_requests: Arc<AtomicUsize>,
-+    ) -> FakeHttpClient {
++    ) -> Arc<HttpClientWithUrl> {
 +        FakeHttpClient::create(move |request| {
 +            let manifest_body = manifest_body.clone();
 +            let asset_path = asset_path.clone();
@@ -587,7 +587,7 @@ index 6afd897..80c6250 100644
 +    fn create_fork_test_updater(
 +        cx: &mut TestAppContext,
 +        current_version: Version,
-+        fake_http_client: FakeHttpClient,
++        fake_http_client: Arc<HttpClientWithUrl>,
 +        config: ForkUpdateConfig,
 +        install_override: Rc<dyn Fn(&Path, &AsyncApp) -> Result<Option<PathBuf>>>,
 +    ) -> Entity<AutoUpdater> {

@@ -1,0 +1,24 @@
+From cefc762ebf86d1155a0ddf3f31357268c049cf20 Mon Sep 17 00:00:00 2001
+From: Codex Repair <codex@example.invalid>
+Date: Sun, 18 Oct 2026 00:50:03 +0000
+Subject: [PATCH] Ensure tab width regression renders a tab
+
+---
+ crates/workspace/src/workspace.rs | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
+index 43d06fc..e006cde 100644
+--- a/crates/workspace/src/workspace.rs
++++ b/crates/workspace/src/workspace.rs
+@@ -13319,6 +13319,7 @@ mod tests {
+         let (workspace, cx) =
+             cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+         add_an_item_to_active_pane(cx, &workspace, 1);
++        add_an_item_to_active_pane(cx, &workspace, 2);
+ 
+         let tab_width =
+             |min_width: Option<f32>, max_width: Option<f32>, cx: &mut VisualTestContext| {
+-- 
+2.43.0
+

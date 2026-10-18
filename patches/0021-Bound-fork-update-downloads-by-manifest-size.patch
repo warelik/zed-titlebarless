@@ -1,0 +1,129 @@
+From 02386625c8e8f21a381fef96d26975bce13874f4 Mon Sep 17 00:00:00 2001
+From: Codex Repair <codex-repair@example.invalid>
+Date: Sat, 17 Oct 2026 17:09:44 +0000
+Subject: [PATCH] Bound fork update downloads by manifest size
+
+---
+ crates/auto_update/src/auto_update.rs | 63 ++++++++++++++++++++++++---
+ 1 file changed, 58 insertions(+), 5 deletions(-)
+
+diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs
+index 2f35195..324b80a 100644
+--- a/crates/auto_update/src/auto_update.rs
++++ b/crates/auto_update/src/auto_update.rs
+@@ -902,7 +902,14 @@ impl AutoUpdater {
+         let download = if let Some(fork_release) = fork_release {
+             download_fork_release(&target_path, &fork_release, client, on_progress).await
+         } else {
+-            download_release(&target_path, fetched_release_data, client, on_progress).await
++            download_release(
++                &target_path,
++                fetched_release_data,
++                client,
++                None,
++                on_progress,
++            )
++            .await
+         };
+         download.with_context(|| format!("Failed to download update to {}", target_path.display()))?;
+ 
+@@ -1313,6 +1320,7 @@ async fn download_release(
+     target_path: &Path,
+     release: ReleaseAsset,
+     client: Arc<HttpClientWithUrl>,
++    expected_size: Option<u64>,
+     mut on_progress: impl FnMut(Option<f32>),
+ ) -> Result<()> {
+     let mut target_file = File::create(&target_path).await?;
+@@ -1340,8 +1348,16 @@ async fn download_release(
+         if bytes_read == 0 {
+             break;
+         }
++        downloaded_bytes = downloaded_bytes
++            .checked_add(bytes_read as u64)
++            .context("downloaded update size overflow")?;
++        if let Some(expected_size) = expected_size {
++            anyhow::ensure!(
++                downloaded_bytes <= expected_size,
++                "downloaded update exceeds manifest size of {expected_size} bytes"
++            );
++        }
+         target_file.write_all(&buffer[..bytes_read]).await?;
+-        downloaded_bytes += bytes_read as u64;
+ 
+         if let Some(total_bytes) = total_bytes {
+             let fraction = (downloaded_bytes as f32 / total_bytes as f32).clamp(0.0, 1.0);
+@@ -1372,6 +1388,7 @@ async fn download_fork_release(
+         target_path,
+         release.release.clone(),
+         client,
++        Some(release.size),
+         on_progress,
+     )
+     .await?;
+@@ -2298,7 +2315,43 @@ mod tests {
+     }
+ 
+     #[gpui::test]
+-    async fn test_fork_download_verifies_size_and_streaming_sha256(_cx: &mut TestAppContext) {
++    async fn test_fork_download_stops_at_manifest_size(cx: &mut TestAppContext) {
++        cx.background_executor.allow_parking();
++        let body = vec![0u8; 20_000];
++        let client = FakeHttpClient::create(move |_request| {
++            let body = body.clone();
++            async move { Ok(Response::builder().status(200).body(body.into()).unwrap()) }
++        });
++        let temp_dir = tempdir().expect("temporary directory");
++        let target_path = temp_dir.path().join("Zed.dmg");
++        let release = ForkReleaseAsset {
++            release: ReleaseAsset {
++                version: "1.24.2".into(),
++                url: "https://github.com/example/zed/releases/download/test/Zed.dmg".into(),
++            },
++            schema: 1,
++            release_id: 42,
++            platform: "macos/aarch64".into(),
++            candidate_sha: TEST_FORK_CANDIDATE_SHA.into(),
++            upstream_sha: TEST_FORK_UPSTREAM_SHA.into(),
++            patchset_sha256: TEST_FORK_PATCHSET_SHA256.into(),
++            sha256: TEST_FORK_ARCHIVE_SHA256.into(),
++            size: 9_000,
++        };
++
++        let error = download_fork_release(&target_path, &release, client, |_| {})
++            .await
++            .expect_err("an oversized response must fail during download");
++        assert!(error.to_string().contains("exceeds manifest size"));
++        assert!(
++            std::fs::metadata(&target_path).expect("partial download").len() <= release.size,
++            "the downloader must not write beyond the manifest size"
++        );
++    }
++
++    #[gpui::test]
++    async fn test_fork_download_verifies_size_and_streaming_sha256(cx: &mut TestAppContext) {
++        cx.background_executor.allow_parking();
+         let temp_dir = tempdir().expect("temporary directory");
+         let target_path = temp_dir.path().join("Zed.dmg");
+         std::fs::write(&target_path, b"abc").expect("write test asset");
+@@ -2478,7 +2531,7 @@ mod tests {
+         };
+ 
+         let reported = Rc::new(std::cell::RefCell::new(Vec::<f32>::new()));
+-        download_release(&target_path, release, client, {
++        download_release(&target_path, release, client, None, {
+             let reported = reported.clone();
+             move |fraction| {
+                 if let Some(fraction) = fraction {
+@@ -2538,7 +2591,7 @@ mod tests {
+         };
+ 
+         let reported = Rc::new(std::cell::RefCell::new(Vec::<Option<f32>>::new()));
+-        download_release(&target_path, release, client, {
++        download_release(&target_path, release, client, None, {
+             let reported = reported.clone();
+             move |fraction| {
+                 reported.borrow_mut().push(fraction);
+-- 
+2.43.0
+

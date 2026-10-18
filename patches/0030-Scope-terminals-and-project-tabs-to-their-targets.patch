@@ -1,0 +1,357 @@
+From a8862062aeb5b282a292b80a7e62ece08656b8e6 Mon Sep 17 00:00:00 2001
+From: Codex Repair <codex@example.invalid>
+Date: Sun, 18 Oct 2026 06:30:00 +0000
+Subject: [PATCH] Scope terminals and project tabs to their targets
+
+---
+ .../src/terminal_thread_metadata_store.rs     | 102 +++++++++++++++++-
+ crates/sidebar/src/sidebar.rs                 |  44 +++++++-
+ crates/sidebar/src/sidebar_tests.rs           |  70 ++++++++++++
+ crates/sidebar/src/thread_tabs.rs             |   8 +-
+ 4 files changed, 207 insertions(+), 17 deletions(-)
+
+diff --git a/crates/agent_ui/src/terminal_thread_metadata_store.rs b/crates/agent_ui/src/terminal_thread_metadata_store.rs
+index 5aca08e..4ca941d 100644
+--- a/crates/agent_ui/src/terminal_thread_metadata_store.rs
++++ b/crates/agent_ui/src/terminal_thread_metadata_store.rs
+@@ -23,6 +23,21 @@ pub fn init(cx: &mut App) {
+     TerminalThreadMetadataStore::init_global(cx);
+ }
+ 
++fn same_terminal_remote_connection(
++    left: Option<&RemoteConnectionOptions>,
++    right: Option<&RemoteConnectionOptions>,
++) -> bool {
++    if !same_remote_connection_identity(left, right) {
++        return false;
++    }
++    match (left, right) {
++        (Some(RemoteConnectionOptions::Ssh(left)), Some(RemoteConnectionOptions::Ssh(right))) => {
++            left.args == right.args
++        }
++        _ => true,
++    }
++}
++
+ struct GlobalTerminalThreadMetadataStore(Entity<TerminalThreadMetadataStore>);
+ impl Global for GlobalTerminalThreadMetadataStore {}
+ 
+@@ -239,7 +254,7 @@ impl TerminalThreadMetadataStore {
+             .flatten()
+             .filter_map(|id| self.terminals.get(id))
+             .filter(move |terminal| {
+-                same_remote_connection_identity(
++                same_terminal_remote_connection(
+                     terminal.remote_connection.as_ref(),
+                     remote_connection,
+                 )
+@@ -257,7 +272,7 @@ impl TerminalThreadMetadataStore {
+             .flatten()
+             .filter_map(|id| self.terminals.get(id))
+             .filter(move |terminal| {
+-                same_remote_connection_identity(
++                same_terminal_remote_connection(
+                     terminal.remote_connection.as_ref(),
+                     remote_connection,
+                 )
+@@ -272,7 +287,7 @@ impl TerminalThreadMetadataStore {
+     ) -> bool {
+         self.entries().any(|terminal| {
+             Some(terminal.terminal_id) != terminal_id
+-                && same_remote_connection_identity(
++                && same_terminal_remote_connection(
+                     terminal.remote_connection.as_ref(),
+                     remote_connection,
+                 )
+@@ -323,7 +338,7 @@ impl TerminalThreadMetadataStore {
+             .flatten()
+             .filter(|id| {
+                 self.terminals.get(id).is_some_and(|terminal| {
+-                    same_remote_connection_identity(
++                    same_terminal_remote_connection(
+                         terminal.remote_connection.as_ref(),
+                         remote_connection,
+                     )
+@@ -360,7 +375,7 @@ impl TerminalThreadMetadataStore {
+         for terminal_id in terminal_ids {
+             if let Some(terminal) = self.terminals.get(&terminal_id).cloned() {
+                 if terminal.folder_paths().is_empty()
+-                    && same_remote_connection_identity(
++                    && same_terminal_remote_connection(
+                         terminal.remote_connection.as_ref(),
+                         remote_connection,
+                     )
+@@ -1238,4 +1253,81 @@ mod tests {
+             );
+         });
+     }
++
++    #[gpui::test]
++    async fn test_ssh_routing_arguments_scope_terminal_project_assignment(
++        cx: &mut TestAppContext,
++    ) {
++        init_test(cx);
++
++        let connection = |configuration: &str| {
++            RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
++                host: "same-host".into(),
++                username: Some("developer".into()),
++                port: Some(22),
++                args: Some(vec!["-F".into(), configuration.into()]),
++                ..Default::default()
++            })
++        };
++        let project_connection = connection("work.conf");
++        let other_connection = connection("personal.conf");
++        let project_paths = PathList::new(&[Path::new("/repo")]);
++        let project_worktree_paths = WorktreePaths::from_folder_paths(&project_paths);
++
++        let mut matching = metadata("Matching", WorktreePaths::default());
++        matching.working_directory = Some(PathBuf::from("/repo"));
++        matching.remote_connection = Some(project_connection.clone());
++        let matching_id = matching.terminal_id;
++
++        let mut other_destination = metadata("Other destination", WorktreePaths::default());
++        other_destination.working_directory = Some(PathBuf::from("/repo"));
++        other_destination.remote_connection = Some(other_connection.clone());
++        let other_destination_id = other_destination.terminal_id;
++
++        cx.update(|cx| {
++            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
++                store.save(matching, cx);
++                store.save(other_destination, cx);
++                store.update_worktree_paths_for_project(
++                    &project_worktree_paths,
++                    Some(&project_connection),
++                    cx,
++                );
++            });
++        });
++
++        cx.update(|cx| {
++            let store = TerminalThreadMetadataStore::global(cx);
++            let store = store.read(cx);
++            assert_eq!(
++                store.entry(matching_id).unwrap().worktree_paths,
++                project_worktree_paths
++            );
++            assert!(
++                store
++                    .entry(other_destination_id)
++                    .unwrap()
++                    .worktree_paths
++                    .is_empty(),
++                "an SSH destination with different routing arguments must not be assigned to the project"
++            );
++            assert_eq!(
++                store
++                    .entries_for_path(&project_paths, Some(&project_connection))
++                    .map(|entry| entry.terminal_id)
++                    .collect::<Vec<_>>(),
++                vec![matching_id],
++                "grouping and activation lookups must exclude the other SSH destination"
++            );
++            assert!(
++                !store.path_is_referenced_by_terminal(
++                    None,
++                    Path::new("/repo"),
++                    Some(&other_connection),
++                ),
++                "archive cleanup must not treat another SSH destination as a path reference"
++            );
++        });
++    }
++
+ }
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index 899ad08..d4251df 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -1341,6 +1341,7 @@ impl Sidebar {
+     fn open_workspace_for_group(
+         &mut self,
+         project_group_key: &ProjectGroupKey,
++        open_agent_panel: bool,
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
+@@ -1370,7 +1371,12 @@ impl Sidebar {
+         cx.spawn_in(window, async move |_this, cx| {
+             let result = task.await;
+             remote_connection::dismiss_connection_modal(&modal_workspace, cx);
+-            result?;
++            let workspace = result?;
++            if open_agent_panel {
++                workspace.update_in(cx, |workspace, window, cx| {
++                    workspace.open_panel::<AgentPanel>(window, cx);
++                })?;
++            }
+             anyhow::Ok(())
+         })
+         .detach_and_log_err(cx);
+@@ -3098,6 +3104,7 @@ impl Sidebar {
+                                             } else {
+                                                 sidebar.open_workspace_for_group(
+                                                     &project_group_key,
++                                                    false,
+                                                     window,
+                                                     cx,
+                                                 );
+@@ -7634,6 +7641,25 @@ impl Sidebar {
+         key: &ProjectGroupKey,
+         window: &mut Window,
+         cx: &mut Context<Self>,
++    ) {
++        self.activate_or_open_workspace_for_group_internal(key, false, window, cx);
++    }
++
++    pub(crate) fn activate_or_open_workspace_for_group_and_open_agent_panel(
++        &mut self,
++        key: &ProjectGroupKey,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        self.activate_or_open_workspace_for_group_internal(key, true, window, cx);
++    }
++
++    fn activate_or_open_workspace_for_group_internal(
++        &mut self,
++        key: &ProjectGroupKey,
++        open_agent_panel: bool,
++        window: &mut Window,
++        cx: &mut Context<Self>,
+     ) {
+         let workspace = self
+             .multi_workspace
+@@ -7641,12 +7667,20 @@ impl Sidebar {
+             .and_then(|mw| mw.read(cx).last_active_workspace_for_group(key, cx))
+             .or_else(|| self.workspace_for_group(key, cx));
+         if let Some(workspace) = workspace {
+-            if self.is_active_workspace(&workspace, cx) {
++            let already_active = self.is_active_workspace(&workspace, cx);
++            if !already_active {
++                self.activate_workspace(&workspace, window, cx);
++            }
++            if open_agent_panel {
++                workspace.update(cx, |workspace, cx| {
++                    workspace.open_panel::<AgentPanel>(window, cx);
++                });
++            }
++            if already_active {
+                 return;
+             }
+-            self.activate_workspace(&workspace, window, cx);
+         } else {
+-            self.open_workspace_for_group(key, window, cx);
++            self.open_workspace_for_group(key, open_agent_panel, window, cx);
+         }
+         self.selection = None;
+         self.active_entry = None;
+@@ -7713,7 +7747,7 @@ impl Sidebar {
+                 multi_workspace.retain_active_workspace(cx);
+             });
+         } else {
+-            self.open_workspace_for_group(&key, window, cx);
++            self.open_workspace_for_group(&key, false, window, cx);
+         }
+     }
+ 
+diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
+index 5b9f07b..9d32d7b 100644
+--- a/crates/sidebar/src/sidebar_tests.rs
++++ b/crates/sidebar/src/sidebar_tests.rs
+@@ -17298,3 +17298,73 @@ fn test_terminal_remote_connection_match_distinguishes_ssh_arguments() {
+         Some(&different_endpoint)
+     ));
+ }
++
++
++#[gpui::test]
++async fn test_project_tab_opens_panel_only_after_closed_target_workspace_loads(
++    cx: &mut TestAppContext,
++) {
++    init_test(cx);
++    agent_ui::test_support::init_test(cx);
++    cx.update(|cx| {
++        cx.observe_new(
++            |workspace: &mut Workspace,
++             window: Option<&mut Window>,
++             cx: &mut gpui::Context<Workspace>| {
++                if let Some(window) = window {
++                    let panel = cx.new(|cx| AgentPanel::test_new(workspace, window, cx));
++                    workspace.add_panel(panel, window, cx);
++                    workspace.close_panel::<AgentPanel>(window, cx);
++                }
++            },
++        )
++        .detach();
++    });
++    let fs = FakeFs::new(cx.executor());
++    fs.insert_tree("/source-project", serde_json::json!({ "src": {} }))
++        .await;
++    fs.insert_tree("/closed-target", serde_json::json!({ "src": {} }))
++        .await;
++    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
++
++    let source_project =
++        project::Project::test(fs.clone(), ["/source-project".as_ref()], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(source_project, window, cx));
++    let sidebar = setup_sidebar(&multi_workspace, cx);
++    let source_workspace =
++        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
++
++    source_workspace.update_in(cx, |workspace, window, cx| {
++        workspace.open_panel::<AgentPanel>(window, cx);
++        workspace.close_panel::<AgentPanel>(window, cx);
++    });
++    assert!(!source_workspace.read_with(cx, |_, cx| {
++        AgentPanel::is_visible(&source_workspace, cx)
++    }));
++
++    let target_key = ProjectGroupKey::new(
++        None,
++        PathList::new(&[std::path::PathBuf::from("/closed-target")]),
++    );
++    sidebar.update_in(cx, |sidebar, window, cx| {
++        sidebar.activate_or_open_workspace_for_group_and_open_agent_panel(
++            &target_key,
++            window,
++            cx,
++        );
++    });
++    cx.run_until_parked();
++
++    let target_workspace = multi_workspace.read_with(cx, |multi_workspace, cx| {
++        let workspace = multi_workspace.workspace().clone();
++        assert_eq!(workspace.read(cx).project_group_key(cx), target_key);
++        workspace
++    });
++    assert!(target_workspace.read_with(cx, |_, cx| {
++        AgentPanel::is_visible(&target_workspace, cx)
++    }));
++    assert!(!source_workspace.read_with(cx, |_, cx| {
++        AgentPanel::is_visible(&source_workspace, cx)
++    }), "opening a closed project tab must not reopen the source project's panel");
++}
+diff --git a/crates/sidebar/src/thread_tabs.rs b/crates/sidebar/src/thread_tabs.rs
+index 85ac844..34d4c43 100644
+--- a/crates/sidebar/src/thread_tabs.rs
++++ b/crates/sidebar/src/thread_tabs.rs
+@@ -420,13 +420,7 @@ impl Sidebar {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
+-        self.activate_or_open_workspace_for_group(key, window, cx);
+-        // The rows live in the agent panel, so keep it open in the project switched to.
+-        if let Some(workspace) = self.active_workspace(cx) {
+-            workspace.update(cx, |workspace, cx| {
+-                workspace.open_panel::<AgentPanel>(window, cx);
+-            });
+-        }
++        self.activate_or_open_workspace_for_group_and_open_agent_panel(key, window, cx);
+     }
+ 
+     fn close_tab(&mut self, close: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+-- 
+2.43.0

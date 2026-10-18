@@ -1,0 +1,77 @@
+From e62e7152752866b020da48f3384c6bdfc4907fd0 Mon Sep 17 00:00:00 2001
+From: Codex Repair <codex-repair@localhost>
+Date: Sun, 18 Oct 2026 02:00:00 +0000
+Subject: [PATCH] Bound release manifest responses
+
+---
+ crates/auto_update/src/auto_update.rs | 39 ++++++++++++++++++++++++++-
+ 1 file changed, 38 insertions(+), 1 deletion(-)
+
+diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs
+index 80c6250..62588e8 100644
+--- a/crates/auto_update/src/auto_update.rs
++++ b/crates/auto_update/src/auto_update.rs
+@@ -1284,6 +1284,8 @@ fn validate_fork_release(
+     Ok(version)
+ }
+ 
++const MAX_RELEASE_JSON_SIZE: u64 = 64 * 1024;
++
+ async fn fetch_release_json<T: DeserializeOwned>(
+     client: &HttpClientWithUrl,
+     url: &str,
+@@ -1291,8 +1293,18 @@ async fn fetch_release_json<T: DeserializeOwned>(
+ ) -> Result<T> {
+     let mut response = client.get(url, Default::default(), true).await?;
+     let mut body = Vec::new();
+-    response.body_mut().read_to_end(&mut body).await?;
++    response
++        .body_mut()
++        .take(MAX_RELEASE_JSON_SIZE + 1)
++        .read_to_end(&mut body)
++        .await?;
+ 
++    anyhow::ensure!(
++        body.len() <= MAX_RELEASE_JSON_SIZE as usize,
++        "{} exceeds the maximum size of {} bytes",
++        description,
++        MAX_RELEASE_JSON_SIZE,
++    );
+     anyhow::ensure!(
+         response.status().is_success(),
+         "failed to fetch {}: {:?}",
+@@ -2449,6 +2461,31 @@ mod tests {
+         assert_eq!(std::fs::read_to_string(path).unwrap(), "<fake-zed-update>");
+     }
+ 
++    #[gpui::test]
++    async fn test_fetch_release_json_rejects_oversized_response(cx: &mut TestAppContext) {
++        cx.background_executor.allow_parking();
++
++        let client = FakeHttpClient::create(|_req| async {
++            Ok(Response::builder()
++                .status(200)
++                .body(vec![b' '; MAX_RELEASE_JSON_SIZE as usize + 1].into())
++                .unwrap())
++        });
++
++        let error = fetch_release_json::<serde_json::Value>(
++            &client,
++            "https://test.example/latest.json",
++            "release manifest",
++        )
++        .await
++        .unwrap_err();
++
++        assert_eq!(
++            error.to_string(),
++            "release manifest exceeds the maximum size of 65536 bytes"
++        );
++    }
++
+     #[gpui::test]
+     async fn test_download_release_reports_progress(cx: &mut TestAppContext) {
+         cx.background_executor.allow_parking();
+-- 
+2.43.0
+

@@ -34,7 +34,7 @@ def request(head=SEED, attempt=1, age=0):
 class RepairBoundaryTests(unittest.TestCase):
     def test_deferred_proposal_preserves_recovery_and_bounded_repair_paths(self):
         candidate, patchset = "7" * 40, "8" * 64
-        tag = f"build-1.24.2-{UPSTREAM[:12]}-{patchset[:12]}"
+        tag = f"build-1.24.2-{UPSTREAM[:12]}-{patchset[:12]}-{candidate[:12]}"
 
         for nonblocking, broken, expected_followup in (
             (False, False, False), (True, False, True), (False, True, False),
@@ -201,10 +201,14 @@ class RepairBoundaryTests(unittest.TestCase):
               patch.object(release, "repair_changes", return_value=(["scripts/release.py"], True)),
               patch.object(release, "policy_review", return_value=(True, "Accepted")),
               patch.object(release, "minor_findings", return_value=[{"body": "P2 fix"}]),
+              patch.object(release, "copy_patch_series", return_value=Path("/unused/proposal")),
               patch.object(release, "output") as output):
-            release.proposal(REPO, CONFIG, Path("/unused"))
-        self.assertTrue(output.call_args.kwargs["ready"])
-        self.assertTrue(output.call_args.kwargs["followup"])
+            result = release.proposal(REPO, CONFIG, Path("/unused"))
+        self.assertTrue(result["policy"])
+        self.assertFalse(result["waiting"])
+        self.assertFalse(output.call_args.kwargs["ready"])
+        # Gathering a policy proposal is not acceptance: prepare still requires
+        # both full reports and includes minor findings in the repair batch.
 
     def test_recovered_candidate_closes_only_the_unchanged_blocking_repair(self):
         with (patch.object(release, "api", side_effect=[
@@ -266,6 +270,8 @@ class RepairBoundaryTests(unittest.TestCase):
               patch.object(release, "repair_changes", return_value=(["scripts/release.py"], True)),
               patch.object(release, "repair_comments", return_value=[review]),
               patch.object(release, "policy_review", return_value=(True, "Accepted")),
+              patch.object(release, "check_review", return_value=(True, "Accepted")),
+              patch.object(release, "check_delta_for_publication"),
               patch.object(release, "minor_findings", return_value=[finding]),
               patch.object(release, "api", side_effect=api),
               patch.object(release, "pages", return_value=[]),
@@ -302,6 +308,7 @@ class RepairBoundaryTests(unittest.TestCase):
               patch.object(release, "repair_pull", return_value=STATE),
               patch.object(release, "repair_changes", return_value=(["patches/0009-fix.patch"], False)),
               patch.object(release, "check_review", return_value=(True, "Accepted")),
+              patch.object(release, "check_delta_for_publication"),
               patch.object(release, "minor_findings", return_value=[finding]) as findings,
               patch.object(release, "api", side_effect=api),
               patch.object(release, "pages", return_value=[]),
@@ -692,16 +699,16 @@ class NativeTaskTests(unittest.TestCase):
             patch.object(release, "repair_changes", return_value=(["scripts/release.py"], True)),
             patch.object(release, "pages", side_effect=pages),
             patch.object(release, "policy_review", return_value=(False, "Exact-SHA review blocked")),
+            patch.object(release, "copy_patch_series", return_value=Path("/unused/proposal")),
             patch.object(release, "output") as output,
-            self.assertRaisesRegex(ValueError, "Exact-SHA review blocked"),
         ):
-            release.proposal(REPO, CONFIG, Path("/unused"))
+            result = release.proposal(REPO, CONFIG, Path("/unused"))
 
         final_output = output.call_args.kwargs
         self.assertFalse(final_output["ready"])
-        self.assertEqual(final_output["mode"], "policy")
-        self.assertEqual(final_output["pr"], state["number"])
-        self.assertEqual(final_output["sha"], state["head"])
+        self.assertTrue(result["policy"])
+        self.assertEqual(final_output["repair_pr"], state["number"])
+        self.assertEqual(final_output["repair_head"], state["head"])
 
     def test_p2_remains_nonblocking_but_gets_an_automatic_followup(self):
         bot = {"login": release.BOT, "type": "Bot"}

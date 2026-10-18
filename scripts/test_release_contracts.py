@@ -21,7 +21,7 @@ def metadata_fixture(directory):
     config_sha = "c" * 40
     patchset_sha256 = "d" * 64
     release_id = 1234
-    tag = f"build-{version}-{upstream_sha[:12]}-{patchset_sha256[:12]}"
+    tag = f"build-{version}-{upstream_sha[:12]}-{patchset_sha256[:12]}-{candidate_sha[:12]}"
     symbols_name = f"zed-{version}-titlebarless-debug-symbols-macos-aarch64.tar.gz"
     payloads = {
         "Zed.dmg": b"tiny fake DMG metadata fixture",
@@ -196,7 +196,7 @@ class ReleaseReservationTests(unittest.TestCase):
         self.patchset = "d" * 64
         self.version = "1.24.2"
         self.config = "c" * 40
-        self.tag = f"build-{self.version}-{self.upstream[:12]}-{self.patchset[:12]}"
+        self.tag = f"build-{self.version}-{self.upstream[:12]}-{self.patchset[:12]}-{self.sha[:12]}"
 
     def identity(self, config=None):
         return {
@@ -297,7 +297,7 @@ class BuildIdentityTests(unittest.TestCase):
             "UPSTREAM_SHA": "b" * 40,
             "PATCHSET_SHA256": "d" * 64,
             "APP_VERSION": "1.24.2",
-            "RELEASE_TAG": f"build-1.24.2-{'b' * 12}-{'d' * 12}",
+            "RELEASE_TAG": f"build-1.24.2-{'b' * 12}-{'d' * 12}-{'a' * 12}",
             "RELEASE_ID": "1234",
             "CONFIG_SHA": "c" * 40,
         } | changes
@@ -400,10 +400,17 @@ class ReleaseMetadataTests(unittest.TestCase):
 
 
 class PublishedReleaseTests(unittest.TestCase):
+    def setUp(self):
+        # Delta-review rejection has its own independent contract tests. These
+        # tests isolate immutable artifact publication from GitHub review I/O.
+        delta = patch.object(release, "check_delta_for_publication")
+        delta.start()
+        self.addCleanup(delta.stop)
+
     def published_record(self, identity, assets):
         tag = (
             f"build-{identity['version']}-{identity['upstream_sha'][:12]}-"
-            f"{identity['patchset_sha256'][:12]}"
+            f"{identity['patchset_sha256'][:12]}-{identity['candidate_sha'][:12]}"
         )
         return {
             "id": identity["release_id"],
@@ -643,7 +650,9 @@ class WorkflowContractTests(unittest.TestCase):
     def test_policy_is_checked_without_write_credentials_and_repair_is_bounded(self):
         policy_job = self.workflow.split("\n  policy-check:\n", 1)[1].split("\n  test:\n", 1)[0]
         repair_job = self.workflow.split("\n  repair:\n", 1)[1]
-        self.assertIn("python3 trusted/scripts/release.py check-policy", policy_job)
+        self.assertIn("python3 scripts/release.py check-policy", policy_job)
+        self.assertIn("needs.prepare.outputs.ready == 'true'", policy_job)
+        self.assertIn("needs.prepare.outputs.repair_pr == ''", policy_job)
         self.assertNotIn("GH_TOKEN:", policy_job)
         self.assertIn("contains(needs.*.result, 'failure')", repair_job)
         self.assertIn("REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}", self.workflow)
@@ -949,6 +958,11 @@ class RepairContextTests(unittest.TestCase):
 
 
 class DraftPublicationFailureTests(unittest.TestCase):
+    def setUp(self):
+        delta = patch.object(release, "check_delta_for_publication")
+        delta.start()
+        self.addCleanup(delta.stop)
+
     def test_unreviewed_draft_cannot_upload_assets(self):
         with tempfile.TemporaryDirectory() as temporary:
             identity, _, _, _, _, tag = metadata_fixture(Path(temporary))
@@ -1319,7 +1333,7 @@ class MacBundleInspectionTests(unittest.TestCase):
                 "version": "1.24.2",
                 "release_id": 1234,
             }
-            tag = f"build-1.24.2-{'b' * 12}-{'d' * 12}"
+            tag = f"build-1.24.2-{'b' * 12}-{'d' * 12}-{'a' * 12}"
             binary_uuid = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"
             remote_uuid = "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"
             bundle_environments = []
@@ -1508,6 +1522,7 @@ class RegressionManifestAdoptionTests(unittest.TestCase):
             patch.object(release, "repair_pull", return_value=state),
             patch.object(release, "repair_changes", return_value=(["patches/0013.patch"], False)),
             patch.object(release, "check_review", return_value=(True, "reviewed")),
+            patch.object(release, "check_delta_for_publication"),
             patch.object(release, "minor_findings", return_value=[]),
             patch.object(release, "api", side_effect=api),
             patch.object(release, "pages", return_value=[]),

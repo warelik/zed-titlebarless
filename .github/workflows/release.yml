@@ -51,6 +51,10 @@ jobs:
       repair_pr: ${{ steps.snapshot.outputs.repair_pr }}
       repair_head: ${{ steps.snapshot.outputs.repair_head }}
       followup: ${{ steps.snapshot.outputs.followup }}
+      delta_pr: ${{ steps.snapshot.outputs.delta_pr }}
+      delta_base: ${{ steps.snapshot.outputs.delta_base }}
+      delta_sha: ${{ steps.snapshot.outputs.delta_sha }}
+      final_failed: ${{ steps.snapshot.outputs.final_failed }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -61,8 +65,6 @@ jobs:
         run: |
           test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
           test "$DEFAULT_BRANCH" = downstream
-      - name: Test Release Policy
-        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
       - name: Prepare The Exact Source And Review
         id: snapshot
         env:
@@ -88,29 +90,23 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   policy-check:
-    name: Check Proposed Policy Without Write Credentials
+    name: Final Policy Tests Without Write Credentials
     needs: prepare
-    if: always() && needs.prepare.outputs.mode == 'policy'
+    if: needs.prepare.outputs.ready == 'true' && needs.prepare.outputs.repair_pr == ''
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-          path: trusted
           persist-credentials: false
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.repair_head }}
-          path: candidate
-          persist-credentials: false
-      - name: Enforce Trusted Tests And Validate Proposed YAML
-        run: python3 trusted/scripts/release.py check-policy "$GITHUB_WORKSPACE/candidate"
+      - name: Run The Preserved Policy Suite Once And Validate YAML
+        run: python3 scripts/release.py check-policy "$GITHUB_WORKSPACE"
 
   test:
     name: Test, Build And Inspect One macOS Application
-    needs: prepare
-    if: needs.prepare.outputs.ready == 'true' && needs.prepare.outputs.mode == 'application'
+    needs: [prepare, policy-check]
+    if: needs.prepare.outputs.ready == 'true' && needs.prepare.outputs.repair_pr == ''
     runs-on: macos-15
     timeout-minutes: 355
     env:
@@ -145,10 +141,8 @@ jobs:
       - name: Run Every Preserved Rust Regression
         run: python3 trusted/scripts/release.py test "$GITHUB_WORKSPACE/app"
       - name: Build And Inspect The Exact Reviewed Application
-        if: needs.prepare.outputs.repair_pr == ''
         run: python3 trusted/scripts/release.py build "$GITHUB_WORKSPACE/app"
       - uses: actions/upload-artifact@v4
-        if: needs.prepare.outputs.repair_pr == ''
         with:
           name: reviewed-${{ needs.prepare.outputs.sha }}
           path: release/*
@@ -184,17 +178,18 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare.outputs.release }}
           RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
           REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}
+          DELTA_PR: ${{ needs.prepare.outputs.delta_pr }}
+          DELTA_BASE: ${{ needs.prepare.outputs.delta_base }}
+          DELTA_SHA: ${{ needs.prepare.outputs.delta_sha }}
         run: python3 scripts/release.py publish "$GITHUB_WORKSPACE/release"
 
   land:
-    name: Adopt Only The Verified Repair And Restart Verification
-    needs: [prepare, policy-check, test]
+    name: Consolidate The Reviewed Repair Before Final Validation
+    needs: prepare
     if: >-
       always() && needs.prepare.result == 'success' &&
       needs.prepare.outputs.ready == 'true' &&
-      needs.prepare.outputs.repair_pr != '' &&
-      ((needs.prepare.outputs.mode == 'policy' && needs.policy-check.result == 'success') ||
-       (needs.prepare.outputs.mode == 'application' && needs.test.result == 'success'))
+      needs.prepare.outputs.repair_pr != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -214,6 +209,10 @@ jobs:
           REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}
           CANDIDATE_PR: ${{ needs.prepare.outputs.pr }}
           CANDIDATE_SHA: ${{ needs.prepare.outputs.sha }}
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream }}
+          DELTA_PR: ${{ needs.prepare.outputs.delta_pr }}
+          DELTA_BASE: ${{ needs.prepare.outputs.delta_base }}
+          DELTA_SHA: ${{ needs.prepare.outputs.delta_sha }}
           CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
         run: python3 scripts/release.py land "$RUNNER_TEMP/zed-land"
 
@@ -242,4 +241,5 @@ jobs:
           CANDIDATE_SHA: ${{ needs.prepare.outputs.sha }}
           REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}
           NONBLOCKING_FOLLOWUP: ${{ !contains(needs.*.result, 'failure') && needs.prepare.outputs.followup == 'true' }}
+          FINAL_VALIDATION_FAILED: ${{ needs.policy-check.result == 'failure' || needs.test.result == 'failure' || needs.publish.result == 'failure' || needs.prepare.outputs.final_failed == 'true' }}
         run: python3 scripts/release.py repair "$RUNNER_TEMP/zed-repair"

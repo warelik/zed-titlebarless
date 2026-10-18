@@ -34,6 +34,34 @@ release maintenance.
 
 ## Maintenance cycle
 
+### Review first; one final validation and build
+
+- Finish source selection, patch application, all review findings and ordinary
+  repairs before starting any tests, compilation, packaging or other expensive
+  validation. During preparation use source inspection and bounded mechanical
+  checks only; do not run speculative or intermediate test/build jobs.
+- For each candidate request two independent native Codex reviews: (1) the new
+  or modified downstream patches relative to the last shipped patch set and
+  (2) the complete assembled project, including the entire downstream diff and
+  its integration with upstream. Bind both requests and completions to the exact
+  candidate and their respective bases. Ask each reviewer for the complete list
+  of findings in one response. Wait for both reviews, consolidate every finding,
+  and repair the whole batch before requesting another pair. Carry unresolved
+  findings forward; an omitted finding is not evidence of a fix.
+- Freeze one complete candidate after both reviews and every known finding have
+  been resolved or explicitly disproved. Run the mandatory policy and application
+  tests once in the final validation sequence, then build and inspect that same
+  candidate once, then publish its verified artifacts. Never rebuild just because
+  a repair was adopted or a callback/schedule repeated. Reuse verified artifacts
+  only when their complete source identity matches.
+- A failed final check blocks publication and stops automatic expensive retries;
+  retain its diagnostics and the working release. Do not hide a failure, skip a
+  required check, or silently rebuild a changed candidate under an old approval.
+- Keep only one active candidate and one repair task for the selected upstream.
+  Reuse existing review/repair context and close superseded PRs after preserving
+  their exact commits and findings. Bound retained branches and artifacts; never
+  create an integration or review queue for intermediate commits.
+
 1. Use the existing GitHub Actions workflow to discover the supported upstream
    snapshot, pin its exact revision, and apply logical patches in filename order.
    Source selection, validation, builds, and publication belong in CI wherever
