@@ -1180,6 +1180,7 @@ class RustRegressionRunnerTests(unittest.TestCase):
         binary_outside=False,
         selector_case=False,
         instrumentation=True,
+        real_shpool_case=False,
         result_output="test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out",
         result_code=0,
     ):
@@ -1198,6 +1199,8 @@ class RustRegressionRunnerTests(unittest.TestCase):
                 "test_cases": [["auto_update", "test_historical"]],
                 "regression_cases": [["auto_update", "test_preserved"]],
             }
+            if real_shpool_case:
+                manifest["regression_cases"].append(["project", "test_isolated_shpool_daemon_probe_and_kill"])
             if selector_case:
                 selector = "test_tab_width_bounds" if selector_case is True else selector_case
                 manifest["test_cases"].append(["workspace", selector])
@@ -1211,6 +1214,7 @@ class RustRegressionRunnerTests(unittest.TestCase):
 +async fn added_without_prefix() {}
 """
             listing = listing or (
+                "tests::test_isolated_shpool_daemon_probe_and_kill: test\n"
                 "tests::test_historical: test\n"
                 "tests::test_preserved: test\n"
                 "tests::test_added: test\n"
@@ -1246,6 +1250,7 @@ class RustRegressionRunnerTests(unittest.TestCase):
                     packages = [] if missing_package else [
                         {"id": "auto-update-id", "name": "auto_update"},
                         {"id": "workspace-id", "name": "workspace"},
+                        {"id": "project-id", "name": "project"},
                     ]
                     return json.dumps({"packages": packages})
                 if args[:2] == ["cargo", "test"] and "--no-run" in args:
@@ -1255,7 +1260,8 @@ class RustRegressionRunnerTests(unittest.TestCase):
                         "profile": {"test": True, "debug_assertions": instrumentation},
                         "executable": str(binary),
                     }) + "\n" for package, package_id in (
-                        ("workspace", "workspace-id"), ("auto_update", "auto-update-id"))
+                        ("workspace", "workspace-id"), ("auto_update", "auto-update-id"),
+                        ("project", "project-id"))
                         if package in args)
                 if args[0] == str(binary) and args[1:3] == ["--list", "--format"]:
                     return listing
@@ -1278,6 +1284,17 @@ class RustRegressionRunnerTests(unittest.TestCase):
             ):
                 release.run_regressions(app, manifest, upstream, candidate)
             return commands, test_runs
+
+    def test_real_shpool_case_is_enabled_without_leaking_activation_to_other_cases(self):
+        commands, test_runs = self.exercise(real_shpool_case=True)
+        real = [(command, env) for command, env in test_runs
+                if command[2] == "tests::test_isolated_shpool_daemon_probe_and_kill"]
+        self.assertEqual(len(real), 1)
+        self.assertEqual(real[0][1]["ZED_TEST_REAL_SHPOOL"], "1")
+        self.assertTrue(all("ZED_TEST_REAL_SHPOOL" not in env for command, env in test_runs
+                            if command[2] != real[0][0][2]))
+        self.assertTrue(all("ZED_TEST_REAL_SHPOOL" not in env for command, env in commands
+                            if command[0] == "cargo"))
 
     def test_missing_selector_instrumentation_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "selector instrumentation"):

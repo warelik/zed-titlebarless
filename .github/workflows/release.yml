@@ -357,6 +357,17 @@ jobs:
           done
           sudo rm -rf ~/Library/Android /usr/local/share/dotnet ~/.dotnet ~/hostedtoolcache/CodeQL
           df -h /
+      - name: Install The Pinned Official Shpool Regression Fixture
+        run: |
+          fixture="$RUNNER_TEMP/zed-shpool-fixture"
+          mkdir -p "$fixture"
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 120 \
+            https://github.com/shell-pool/shpool/releases/download/v0.11.5/shpool-aarch64-apple-darwin.tar.gz \
+            --output "$fixture/archive.tar.gz"
+          printf '%s  %s\n' ca8fe3541f6c4d0ebde6941d88d27e0986286728e4a58cc0e23a627d25401dea "$fixture/archive.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$fixture/archive.tar.gz" -C "$fixture" shpool
+          chmod 700 "$fixture/shpool"
+          echo "$fixture" >> "$GITHUB_PATH"
       - name: Run Every Preserved Rust Regression
         run: python3 trusted/scripts/release.py test "$GITHUB_WORKSPACE/app"
       - name: Build And Inspect The Exact Reviewed Application

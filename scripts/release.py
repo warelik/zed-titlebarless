@@ -2038,9 +2038,12 @@ def run_regressions(app, manifest, upstream, candidate):
                 group_selected.update(matches)
         for binary, name in sorted(group_selected):
             print(f"Required Rust regression: {name}", flush=True)
+            test_env = env | ({"ZED_TEST_REAL_SHPOOL": "1"}
+                              if name.rsplit("::", 1)[-1] == "test_isolated_shpool_daemon_probe_and_kill"
+                              else {})
             try:
                 result = subprocess.run([str(binary), "--exact", name, "--nocapture"],
-                                        cwd=app, env=env, check=True, text=True,
+                                        cwd=app, env=test_env, check=True, text=True,
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             except subprocess.CalledProcessError as error:
                 print(error.stdout or "", end="", flush=True)
