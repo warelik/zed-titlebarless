@@ -623,7 +623,13 @@ impl Domain for TerminalThreadMetadataDb {
             main_worktree_paths_order TEXT,
             remote_connection TEXT
         ) STRICT;
-    )];
+    ), r#"
+        UPDATE sidebar_terminal_threads
+        SET remote_connection = CASE WHEN json_valid(remote_connection)
+            THEN json_remove(remote_connection, '$.Ssh.password')
+            ELSE remote_connection END
+        WHERE remote_connection IS NOT NULL;
+    "#];
 }
 
 db::static_connection!(TerminalThreadMetadataDb, []);
@@ -762,6 +768,8 @@ impl Column for TerminalThreadMetadata {
             .map(serde_json::from_str::<RemoteConnectionOptions>)
             .transpose()
             .context("deserialize terminal thread remote connection")?;
+        // Defense for legacy rows read outside the normal migration/open path.
+        let remote_connection = remote_connection_for_persistence(remote_connection);
 
         let worktree_paths = WorktreePaths::from_path_lists(main_worktree_paths, folder_paths)
             .unwrap_or_else(|_| WorktreePaths::default());
@@ -861,6 +869,63 @@ mod tests {
                 .expect("sanitized options should serialize")
                 .contains("plaintext-secret")
         );
+    }
+
+    #[gpui::test]
+    async fn test_legacy_terminal_password_migration_scrubs_rows_and_loaded_values(
+        _cx: &mut TestAppContext,
+    ) {
+        let db = TerminalThreadMetadataDb(
+            db::open_test_db::<TerminalThreadMetadataDb>("TERMINAL_LEGACY_PASSWORD_MIGRATION").await,
+        );
+        let paths = PathList::new(&[PathBuf::from("/z-project"), PathBuf::from("/a-project")]);
+        let mut legacy = metadata("Legacy terminal", WorktreePaths::from_folder_paths(&paths));
+        legacy.custom_title = Some("Custom title".into());
+        legacy.working_directory = Some(PathBuf::from("/z-project/subdir"));
+        legacy.remote_connection = Some(RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+            host: "example.com".into(), username: Some("alice".into()), port: Some(2222),
+            password: Some("synthetic-legacy-secret".into()), ..Default::default()
+        }));
+        db.save(legacy.clone()).await.unwrap();
+        let mut raw = serde_json::to_value(legacy.remote_connection.as_ref().unwrap()).unwrap();
+        raw["Ssh"]["password"] = serde_json::Value::String("synthetic-legacy-secret".into());
+        let raw = serde_json::to_string(&raw).unwrap();
+        db.write(move |conn| {
+            let mut statement = Statement::prepare(conn, "UPDATE sidebar_terminal_threads SET remote_connection = ?1")?;
+            statement.bind(&raw, 1)?;
+            statement.exec()
+        }).await.unwrap();
+        let mut expected = legacy;
+        expected.remote_connection = remote_connection_for_persistence(expected.remote_connection);
+        // Loading must never expose the historical password, even before scrub.
+        assert_eq!(db.list().unwrap(), vec![expected.clone()]);
+        let before = db.select::<String>("SELECT remote_connection FROM sidebar_terminal_threads").unwrap()().unwrap();
+        assert!(before[0].contains("synthetic-legacy-secret"));
+        for _ in 0..2 {
+            db.write(|conn| {
+                Statement::prepare(conn, <TerminalThreadMetadataDb as Domain>::MIGRATIONS[1])?.exec()
+            }).await.unwrap();
+        }
+        let after = db.select::<String>("SELECT remote_connection FROM sidebar_terminal_threads").unwrap()().unwrap();
+        assert!(!after[0].contains("synthetic-legacy-secret"));
+        let decoded: serde_json::Value = serde_json::from_str(&after[0]).unwrap();
+        assert!(decoded["Ssh"].get("password").is_none());
+        assert_eq!(db.list().unwrap(), vec![expected]);
+        // Malformed legacy payloads and unrelated connection variants must not
+        // abort the scrub or silently become a local connection.
+        for raw in [Some("not-json".to_string()), Some(r#"{"Mock":{"id":7}}"#.to_string()), None] {
+            let value = raw.clone();
+            db.write(move |conn| {
+                let mut statement = Statement::prepare(conn, "UPDATE sidebar_terminal_threads SET remote_connection = ?1")?;
+                statement.bind(&value, 1)?;
+                statement.exec()
+            }).await.unwrap();
+            db.write(|conn| {
+                Statement::prepare(conn, <TerminalThreadMetadataDb as Domain>::MIGRATIONS[1])?.exec()
+            }).await.unwrap();
+            let values = db.select::<Option<String>>("SELECT remote_connection FROM sidebar_terminal_threads").unwrap()().unwrap();
+            assert_eq!(values, vec![raw]);
+        }
     }
 
     #[test]
