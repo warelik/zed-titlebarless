@@ -2621,18 +2621,27 @@ impl AgentPanel {
         // Closing is the only way a terminal thread goes away, so its session
         // goes with it, also when the thread was not spawned in this run.
         if should_kill_persistent_session {
-            self.project
-                .update(cx, |project, cx| {
-                    project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
-                })
-                .detach_and_log_err(cx);
-        }
-        self.terminals.remove(&terminal_id);
-        if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+            let kill_session = self.project.update(cx, |project, cx| {
+                project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
+            });
+            cx.spawn(async move |_this, cx| -> Result<()> {
+                kill_session.await?;
+                cx.update(|cx| {
+                    if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+                        store.update(cx, |store, cx| {
+                            store.delete(terminal_id, cx);
+                        });
+                    }
+                });
+                Ok(())
+            })
+            .detach_and_log_err(cx);
+        } else if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
             store.update(cx, |store, cx| {
                 store.delete(terminal_id, cx);
             });
         }
+        self.terminals.remove(&terminal_id);
         if was_active {
             self.base_view = BaseView::Uninitialized;
             self.refresh_base_view_subscriptions(window, cx);
@@ -16257,6 +16266,67 @@ mod tests {
                     .entry(terminal_id)
                     .is_none(),
                 "closing unloaded terminal must delete from metadata store"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_failed_terminal_session_kill_retains_metadata(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            TerminalThreadMetadataStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        let fake = project.update(cx, |p, _| p.enable_fake_shpool(&[]));
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            cx.new(|cx| AgentPanel::new(workspace, window, cx))
+        });
+
+        let terminal_id = TerminalId::new();
+        let metadata = TerminalThreadMetadata {
+            terminal_id,
+            title: "Unloaded".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from(
+                "/project",
+            )])),
+            remote_connection: None,
+            working_directory: None,
+        };
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(metadata, cx);
+            });
+        });
+        fake.state.lock().kill_error = Some("no remote connection".into());
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.close_terminal(terminal_id, window, cx);
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            assert!(
+                TerminalThreadMetadataStore::global(cx)
+                    .read(cx)
+                    .entry(terminal_id)
+                    .is_some(),
+                "a failed session kill must retain metadata for a later retry"
             );
         });
     }

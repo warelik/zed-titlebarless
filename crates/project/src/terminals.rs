@@ -70,6 +70,7 @@ pub struct FakeShpoolState {
     pub attach_history: Vec<String>,
     pub attach_args_history: Vec<(String, Vec<String>)>,
     pub kill_history: Vec<String>,
+    pub kill_error: Option<String>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -637,6 +638,9 @@ impl Project {
         if let Some(fake) = &self.fake_shpool {
             let mut state = fake.state.lock();
             state.kill_history.push(session_name.clone());
+            if let Some(error) = &state.kill_error {
+                return Task::ready(Err(anyhow::anyhow!(error.clone())));
+            }
             state.sessions.remove(&session_name);
             return Task::ready(Ok(()));
         }
