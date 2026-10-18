@@ -19,7 +19,7 @@ Without any setting this build also:
    xattr -dr com.apple.quarantine /Applications/Zed.app
    ```
 
-Later versions arrive through Zed's auto-update from this repository's releases. The version number matches upstream, so SSH remoting keeps downloading the official remote server. A rebuild of the same upstream version is not offered as an update.
+Later releases arrive through Zed's auto-update from this repository. The version number matches upstream, so SSH remoting keeps downloading the official remote server. This build also accepts verified fixes for the same upstream version using GitHub's increasing release ID. Older installed builds need this version installed once, or their next ordinary higher-upstream-version update, before they can recognize same-version fixes.
 
 ## Debug symbols
 

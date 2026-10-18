@@ -14,7 +14,7 @@ import release
 
 
 class BatchedReviewTests(unittest.TestCase):
-    def prepare_candidate(self, full, delta, findings=()):
+    def prepare_candidate(self, full, delta, findings=(), *, published=False, changed_policy=False):
         config, upstream, candidate = "a" * 40, "b" * 40, "c" * 40
         outputs = {}
         order = []
@@ -34,7 +34,8 @@ class BatchedReviewTests(unittest.TestCase):
 
             def pages(path):
                 if "/releases" in path:
-                    return []
+                    return [{"draft": False, "tag_name": release.release_tag(
+                        "1.24.2", upstream, "d" * 64, candidate)}] if published else []
                 if "/pulls?" in path:
                     return [{"number": 1, "state": "open", "head": {"sha": candidate}}]
                 return [{"body": (f"<!-- zed-codex:{candidate} -->\n"
@@ -54,8 +55,12 @@ class BatchedReviewTests(unittest.TestCase):
                 "check_review": full, "delta_review": (2, "e" * 40, config, *delta),
                 "minor_findings": list(findings), "review_records": list(findings),
                 "retire_superseded_reviews": None, "pending_review": None,
+                "verify_published_release": None,
             }.items():
                 stack.enter_context(patch.object(release, name, return_value=value))
+            if changed_policy:
+                stack.enter_context(patch.object(release, "policy_snapshot",
+                                                side_effect=[{"release.py": "new"}, {"release.py": "checked"}]))
             stack.enter_context(patch.object(release, "run", side_effect=run))
             stack.enter_context(patch.object(release, "pages", side_effect=pages))
             stack.enter_context(patch.object(release, "output", side_effect=lambda **v: outputs.update(v)))
@@ -101,6 +106,14 @@ class BatchedReviewTests(unittest.TestCase):
         self.assertTrue(outputs["ready"])
         self.assertEqual((final, reserve), (1, 1))
         self.assertEqual(self.last_order, ["reserve", "final"])
+
+    def test_new_policy_is_validated_even_when_the_application_is_already_published(self):
+        outputs, final, reserve, failure = self.prepare_candidate(
+            (True, "complete"), (True, "complete"), published=True, changed_policy=True)
+        self.assertIsNone(failure)
+        self.assertTrue(outputs["ready"])
+        self.assertTrue(outputs["already_published"])
+        self.assertEqual((final, reserve), (1, 0), "validate policy without reserving another app build")
 
     def test_existing_final_receipt_blocks_a_callback_from_rebuilding(self):
         sha, config = "c" * 40, "a" * 40
@@ -179,6 +192,51 @@ class BatchedReviewTests(unittest.TestCase):
               redirect_stdout(output), self.assertRaises(subprocess.CalledProcessError)):
             release.capture(["cargo", "test"], cwd=Path("/unused"), env={})
         self.assertIn("actual compiler error", output.getvalue())
+
+    def test_bounded_logs_cannot_hide_either_complete_review_report(self):
+        with patch.dict(os.environ, {"GITHUB_REPOSITORY": "maintainer/zed-fork",
+                                    "CANDIDATE_PR": "49", "CANDIDATE_SHA": "c" * 40,
+                                    "DELTA_PR": "50", "DELTA_SHA": "d" * 40}, clear=True):
+            prompt = release.repair_text({"config": "a" * 40, "upstream": "b" * 40,
+                                          "head": "e" * 40}, 1, "x" * 50000)
+        self.assertIn("/pull/49", prompt)
+        self.assertIn("/pull/50", prompt)
+        self.assertIn("Fetch ALL pages", prompt)
+        self.assertTrue(prompt.endswith("<!-- zed-fix:" + "e" * 40 + ":1 -->"))
+
+    def test_policy_snapshot_ignores_docs_but_detects_executable_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            left, right = Path(directory) / "left", Path(directory) / "right"
+            for root in (left, right):
+                (root / "scripts").mkdir(parents=True)
+                (root / "scripts/release.py").write_text("checked code\n")
+                (root / "README.md").write_text(str(root))
+            self.assertEqual(release.policy_snapshot(left), release.policy_snapshot(right))
+            (right / "scripts/release.py").write_text("proposed code\n")
+            self.assertNotEqual(release.policy_snapshot(left), release.policy_snapshot(right))
+
+    def test_credentialed_preparation_imports_the_pinned_controller_only(self):
+        workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
+        preparation = workflow.split("\n  prepare:\n", 1)[1].split("\n  policy-check:\n", 1)[0]
+        self.assertIn("steps.control.outputs.policy_ref", preparation)
+        self.assertIn("pathlib.Path('trusted/scripts')", preparation)
+        self.assertIn("release.ROOT = pathlib.Path('configuration')", preparation)
+        self.assertNotIn("python3 scripts/release.py prepare", preparation)
+        bootstrap = workflow.split("\n  bootstrap-policy:\n", 1)[1].split("\n  prepare:\n", 1)[0]
+        self.assertNotIn("secrets.", bootstrap)
+        self.assertIn("Require Both Complete Exact-Source Reviews Before Any Tests", bootstrap)
+
+    def test_current_adoption_receipt_advances_the_authenticated_history_cutoff(self):
+        commit = "a" * 40
+        record = {"body": f"Reviewed repair consolidated as `{commit}`; source-context files were not merged. "
+                           + release.ADOPTION_NOTE,
+                  "created_at": "2026-10-18T01:00:00Z",
+                  "user": {"login": "github-actions[bot]", "type": "Bot"}}
+        with (patch.object(release, "pages", return_value=[record]),
+              patch.object(release, "api", return_value={"status": "identical",
+                                                         "merge_base_commit": {"sha": commit}})):
+            cutoff = release.adoption_time("maintainer/zed-fork", {"state": "closed", "number": 1}, commit)
+        self.assertEqual(cutoff, datetime(2026, 10, 18, 1, tzinfo=timezone.utc))
 
 
 if __name__ == "__main__":

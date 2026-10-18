@@ -656,8 +656,10 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("python3 trusted/scripts/release.py check-policy", policy_job)
         self.assertIn("needs.prepare.outputs.ready == 'true'", policy_job)
         land_job = self.workflow.split("\n  land:\n", 1)[1].split("\n  repair:\n", 1)[0]
-        self.assertIn("needs: [prepare, policy-check]", land_job)
-        self.assertIn("needs.policy-check.result == 'success'", land_job)
+        self.assertIn("needs: [prepare, activate-policy]", land_job)
+        activation = self.workflow.split("\n  activate-policy:\n", 1)[1].split("\n  repair:\n", 1)[0]
+        self.assertIn("needs.policy-check.result == 'success'", activation)
+        self.assertIn("needs.activate-policy.result == 'success'", land_job)
         self.assertNotIn("GH_TOKEN:", policy_job)
         self.assertIn("contains(needs.*.result, 'failure')", repair_job)
         self.assertIn("REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}", self.workflow)
@@ -1155,14 +1157,16 @@ class RustRegressionRunnerTests(unittest.TestCase):
             patch.dict(os.environ, {key: "true"}),
         ):
             self.assertNotIn(key, release.isolated_environment(Path(temporary)))
-        commands, test_runs = self.exercise(selector_case=True)
-        cargo_envs = [env for command, env in commands if command[:2] == ["cargo", "test"]]
-        self.assertNotIn(key, cargo_envs[0])
-        self.assertEqual(cargo_envs[1][key], "true")
-        self.assertNotIn(key, next(env for command, env in test_runs
-                                   if command[2] == "tests::test_historical"))
-        self.assertIn(key, next(env for command, env in test_runs
-                                if command[2] == "tests::test_tab_width_bounds"))
+        for selector in ("test_tab_width_bounds",
+                         "test_title_bar_to_status_bar_keeps_title_when_status_bar_hidden"):
+            commands, test_runs = self.exercise(selector_case=selector)
+            cargo_envs = [env for command, env in commands if command[:2] == ["cargo", "test"]]
+            self.assertNotIn(key, cargo_envs[0])
+            self.assertEqual(cargo_envs[1][key], "true")
+            self.assertNotIn(key, next(env for command, env in test_runs
+                                       if command[2] == "tests::test_historical"))
+            self.assertIn(key, next(env for command, env in test_runs
+                                    if command[2] == "tests::" + selector))
 
     def exercise(
         self,
@@ -1190,7 +1194,8 @@ class RustRegressionRunnerTests(unittest.TestCase):
                 "regression_cases": [["auto_update", "test_preserved"]],
             }
             if selector_case:
-                manifest["test_cases"].append(["workspace", "test_tab_width_bounds"])
+                selector = "test_tab_width_bounds" if selector_case is True else selector_case
+                manifest["test_cases"].append(["workspace", selector])
             diff = """diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs
 --- a/crates/auto_update/src/auto_update.rs
 +++ b/crates/auto_update/src/auto_update.rs
@@ -1206,6 +1211,7 @@ class RustRegressionRunnerTests(unittest.TestCase):
                 "tests::test_added: test\n"
                 "tests::added_without_prefix: test\n"
                 "tests::test_tab_width_bounds: test\n"
+                "tests::test_title_bar_to_status_bar_keeps_title_when_status_bar_hidden: test\n"
             )
             injected = {
                 "CARGO_HOME": "/toolchain-cache/cargo",

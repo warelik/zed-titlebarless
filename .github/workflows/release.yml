@@ -4,6 +4,20 @@ on:
   schedule:
     - cron: "23 */6 * * *"
   workflow_dispatch:
+    inputs:
+      policy_bootstrap:
+        description: Validate an exact reviewed policy before initializing or repairing its trusted pin
+        type: boolean
+        default: false
+      policy_ref:
+        description: Exact reviewed policy commit (defaults to this workflow revision)
+        required: false
+      full_pr:
+        description: Completed complete-project review PR for bootstrap
+        required: false
+      delta_pr:
+        description: Completed configuration-delta review PR for bootstrap
+        required: false
   push:
     branches: [downstream]
     paths: ["patches/**", "scripts/**", ".github/workflows/release.yml"]
@@ -20,10 +34,105 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  bootstrap-policy:
+    name: Final Read-Only Policy Bootstrap
+    if: github.event_name == 'workflow_dispatch' && inputs.policy_bootstrap
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      policy_ref: ${{ steps.review.outputs.policy_ref }}
+      validation_started: ${{ steps.tests.outputs.started }}
+      delta_base: ${{ steps.review.outputs.delta_base }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.policy_ref || github.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ vars.ZED_TRUSTED_POLICY || 'dbf40ff4bd626082e0ad3d9873c5b6ad5fa7f941' }}
+          path: gate
+          persist-credentials: false
+      - name: Require Both Complete Exact-Source Reviews Before Any Tests
+        id: review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FULL_PR: ${{ inputs.full_pr }}
+          DELTA_PR: ${{ inputs.delta_pr }}
+        run: |
+          python3 -B - <<'PY'
+          import ast, os, pathlib, re, subprocess, sys
+          sys.path.insert(0, str(pathlib.Path('gate/scripts').resolve()))
+          import release as gate
+          repo = os.environ['GITHUB_REPOSITORY']
+          policy = subprocess.check_output(['git', '-C', 'candidate', 'rev-parse', 'HEAD'], text=True).strip()
+          for kind, key in [('full', 'FULL_PR'), ('delta', 'DELTA_PR')]:
+              number = os.environ[key]
+              if not re.fullmatch(r'[1-9][0-9]*', number):
+                  raise SystemExit('Both exact review PRs are required for policy bootstrap')
+              pull = gate.api(f'repos/{repo}/pulls/{number}')
+              sha, base = pull['head']['sha'], pull['base']['sha']
+              if kind == 'delta' and sha != policy:
+                  raise SystemExit('Delta review does not identify this exact policy')
+              if kind == 'delta':
+                  delta_base = base
+              ready, reason = gate.check_review(repo, int(number), sha, base)
+              comments = gate.pages(f'repos/{repo}/issues/{number}/comments')
+              marker = f'<!-- zed-full:{sha}:{policy} -->' if kind == 'full' else f'<!-- zed-codex:{sha} -->'
+              requests = [c for c in comments if c.get('user', {}).get('login') == repo.split('/')[0]
+                          and c.get('user', {}).get('type') == 'User' and marker in c.get('body', '')]
+              if not requests:
+                  raise SystemExit('Missing fresh owner-authored bootstrap review request')
+              ready, reason = gate.review_gate(sha, max(c['created_at'] for c in requests),
+                  gate.pages(f'repos/{repo}/pulls/{number}/reviews'),
+                  gate.pages(f'repos/{repo}/pulls/{number}/comments'), comments,
+                  lambda prefix: gate.api(f'repos/{repo}/commits/{prefix}')['sha']) if ready else (ready, reason)
+              if not ready or gate.minor_findings(repo, int(number), sha):
+                  raise SystemExit('Bootstrap waits for the entire review batch: ' + reason)
+          def identities(text):
+              return {(c.name, f.name) for c in ast.parse(text).body if isinstance(c, ast.ClassDef)
+                      for f in c.body if isinstance(f, ast.FunctionDef) and f.name.startswith('test_')}
+          for old in pathlib.Path('gate/scripts').glob('test_*.py'):
+              proposed = pathlib.Path('candidate/scripts') / old.name
+              if not proposed.is_file() or identities(old.read_text()) - identities(proposed.read_text()):
+                  raise SystemExit('Bootstrap must retain every trusted test identity')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('policy_ref=' + policy + '\n')
+              out.write('delta_base=' + delta_base + '\n')
+          PY
+      - name: Run The Final Approved Policy Suite Once Without Credentials
+        id: tests
+        run: |
+          echo "started=true" >> "$GITHUB_OUTPUT"
+          state=$(mktemp -d)
+          lint=$(mktemp -d)
+          trap 'rm -rf "$state" "$lint"' EXIT
+          mkdir "$state/home" "$state/tmp" "$state/config" "$state/data" "$state/cache" "$state/state"
+          docker run --rm --read-only --network=none --cap-drop=ALL \
+            --security-opt=no-new-privileges --pids-limit=256 --cpus=2 --memory=2g \
+            --user "$(id -u):$(id -g)" --workdir /state \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/candidate,target=/candidate,readonly" \
+            --mount "type=bind,source=$state,target=/state" \
+            --env HOME=/state/home --env TMPDIR=/state/tmp --env XDG_CONFIG_HOME=/state/config \
+            --env XDG_DATA_HOME=/state/data --env XDG_STATE_HOME=/state/state \
+            --env XDG_CACHE_HOME=/state/cache --env DATA_DIR=/state/data \
+            --env CI=true --env PYTHONDONTWRITEBYTECODE=1 \
+            docker.io/library/python@sha256:5560e9ab8709f459489e5b8aa696eda8a07ef821e14bb122be62d91234bfa98b \
+            python3 -B -m unittest discover -s /candidate/scripts -p 'test_*.py' -v
+          curl -fsSL https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz -o "$lint/archive.tar.gz"
+          printf '%s  %s\n' 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 "$lint/archive.tar.gz" | sha256sum -c -
+          tar -xzf "$lint/archive.tar.gz" -C "$lint" actionlint
+          "$lint/actionlint" -shellcheck= -pyflakes= "$GITHUB_WORKSPACE/candidate/.github/workflows/release.yml"
+
   prepare:
     name: Select One Snapshot And Request Review
+    needs: bootstrap-policy
     if: >-
-      (github.event_name != 'issue_comment' &&
+      always() &&
+      (needs.bootstrap-policy.result == 'success' ||
+       (needs.bootstrap-policy.result == 'skipped' &&
+      ((github.event_name != 'issue_comment' &&
        github.event_name != 'pull_request_target') ||
       (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
        github.event.comment.user.login == 'chatgpt-codex-connector[bot]' &&
@@ -31,7 +140,7 @@ jobs:
       (github.event_name == 'pull_request_target' &&
        github.event.pull_request.base.ref == 'downstream' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
-       startsWith(github.event.pull_request.head.ref, 'repair/'))
+       startsWith(github.event.pull_request.head.ref, 'repair/')))))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -57,10 +166,35 @@ jobs:
       final_failed: ${{ steps.snapshot.outputs.final_failed }}
       candidate_config: ${{ steps.snapshot.outputs.candidate_config }}
       already_published: ${{ steps.snapshot.outputs.already_published }}
+      policy_verified: ${{ steps.snapshot.outputs.policy_verified }}
+      trusted_policy: ${{ steps.control.outputs.policy_ref }}
     steps:
+      - name: Require An Exact Previously Checked Policy Revision
+        id: control
+        env:
+          TRUSTED_POLICY: ${{ needs.bootstrap-policy.outputs.policy_ref || vars.ZED_TRUSTED_POLICY }}
+        run: |
+          [[ "$TRUSTED_POLICY" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::The trusted policy pin is missing; use the reviewed read-only bootstrap."
+            exit 1
+          }
+          echo "policy_ref=$TRUSTED_POLICY" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
+          ref: ${{ steps.control.outputs.policy_ref }}
+          path: trusted
           persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: configuration
+          persist-credentials: false
+      - name: Record A Successful Read-Only Bootstrap
+        if: needs.bootstrap-policy.result == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+          POLICY_REF: ${{ needs.bootstrap-policy.outputs.policy_ref }}
+        run: gh variable set ZED_TRUSTED_POLICY --repo "$GITHUB_REPOSITORY" --body "$POLICY_REF"
       - name: Require The Trusted Default Branch
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -72,7 +206,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
-        run: python3 scripts/release.py prepare "$RUNNER_TEMP/zed-source"
+          ZED_TRUSTED_POLICY_SHA: ${{ steps.control.outputs.policy_ref }}
+          DELTA_PR: ${{ needs.bootstrap-policy.result == 'success' && inputs.delta_pr || '' }}
+          DELTA_SHA: ${{ needs.bootstrap-policy.outputs.policy_ref }}
+          DELTA_BASE: ${{ needs.bootstrap-policy.outputs.delta_base }}
+        run: |
+          python3 -B - <<'PY'
+          import os, pathlib, sys
+          sys.path.insert(0, str(pathlib.Path('trusted/scripts').resolve()))
+          import release
+          release.ROOT = pathlib.Path('configuration').resolve()
+          release.prepare(pathlib.Path(os.environ['RUNNER_TEMP']) / 'zed-source')
+          PY
       - name: Report The Actual State
         if: always()
         env:
@@ -93,14 +238,18 @@ jobs:
 
   policy-check:
     name: Final Policy Tests Without Write Credentials
-    needs: prepare
-    if: needs.prepare.outputs.ready == 'true'
+    needs: [prepare, bootstrap-policy]
+    if: >-
+      needs.prepare.outputs.ready == 'true' &&
+      needs.prepare.outputs.policy_verified != 'true' &&
+      !(needs.bootstrap-policy.result == 'success' &&
+        needs.prepare.outputs.candidate_config == needs.bootstrap-policy.outputs.policy_ref)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.prepare.outputs.trusted_policy }}
           path: trusted
           persist-credentials: false
       - uses: actions/checkout@v4
@@ -113,12 +262,12 @@ jobs:
 
   test:
     name: Test, Build And Inspect One macOS Application
-    needs: [prepare, policy-check, land]
+    needs: [prepare, activate-policy, land]
     if: >-
       always() && needs.prepare.result == 'success' &&
       needs.prepare.outputs.ready == 'true' &&
       needs.prepare.outputs.already_published != 'true' &&
-      needs.policy-check.result == 'success' &&
+      needs.activate-policy.result == 'success' &&
       (needs.prepare.outputs.repair_pr == '' || needs.land.result == 'success')
     runs-on: macos-15
     timeout-minutes: 355
@@ -139,7 +288,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.land.outputs.config || github.sha }}
+          ref: ${{ needs.activate-policy.outputs.policy_ref }}
           path: trusted
           persist-credentials: false
       - name: Free Space On The Disposable macOS Runner
@@ -164,7 +313,7 @@ jobs:
 
   publish:
     name: Recheck Review And Publish Without Restarting Editors
-    needs: [prepare, test, land]
+    needs: [prepare, test, land, activate-policy]
     if: always() && needs.prepare.result == 'success' && needs.test.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -174,7 +323,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.land.outputs.config || github.sha }}
+          ref: ${{ needs.activate-policy.outputs.policy_ref }}
           persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
@@ -200,12 +349,12 @@ jobs:
 
   land:
     name: Consolidate The Reviewed Repair Before Final Validation
-    needs: [prepare, policy-check]
+    needs: [prepare, activate-policy]
     if: >-
       always() && needs.prepare.result == 'success' &&
       needs.prepare.outputs.ready == 'true' &&
       needs.prepare.outputs.repair_pr != '' &&
-      needs.policy-check.result == 'success'
+      needs.activate-policy.result == 'success'
     outputs:
       config: ${{ steps.adopt.outputs.config }}
     runs-on: ubuntu-24.04
@@ -218,7 +367,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.activate-policy.outputs.policy_ref }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
           ref: ${{ github.sha }}
+          path: configuration
           persist-credentials: false
       - name: Adopt The Checked Files And Continue The Same Final Run
         id: adopt
@@ -239,12 +394,73 @@ jobs:
           RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
           ALREADY_PUBLISHED: ${{ needs.prepare.outputs.already_published }}
           CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
-        run: python3 scripts/release.py land "$RUNNER_TEMP/zed-land"
+        run: |
+          python3 -B - <<'PY'
+          import os, pathlib, sys
+          sys.path.insert(0, str(pathlib.Path('trusted/scripts').resolve()))
+          import release
+          release.ROOT = pathlib.Path('configuration').resolve()
+          release.land_repair(pathlib.Path(os.environ['RUNNER_TEMP']) / 'zed-land')
+          PY
+
+  activate-policy:
+    name: Activate Only The Exact Checked Policy
+    needs: [prepare, policy-check, bootstrap-policy]
+    if: >-
+      always() && needs.prepare.result == 'success' && needs.prepare.outputs.ready == 'true' &&
+      (needs.policy-check.result == 'success' || needs.prepare.outputs.policy_verified == 'true' ||
+       (needs.bootstrap-policy.result == 'success' &&
+        needs.prepare.outputs.candidate_config == needs.bootstrap-policy.outputs.policy_ref))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      policy_ref: ${{ steps.pin.outputs.policy_ref }}
+    steps:
+      - name: Pin The Checked Controller For Subsequent Runs
+        id: pin
+        env:
+          GH_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+          POLICY_REF: ${{ needs.prepare.outputs.candidate_config }}
+        run: |
+          [[ "$POLICY_REF" =~ ^[0-9a-f]{40}$ ]]
+          gh variable set ZED_TRUSTED_POLICY --repo "$GITHUB_REPOSITORY" --body "$POLICY_REF"
+          echo "policy_ref=$POLICY_REF" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        if: needs.prepare.outputs.already_published == 'true' && needs.prepare.outputs.repair_pr == ''
+        with:
+          ref: ${{ needs.prepare.outputs.candidate_config }}
+          path: checked
+          persist-credentials: false
+      - name: Finish Policy-Only Maintenance Without Rebuilding The Published Application
+        if: needs.prepare.outputs.already_published == 'true' && needs.prepare.outputs.repair_pr == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ needs.prepare.outputs.sha }}
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream }}
+          PATCHSET_SHA256: ${{ needs.prepare.outputs.patchset }}
+          DELTA_PR: ${{ needs.prepare.outputs.delta_pr }}
+          DELTA_BASE: ${{ needs.prepare.outputs.delta_base }}
+          DELTA_SHA: ${{ needs.prepare.outputs.delta_sha }}
+        run: |
+          python3 -B - <<'PY'
+          import os, pathlib, sys
+          sys.path.insert(0, str(pathlib.Path('checked/scripts').resolve()))
+          import release
+          upstream, patchset = os.environ['UPSTREAM_SHA'], os.environ['PATCHSET_SHA256']
+          release.close_published_reviews(os.environ['GITHUB_REPOSITORY'],
+              os.environ['CANDIDATE_SHA'], upstream, f'review/{upstream}-{patchset}')
+          PY
 
   repair:
     name: Request Native Codex Repair Or Escalate Explicitly
-    needs: [prepare, policy-check, test, publish, land]
-    if: always() && (contains(needs.*.result, 'failure') || needs.prepare.outputs.followup == 'true')
+    needs: [prepare, policy-check, test, publish, land, bootstrap-policy, activate-policy]
+    if: >-
+      always() && (contains(needs.*.result, 'failure') || needs.prepare.outputs.followup == 'true') &&
+      !(needs.bootstrap-policy.result == 'failure' &&
+        needs.bootstrap-policy.outputs.validation_started != 'true')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -255,7 +471,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.prepare.outputs.trusted_policy || (needs.bootstrap-policy.result == 'success' && needs.bootstrap-policy.outputs.policy_ref) || vars.ZED_TRUSTED_POLICY || 'dbf40ff4bd626082e0ad3d9873c5b6ad5fa7f941' }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
           ref: ${{ needs.land.outputs.config || github.sha }}
+          path: configuration
           persist-credentials: false
       - name: Repair The Actual Failure Without Publishing Or Disrupting Editors
         env:
@@ -266,6 +488,16 @@ jobs:
           CANDIDATE_SHA: ${{ needs.prepare.outputs.sha }}
           REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}
           NONBLOCKING_FOLLOWUP: ${{ !contains(needs.*.result, 'failure') && needs.prepare.outputs.followup == 'true' }}
-          FINAL_VALIDATION_FAILED: ${{ needs.policy-check.result == 'failure' || needs.test.result == 'failure' || needs.publish.result == 'failure' || needs.prepare.outputs.final_failed == 'true' }}
+          FINAL_VALIDATION_FAILED: ${{ needs.bootstrap-policy.result == 'failure' || needs.policy-check.result == 'failure' || needs.test.result == 'failure' || needs.publish.result == 'failure' || needs.prepare.outputs.final_failed == 'true' }}
           CONFIG_SHA: ${{ needs.land.outputs.config || github.sha }}
-        run: python3 scripts/release.py repair "$RUNNER_TEMP/zed-repair"
+          DELTA_PR: ${{ needs.prepare.outputs.delta_pr }}
+          DELTA_SHA: ${{ needs.prepare.outputs.delta_sha }}
+        run: |
+          python3 -B - <<'PY'
+          import os, pathlib, sys
+          sys.path.insert(0, str(pathlib.Path('trusted/scripts').resolve()))
+          import release
+          release.ROOT = pathlib.Path('configuration').resolve()
+          release.request_repair(pathlib.Path(os.environ['RUNNER_TEMP']) / 'zed-repair',
+                                 config=os.environ['CONFIG_SHA'])
+          PY

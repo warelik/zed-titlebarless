@@ -59,9 +59,19 @@ release maintenance.
   adoption preserves every reviewed product-file blob and the regression
   contract, then continue Rust tests, build and publication in the same run.
   Do not dispatch a second validation cycle after a mechanical adoption.
+- Credentialed orchestration imports only the exact checked controller pinned in
+  the native repository variable `ZED_TRUSTED_POLICY`; candidate files are input
+  data until their final sandbox checks pass. Advance that pin only after those
+  checks. A missing or broken pin uses the existing read-only policy bootstrap:
+  both exact-source reviews first, then one isolated policy validation, then
+  activation and the remaining final sequence. Agents supply the bootstrap
+  inputs and perform initialization without returning routine setup to a human.
 - A failed final check blocks publication and stops automatic expensive retries;
   retain its diagnostics and the working release. Do not hide a failure, skip a
   required check, or silently rebuild a changed candidate under an old approval.
+- Preserve the release-profile regressions and put selector-dependent UI
+  regressions in the debug-assertion subgroup. Do not compile away their selector
+  instrumentation or accept a test whose selector never matched a real element.
 - Keep only one active candidate and one repair task for the selected upstream.
   Reuse existing review/repair context and close superseded PRs after preserving
   their exact commits and findings. Bound retained branches and artifacts; never
