@@ -480,47 +480,58 @@ where
 pub struct ItemCloseGuard {
     items: Vec<(Box<dyn ItemHandle>, bool)>,
     changed: Rc<Cell<bool>>,
+    edits: Vec<Rc<Cell<bool>>>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl ItemCloseGuard {
     pub fn new(items: Vec<Box<dyn ItemHandle>>, window: &mut Window, cx: &mut App) -> Self {
         let changed = Rc::new(Cell::new(false));
+        let edits: Vec<_> = items.iter().map(|_| Rc::new(Cell::new(false))).collect();
         let subscriptions = items
             .iter()
-            .map(|item| {
+            .zip(&edits)
+            .map(|(item, edited)| {
                 let changed = changed.clone();
+                let edited = edited.clone();
                 item.subscribe_to_item_events(
                     window,
                     cx,
                     Box::new(move |event, _, _| {
                         if event == ItemEvent::Edit {
+                            edited.set(true);
                             changed.set(true);
                         }
                     }),
                 )
             })
             .collect();
-        let items = items
-            .into_iter()
-            .map(|item| {
-                let dirty = item.is_dirty(cx);
-                (item, dirty)
-            })
-            .collect();
-        Self {
-            items,
-            changed,
-            _subscriptions: subscriptions,
+        let items = items.into_iter().map(|item| {
+            let dirty = item.is_dirty(cx);
+            (item, dirty)
+        }).collect();
+        Self { items, changed, edits, _subscriptions: subscriptions }
+    }
+
+    // Observe before consent starts. Saved edits are safe; an unchanged dirty
+    // item can be an explicitly accepted discard. Unsaved edits made while
+    // another prompt was pending must never become the accepted baseline.
+    pub fn accept_consent(&mut self, cx: &App) -> bool {
+        if self.items.iter().zip(&self.edits).any(|((item, was_dirty), edited)| {
+            item.is_dirty(cx) && (!*was_dirty || edited.get())
+        }) {
+            return false;
         }
+        for ((item, was_dirty), edited) in self.items.iter_mut().zip(&self.edits) {
+            *was_dirty = item.is_dirty(cx);
+            edited.set(false);
+        }
+        self.changed.set(false);
+        true
     }
 
     pub fn changed(&self, cx: &App) -> bool {
-        self.changed.get()
-            || self
-                .items
-                .iter()
-                .any(|(item, was_dirty)| item.is_dirty(cx) != *was_dirty)
+        self.changed.get() || self.items.iter().any(|(item, was_dirty)| item.is_dirty(cx) != *was_dirty)
     }
 }
 
