@@ -1282,6 +1282,7 @@ class RustRegressionRunnerTests(unittest.TestCase):
                 patch.dict(os.environ, injected, clear=False),
                 patch.object(release, "capture", side_effect=capture),
                 patch.object(release.subprocess, "run", side_effect=run),
+                patch.object(release, "run_rust_case", side_effect=run),
             ):
                 release.run_regressions(app, manifest, upstream, candidate)
             return commands, test_runs
