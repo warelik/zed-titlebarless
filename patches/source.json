@@ -497,6 +497,14 @@
     ],
     [
       "sidebar",
+      "test_close_local_saved_terminal_from_remote_workspace_without_opening_workspace"
+    ],
+    [
+      "sidebar",
+      "test_close_remote_saved_terminal_connects_without_opening_workspace"
+    ],
+    [
+      "sidebar",
       "test_close_terminal_entry_without_matching_project_retains_metadata"
     ],
     [
