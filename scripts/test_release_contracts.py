@@ -432,6 +432,7 @@ class PublishedReleaseTests(unittest.TestCase):
                         "GITHUB_REPOSITORY": identity["repository"],
                         "GITHUB_SHA": identity["config_sha"],
                         "CANDIDATE_PR": "7",
+                        "DELTA_PR": "8",
                         "RELEASE_TAG": record["tag_name"],
                         "REPAIR_HEAD": "e" * 40,
                     },
@@ -533,6 +534,7 @@ class PublishedReleaseTests(unittest.TestCase):
                         "GITHUB_SHA": identity["config_sha"],
                         "RELEASE_TAG": tag,
                         "CANDIDATE_PR": "7",
+                        "DELTA_PR": "8",
                         "REPAIR_HEAD": "f" * 40,
                     },
                     clear=True,
@@ -590,6 +592,7 @@ class PublishedReleaseTests(unittest.TestCase):
                         "GITHUB_SHA": identity["config_sha"],
                         "RELEASE_TAG": tag,
                         "CANDIDATE_PR": "7",
+                        "DELTA_PR": "8",
                     },
                     clear=True,
                 ),
@@ -650,9 +653,11 @@ class WorkflowContractTests(unittest.TestCase):
     def test_policy_is_checked_without_write_credentials_and_repair_is_bounded(self):
         policy_job = self.workflow.split("\n  policy-check:\n", 1)[1].split("\n  test:\n", 1)[0]
         repair_job = self.workflow.split("\n  repair:\n", 1)[1]
-        self.assertIn("python3 scripts/release.py check-policy", policy_job)
+        self.assertIn("python3 trusted/scripts/release.py check-policy", policy_job)
         self.assertIn("needs.prepare.outputs.ready == 'true'", policy_job)
-        self.assertIn("needs.prepare.outputs.repair_pr == ''", policy_job)
+        land_job = self.workflow.split("\n  land:\n", 1)[1].split("\n  repair:\n", 1)[0]
+        self.assertIn("needs: [prepare, policy-check]", land_job)
+        self.assertIn("needs.policy-check.result == 'success'", land_job)
         self.assertNotIn("GH_TOKEN:", policy_job)
         self.assertIn("contains(needs.*.result, 'failure')", repair_job)
         self.assertIn("REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}", self.workflow)
@@ -984,6 +989,7 @@ class DraftPublicationFailureTests(unittest.TestCase):
                         "GITHUB_SHA": identity["config_sha"],
                         "RELEASE_TAG": tag,
                         "CANDIDATE_PR": "7",
+                        "DELTA_PR": "8",
                     },
                     clear=True,
                 ),
@@ -1018,6 +1024,7 @@ class DraftPublicationFailureTests(unittest.TestCase):
                         "GITHUB_SHA": identity["config_sha"],
                         "RELEASE_TAG": tag,
                         "CANDIDATE_PR": "7",
+                        "DELTA_PR": "8",
                     },
                     clear=True,
                 ),
@@ -1082,6 +1089,7 @@ class DraftPublicationFailureTests(unittest.TestCase):
                         "GITHUB_SHA": identity["config_sha"],
                         "RELEASE_TAG": tag,
                         "CANDIDATE_PR": "7",
+                        "DELTA_PR": "8",
                         "REPAIR_HEAD": "e" * 40,
                     },
                     clear=True,
@@ -1523,6 +1531,7 @@ class RegressionManifestAdoptionTests(unittest.TestCase):
             patch.object(release, "repair_changes", return_value=(["patches/0013.patch"], False)),
             patch.object(release, "check_review", return_value=(True, "reviewed")),
             patch.object(release, "check_delta_for_publication"),
+            patch.object(release, "complete_adoption"),
             patch.object(release, "minor_findings", return_value=[]),
             patch.object(release, "api", side_effect=api),
             patch.object(release, "pages", return_value=[]),

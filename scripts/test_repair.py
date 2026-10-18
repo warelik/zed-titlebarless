@@ -33,83 +33,34 @@ def request(head=SEED, attempt=1, age=0):
 
 class RepairBoundaryTests(unittest.TestCase):
     def test_deferred_proposal_preserves_recovery_and_bounded_repair_paths(self):
-        candidate, patchset = "7" * 40, "8" * 64
-        tag = f"build-1.24.2-{UPSTREAM[:12]}-{patchset[:12]}-{candidate[:12]}"
-
-        for nonblocking, broken, expected_followup in (
-            (False, False, False), (True, False, True), (False, True, False),
-        ):
-            with self.subTest(nonblocking=nonblocking, broken=broken):
-                state = {**STATE, "nonblocking": nonblocking}
-                old = request(HEAD, age=release.MAX_REPAIR_SECONDS + 60)
-                outputs, writes = {}, []
-
-                def api(path, *, method="GET", data=None, token=None):
-                    if method != "GET":
-                        writes.append((path, method, data))
-                        return {}
-                    if path == f"repos/{REPO}/commits/downstream": return {"sha": CONFIG}
-                    if path == f"repos/{release.UPSTREAM}/commits/v1.24.2": return {"sha": UPSTREAM}
-                    if path == f"repos/{REPO}/pulls/2": return {"state": "open", "head": {"sha": HEAD}}
-                    raise AssertionError(path)
-
-                def pages(path):
-                    if path == f"repos/{REPO}/releases":
-                        return [{"tag_name": tag, "draft": False}]
-                    if path.startswith(f"repos/{REPO}/pulls?"):
-                        return [{"number": 7, "head": {"sha": candidate}}]
-                    raise AssertionError(path)
-
-                def run(*args, cwd=None, env=None):
-                    if args[:2] == ("git", "init"):
-                        manifest = Path(args[2]) / "crates/zed/Cargo.toml"
-                        manifest.parent.mkdir(parents=True)
-                        manifest.write_text('[package]\nversion = "1.24.2"\n')
-                    if args[:2] == ("git", "am") and broken:
-                        raise subprocess.CalledProcessError(1, args)
-                    if args == ("git", "rev-parse", "HEAD"): return candidate
-                    if args[:2] == ("git", "show"): return '[package]\nversion = "1.24.2"\n'
-                    if args[:2] == ("git", "diff"): return "crates/auto_update/src/auto_update.rs"
-                    return ""
-
-                with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
-                    stack.enter_context(patch.dict(os.environ, {
-                        "GITHUB_REPOSITORY": REPO, "GITHUB_SHA": CONFIG, "GITHUB_RUN_ID": "42",
-                    }, clear=True))
-                    for name, replacement in (("api", api), ("pages", pages), ("run", run),
-                                               ("output", lambda **values: outputs.update(values))):
-                        stack.enter_context(patch.object(release, name, side_effect=replacement))
-                    stack.enter_context(patch.object(release, "repair_pull", return_value=state))
-                    stack.enter_context(patch.object(release, "repair_comments", return_value=[old]))
-                    stack.enter_context(patch.object(release, "repair_requests", return_value=[old]))
-                    stack.enter_context(patch.object(release, "mirror_main"))
-                    stack.enter_context(patch.object(release, "select_upstream", return_value=("v1.24.2", UPSTREAM)))
-                    stack.enter_context(patch.object(release, "patch_identity", return_value=([Path("fixture.patch")], patchset)))
-                    stack.enter_context(patch.object(release, "ensure_forward_release"))
-                    stack.enter_context(patch.object(release, "verify_published_release"))
-                    stack.enter_context(patch.object(release, "check_review", return_value=(True, "reviewed")))
-                    stack.enter_context(patch.object(release, "minor_findings", return_value=[]))
-                    stack.enter_context(patch.object(release, "close_published_reviews"))
-                    stack.enter_context(patch.object(release, "cleanup_closed_pull_refs"))
-                    stack.enter_context(patch.object(release, "owner_token", return_value="fake"))
-                    escalation = stack.enter_context(patch.object(
-                        release, "escalation", side_effect=ValueError("expected escalation")))
-                    try:
-                        release.prepare(Path(directory) / "app")
-                    except subprocess.CalledProcessError:
-                        self.assertTrue(broken)
-                    closed = any(method == "PATCH" and data == {"state": "closed"}
-                                 for _, method, data in writes)
-                    if broken or outputs.get("followup"):
-                        with self.assertRaisesRegex(ValueError, "expected escalation"):
-                            release.request_repair(Path(directory) / "repair", evidence="failure")
-                        escalation.assert_called_once()
-                    else:
-                        self.assertTrue(closed)
-                        escalation.assert_not_called()
-                    self.assertEqual(bool(outputs.get("followup")), expected_followup)
-                    self.assertFalse(any("/comments" in path and "@codex" in str(data)
-                                         for path, _, data in writes))
+        # An unresolved repair must not fall back to building the original tree.
+        # Expiration remains observable even if the native task never responds.
+        for nonblocking in (False, True):
+            for expired in (False, True):
+                with self.subTest(nonblocking=nonblocking, expired=expired):
+                    state = {**STATE, "nonblocking": nonblocking}
+                    old = request(HEAD, age=release.MAX_REPAIR_SECONDS + 1 if expired else 0)
+                    outputs = {}
+                    with (tempfile.TemporaryDirectory() as directory,
+                          patch.dict(os.environ, ENV, clear=True),
+                          patch.object(release, "api", return_value={"sha": CONFIG}),
+                          patch.object(release, "mirror_main"),
+                          patch.object(release, "repair_pull", return_value=state),
+                          patch.object(release, "repair_comments", return_value=[old]),
+                          patch.object(release, "output", side_effect=lambda **v: outputs.update(v)),
+                          patch.object(release, "run") as run,
+                          patch.object(release, "final_attempt") as final,
+                          patch.object(release, "request_repair") as repair):
+                        if expired:
+                            with self.assertRaisesRegex(ValueError, "exceeded"):
+                                release.prepare(Path(directory) / "app")
+                        else:
+                            release.prepare(Path(directory) / "app")
+                            self.assertIn("Codex", outputs["reason"])
+                        self.assertFalse(outputs["ready"])
+                        run.assert_not_called()
+                        final.assert_not_called()
+                        repair.assert_not_called()
 
     def test_only_patch_changes_or_policy_changes_are_eligible(self):
         for changed, policy in (
@@ -197,7 +148,7 @@ class RepairBoundaryTests(unittest.TestCase):
     def test_policy_minor_findings_request_followup_without_blocking_acceptance(self):
         review = {"body": f"<!-- zed-policy:{HEAD} -->", "created_at": request()["created_at"]}
         with (patch.object(release, "repair_pull", return_value=STATE),
-              patch.object(release, "repair_comments", return_value=[review]),
+              patch.object(release, "repair_comments", return_value=[request(), review]),
               patch.object(release, "repair_changes", return_value=(["scripts/release.py"], True)),
               patch.object(release, "policy_review", return_value=(True, "Accepted")),
               patch.object(release, "minor_findings", return_value=[{"body": "P2 fix"}]),
@@ -272,6 +223,7 @@ class RepairBoundaryTests(unittest.TestCase):
               patch.object(release, "policy_review", return_value=(True, "Accepted")),
               patch.object(release, "check_review", return_value=(True, "Accepted")),
               patch.object(release, "check_delta_for_publication"),
+              patch.object(release, "complete_adoption"),
               patch.object(release, "minor_findings", return_value=[finding]),
               patch.object(release, "api", side_effect=api),
               patch.object(release, "pages", return_value=[]),
@@ -280,11 +232,10 @@ class RepairBoundaryTests(unittest.TestCase):
               patch.object(release.subprocess, "run", return_value=SimpleNamespace(stdout="", returncode=1)),
               patch.object(release, "request_repair") as followup,
               patch.object(release, "cleanup_closed_pull_refs")):
-            release.land_repair(Path(directory))
-        self.assertEqual(followup.call_args.kwargs["config"], adopted)
-        self.assertEqual(followup.call_args.kwargs["upstream"], UPSTREAM)
-        self.assertTrue(followup.call_args.kwargs["nonblocking"])
-        self.assertIn("P2 policy followup", followup.call_args.kwargs["evidence"])
+            with self.assertRaisesRegex(ValueError, "Outstanding review batch") as error:
+                release.land_repair(Path(directory))
+        followup.assert_not_called()
+        self.assertIn("P2 policy followup", str(error.exception))
 
     def test_application_minor_followup_keeps_application_review_identity(self):
         adopted, application = "e" * 40, "f" * 40
@@ -309,6 +260,7 @@ class RepairBoundaryTests(unittest.TestCase):
               patch.object(release, "repair_changes", return_value=(["patches/0009-fix.patch"], False)),
               patch.object(release, "check_review", return_value=(True, "Accepted")),
               patch.object(release, "check_delta_for_publication"),
+              patch.object(release, "complete_adoption"),
               patch.object(release, "minor_findings", return_value=[finding]) as findings,
               patch.object(release, "api", side_effect=api),
               patch.object(release, "pages", return_value=[]),
@@ -320,16 +272,12 @@ class RepairBoundaryTests(unittest.TestCase):
               patch.object(release.subprocess, "run", return_value=SimpleNamespace(stdout="", returncode=1)),
               patch.object(release, "request_repair") as followup,
               patch.object(release, "cleanup_closed_pull_refs")):
-            release.land_repair(Path(directory))
+            with self.assertRaisesRegex(ValueError, "Outstanding review batch") as error:
+                release.land_repair(Path(directory))
         findings.assert_called_once_with(REPO, 7, application)
-        self.assertEqual(followup.call_args.kwargs["config"], adopted)
-        self.assertEqual(followup.call_args.kwargs["upstream"], UPSTREAM)
-        self.assertTrue(followup.call_args.kwargs["nonblocking"])
-        evidence = followup.call_args.kwargs["evidence"]
-        self.assertIn("application findings", evidence)
-        self.assertIn(f"pull/7", evidence)
-        self.assertIn(application, evidence)
-        self.assertIn("crates/app.rs:17\nP2 application followup", evidence)
+        followup.assert_not_called()
+        self.assertIn(application, str(error.exception))
+        self.assertIn("crates/app.rs:17\nP2 application followup", str(error.exception))
 
 
 class TemporaryRefCleanupTests(unittest.TestCase):
@@ -685,8 +633,8 @@ class NativeTaskTests(unittest.TestCase):
         state = {**STATE, "head": HEAD, "seed": SEED}
         policy_request = {
             "user": {"login": REPO.split("/")[0], "type": "User"},
-            "created_at": STATE["created_at"],
-            "body": f"@codex review\n\n<!-- zed-policy:{HEAD} -->",
+            "created_at": request()["created_at"],
+            "body": f"@codex implement\n\n<!-- zed-fix:{SEED}:1 -->",
         }
 
         def pages(path):

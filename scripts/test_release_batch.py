@@ -1,8 +1,12 @@
 from contextlib import ExitStack
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
+import json
+import io
 import os
 from pathlib import Path
 import tempfile
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +17,7 @@ class BatchedReviewTests(unittest.TestCase):
     def prepare_candidate(self, full, delta, findings=()):
         config, upstream, candidate = "a" * 40, "b" * 40, "c" * 40
         outputs = {}
+        order = []
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
             app = Path(temporary) / "app"
 
@@ -32,7 +37,8 @@ class BatchedReviewTests(unittest.TestCase):
                     return []
                 if "/pulls?" in path:
                     return [{"number": 1, "state": "open", "head": {"sha": candidate}}]
-                return [{"body": f"<!-- zed-codex:{candidate} -->",
+                return [{"body": (f"<!-- zed-codex:{candidate} -->\n"
+                                   f"<!-- zed-full:{candidate}:{config} -->"),
                          "user": {"login": "maintainer"},
                          "created_at": datetime.now(timezone.utc).isoformat()}]
 
@@ -55,13 +61,16 @@ class BatchedReviewTests(unittest.TestCase):
             stack.enter_context(patch.object(release, "output", side_effect=lambda **v: outputs.update(v)))
             stack.enter_context(patch.object(release, "api", side_effect=lambda path, **kw:
                                 {"sha": config if path.endswith("/downstream") else upstream}))
-            final = stack.enter_context(patch.object(release, "final_attempt"))
-            reserve = stack.enter_context(patch.object(release, "reserve_release", return_value=10))
+            final = stack.enter_context(patch.object(release, "final_attempt",
+                                       side_effect=lambda *a, **kw: order.append("final")))
+            reserve = stack.enter_context(patch.object(release, "reserve_release",
+                                         side_effect=lambda *a: order.append("reserve") or 10))
             failure = None
             try:
                 release.prepare(app)
             except ValueError as error:
                 failure = str(error)
+            self.last_order = order
             return outputs, final.call_count, reserve.call_count, failure
 
     def test_one_blocking_report_waits_for_the_other_complete_list(self):
@@ -91,10 +100,11 @@ class BatchedReviewTests(unittest.TestCase):
         self.assertIsNone(failure)
         self.assertTrue(outputs["ready"])
         self.assertEqual((final, reserve), (1, 1))
+        self.assertEqual(self.last_order, ["reserve", "final"])
 
     def test_existing_final_receipt_blocks_a_callback_from_rebuilding(self):
         sha, config = "c" * 40, "a" * 40
-        receipt = {"body": f"<!-- zed-final:{sha}:{config} -->",
+        receipt = {"body": f"<!-- zed-final:{sha} -->",
                    "user": {"login": "github-actions[bot]"}}
         with (patch.object(release, "pages", return_value=[receipt]),
               patch.object(release, "api") as api,
@@ -103,6 +113,30 @@ class BatchedReviewTests(unittest.TestCase):
             release.final_attempt("maintainer/zed-fork", 1, sha, config)
         api.assert_not_called()
         self.assertTrue(output.call_args.kwargs["final_failed"])
+
+    def test_fresh_full_request_cannot_reuse_an_older_same_source_completion(self):
+        sha, upstream = "c" * 40, "b" * 40
+        owner = {"login": "maintainer", "type": "User"}
+        marker = f"<!-- zed-codex:{sha} -->"
+        comments = [
+            {"body": marker, "user": owner, "created_at": "2026-10-18T01:00:00Z"},
+            {"body": marker, "user": owner, "created_at": "2026-10-18T03:00:00Z"},
+            {"body": "<!-- codex-review-state:v1 " + json.dumps({"code_review": {
+                "commit_sha": sha, "status": "completed", "has_any_findings": False,
+                "has_unresolved_findings": False}}) + " -->",
+             "user": {"login": release.BOT, "type": "Bot"},
+             "performed_via_github_app": {"slug": release.APP},
+             "updated_at": "2026-10-18T02:00:00Z"},
+        ]
+        pull = {"state": "open", "head": {"sha": sha, "repo": {"full_name": "maintainer/zed-fork"}},
+                "base": {"ref": f"review-base/{upstream}", "sha": upstream,
+                         "repo": {"full_name": "maintainer/zed-fork"}}}
+        with (patch.object(release, "api", return_value=pull),
+              patch.object(release, "pages", side_effect=lambda path:
+                           comments if "/issues/1/comments" in path else [])):
+            ready, reason = release.check_review("maintainer/zed-fork", 1, sha, upstream)
+        self.assertFalse(ready)
+        self.assertEqual(reason, release.WAITING_REVIEW)
 
     def test_publication_requires_the_exact_configuration_delta_review(self):
         with (patch.dict(os.environ, {"DELTA_SHA": "a" * 40}, clear=True),
@@ -122,6 +156,29 @@ class BatchedReviewTests(unittest.TestCase):
             release.request_repair(Path("/unused"), evidence="actual final check failure")
         token.assert_not_called()
         self.assertIn("actual final check failure", escalate.call_args.args[3])
+
+    def test_final_macos_tests_share_the_shipped_build_target(self):
+        with (tempfile.TemporaryDirectory() as directory,
+              patch.object(release.sys, "platform", "darwin")):
+            environment = release.isolated_environment(Path(directory))
+        self.assertEqual(environment["CARGO_BUILD_TARGET"], "aarch64-apple-darwin")
+
+    def test_adoption_cannot_change_reviewed_executable_files(self):
+        reviewed, adopted = "a" * 40, "b" * 40
+        def tree(path):
+            return {"truncated": False, "tree": [{"path": "scripts/release.py", "type": "blob",
+                    "mode": "100644", "sha": "c" * 40 if reviewed in path else "d" * 40}]}
+        with (patch.object(release, "api", side_effect=tree),
+              self.assertRaisesRegex(ValueError, "product files differ")):
+            release.verify_adopted_configuration("maintainer/zed-fork", reviewed, adopted)
+
+    def test_failed_final_compilation_keeps_its_captured_diagnostics(self):
+        failure = subprocess.CalledProcessError(1, ["cargo", "test"], output="actual compiler error\n")
+        output = io.StringIO()
+        with (patch.object(release.subprocess, "check_output", side_effect=failure),
+              redirect_stdout(output), self.assertRaises(subprocess.CalledProcessError)):
+            release.capture(["cargo", "test"], cwd=Path("/unused"), env={})
+        self.assertIn("actual compiler error", output.getvalue())
 
 
 if __name__ == "__main__":

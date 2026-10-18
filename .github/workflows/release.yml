@@ -55,6 +55,8 @@ jobs:
       delta_base: ${{ steps.snapshot.outputs.delta_base }}
       delta_sha: ${{ steps.snapshot.outputs.delta_sha }}
       final_failed: ${{ steps.snapshot.outputs.final_failed }}
+      candidate_config: ${{ steps.snapshot.outputs.candidate_config }}
+      already_published: ${{ steps.snapshot.outputs.already_published }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -92,21 +94,32 @@ jobs:
   policy-check:
     name: Final Policy Tests Without Write Credentials
     needs: prepare
-    if: needs.prepare.outputs.ready == 'true' && needs.prepare.outputs.repair_pr == ''
+    if: needs.prepare.outputs.ready == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.candidate_config }}
+          path: candidate
           persist-credentials: false
       - name: Run The Preserved Policy Suite Once And Validate YAML
-        run: python3 scripts/release.py check-policy "$GITHUB_WORKSPACE"
+        run: python3 trusted/scripts/release.py check-policy "$GITHUB_WORKSPACE/candidate"
 
   test:
     name: Test, Build And Inspect One macOS Application
-    needs: [prepare, policy-check]
-    if: needs.prepare.outputs.ready == 'true' && needs.prepare.outputs.repair_pr == ''
+    needs: [prepare, policy-check, land]
+    if: >-
+      always() && needs.prepare.result == 'success' &&
+      needs.prepare.outputs.ready == 'true' &&
+      needs.prepare.outputs.already_published != 'true' &&
+      needs.policy-check.result == 'success' &&
+      (needs.prepare.outputs.repair_pr == '' || needs.land.result == 'success')
     runs-on: macos-15
     timeout-minutes: 355
     env:
@@ -116,7 +129,7 @@ jobs:
       APP_VERSION: ${{ needs.prepare.outputs.version }}
       RELEASE_TAG: ${{ needs.prepare.outputs.release }}
       RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
-      CONFIG_SHA: ${{ github.sha }}
+      CONFIG_SHA: ${{ needs.land.outputs.config || github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -126,7 +139,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.land.outputs.config || github.sha }}
           path: trusted
           persist-credentials: false
       - name: Free Space On The Disposable macOS Runner
@@ -151,8 +164,8 @@ jobs:
 
   publish:
     name: Recheck Review And Publish Without Restarting Editors
-    needs: [prepare, test]
-    if: needs.prepare.outputs.repair_pr == ''
+    needs: [prepare, test, land]
+    if: always() && needs.prepare.result == 'success' && needs.test.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -161,7 +174,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.land.outputs.config || github.sha }}
           persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
@@ -178,6 +191,8 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare.outputs.release }}
           RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
           REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}
+          CONFIG_SHA: ${{ needs.land.outputs.config || github.sha }}
+          REVIEW_CONFIG_SHA: ${{ needs.prepare.outputs.candidate_config }}
           DELTA_PR: ${{ needs.prepare.outputs.delta_pr }}
           DELTA_BASE: ${{ needs.prepare.outputs.delta_base }}
           DELTA_SHA: ${{ needs.prepare.outputs.delta_sha }}
@@ -185,11 +200,14 @@ jobs:
 
   land:
     name: Consolidate The Reviewed Repair Before Final Validation
-    needs: prepare
+    needs: [prepare, policy-check]
     if: >-
       always() && needs.prepare.result == 'success' &&
       needs.prepare.outputs.ready == 'true' &&
-      needs.prepare.outputs.repair_pr != ''
+      needs.prepare.outputs.repair_pr != '' &&
+      needs.policy-check.result == 'success'
+    outputs:
+      config: ${{ steps.adopt.outputs.config }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -202,7 +220,8 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Recheck Review, Adopt The Diff, And Dispatch A Fresh Cycle
+      - name: Adopt The Checked Files And Continue The Same Final Run
+        id: adopt
         env:
           GH_TOKEN: ${{ github.token }}
           REPAIR_PR: ${{ needs.prepare.outputs.repair_pr }}
@@ -213,6 +232,12 @@ jobs:
           DELTA_PR: ${{ needs.prepare.outputs.delta_pr }}
           DELTA_BASE: ${{ needs.prepare.outputs.delta_base }}
           DELTA_SHA: ${{ needs.prepare.outputs.delta_sha }}
+          REVIEW_CONFIG_SHA: ${{ needs.prepare.outputs.candidate_config }}
+          PATCHSET_SHA256: ${{ needs.prepare.outputs.patchset }}
+          APP_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          ALREADY_PUBLISHED: ${{ needs.prepare.outputs.already_published }}
           CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
         run: python3 scripts/release.py land "$RUNNER_TEMP/zed-land"
 
@@ -230,7 +255,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.land.outputs.config || github.sha }}
           persist-credentials: false
       - name: Repair The Actual Failure Without Publishing Or Disrupting Editors
         env:
@@ -242,4 +267,5 @@ jobs:
           REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}
           NONBLOCKING_FOLLOWUP: ${{ !contains(needs.*.result, 'failure') && needs.prepare.outputs.followup == 'true' }}
           FINAL_VALIDATION_FAILED: ${{ needs.policy-check.result == 'failure' || needs.test.result == 'failure' || needs.publish.result == 'failure' || needs.prepare.outputs.final_failed == 'true' }}
+          CONFIG_SHA: ${{ needs.land.outputs.config || github.sha }}
         run: python3 scripts/release.py repair "$RUNNER_TEMP/zed-repair"

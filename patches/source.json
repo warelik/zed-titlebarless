@@ -361,6 +361,10 @@
     ],
     [
       "agent_ui",
+      "test_intentional_close_blocks_restore_and_tombstones_stale_snapshots"
+    ],
+    [
+      "agent_ui",
       "test_ssh_routing_arguments_scope_terminal_project_assignment"
     ],
     [
@@ -445,7 +449,23 @@
     ],
     [
       "sidebar",
+      "test_sidebar_close_waits_for_pending_terminal_startup"
+    ],
+    [
+      "sidebar",
+      "test_successful_delayed_terminal_kill_deletes_metadata_after_sidebar_is_dropped"
+    ],
+    [
+      "sidebar",
       "test_terminal_remote_connection_match_distinguishes_ssh_arguments"
+    ],
+    [
+      "workspace",
+      "test_item_close_guard_preserves_discard_and_saved_formatting"
+    ],
+    [
+      "workspace",
+      "test_item_close_guard_rejects_item_dirtied_after_consent"
     ],
     [
       "workspace",
@@ -458,6 +478,10 @@
     [
       "workspace",
       "test_title_bar_to_status_bar_keeps_title_when_status_bar_hidden"
+    ],
+    [
+      "workspace",
+      "test_workspace_close_keeps_edits_made_during_another_consent_prompt"
     ]
   ]
 }

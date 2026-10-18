@@ -1,4 +1,5 @@
 import argparse
+import base64
 from datetime import datetime, timezone
 import hashlib
 import io
@@ -42,7 +43,7 @@ TEST_FUNCTION = re.compile(
 CRATE_FILE = re.compile(r"^\+\+\+ b/crates/([A-Za-z0-9_-]+)/.+\.rs$")
 
 def run(*args, cwd=None, env=None):
-    return subprocess.check_output(args, cwd=cwd, env=env, text=True).strip()
+    return capture(args, cwd=cwd, env=env).strip()
 
 def api(path, *, method="GET", data=None, token=None):
     command = ["gh", "api", "--method", method, path]
@@ -163,7 +164,7 @@ def check_review(repo, pr, sha, upstream, *, allow_closed=False):
                 and marker in (c.get("body") or "")]
     if not requests:
         return False, "No owner-authored exact-SHA Codex request"
-    requested_at = min(c["created_at"] for c in requests)
+    requested_at = max(c["created_at"] for c in requests)
     reviews = pages(f"repos/{repo}/pulls/{pr}/reviews")
     inline = pages(f"repos/{repo}/pulls/{pr}/comments")
     cache = {}
@@ -262,9 +263,10 @@ def delta_review(repo, config, application, *, allow_closed=False):
     ready, reason = check_review(repo, pr, review_sha, base, allow_closed=allow_closed)
     return pr, base, review_sha, ready, reason
 
-def final_attempt(repo, pr, sha, config):
+def final_attempt(repo, pr, sha, config, *, policy_only=False):
     """One final validation/build sequence; callbacks cannot spend it again."""
-    marker = f"<!-- zed-final:{sha}:{config} -->"
+    identity = f"policy-{config}" if policy_only else sha
+    marker = f"<!-- zed-final:{identity} -->"
     comments = pages(f"repos/{repo}/issues/{pr}/comments")
     for item in comments:
         user = item.get("user") or {}
@@ -279,10 +281,41 @@ def final_attempt(repo, pr, sha, config):
                  "Both reviews and the full repair batch are complete. A failure blocks "
                  "publication and automatic expensive retries.\n\n" + marker)})
 
+def verify_adopted_configuration(repo, reviewed, adopted):
+    """Only context removal and additive regression discovery may change at adoption."""
+    def tree(commit):
+        record = api(f"repos/{repo}/git/trees/{commit}?recursive=1")
+        if record.get("truncated") or not isinstance(record.get("tree"), list):
+            raise ValueError("Incomplete configuration tree")
+        return {item["path"]: (item["mode"], item["sha"])
+                for item in record["tree"] if item["type"] != "tree"
+                and not item["path"].startswith(".repair/")
+                and item["path"] != "patches/source.json"}
+    if not all(SHA.fullmatch(value) for value in (reviewed, adopted)) or tree(reviewed) != tree(adopted):
+        raise ValueError("Adopted product files differ from the exact reviewed configuration")
+    manifests = []
+    for commit in (reviewed, adopted):
+        record = api(f"repos/{repo}/contents/patches/source.json?ref={commit}")
+        if (record.get("type") != "file" or record.get("encoding") != "base64"
+                or type(record.get("size")) is not int or not 0 < record["size"] < 1024 * 1024):
+            raise ValueError("Invalid regression manifest at adoption")
+        raw = base64.b64decode("".join(record["content"].split()), validate=True)
+        if len(raw) != record["size"]:
+            raise ValueError("Regression manifest size changed")
+        manifests.append(json.loads(raw))
+    before, after = manifests
+    if ({key: value for key, value in before.items() if key != "regression_cases"}
+            != {key: value for key, value in after.items() if key != "regression_cases"}
+            or not manifest_cases(before) <= manifest_cases(after)):
+        raise ValueError("Adoption changed or removed the trusted regression contract")
+
 def check_delta_for_publication(repo, config, *, allow_closed=False):
+    reviewed = os.environ.get("REVIEW_CONFIG_SHA", config)
+    if reviewed != config:
+        verify_adopted_configuration(repo, reviewed, config)
     commit = os.environ.get("DELTA_SHA", "")
-    if commit != config and not (
-            commit == os.environ.get("CANDIDATE_SHA") and shipped_configuration(repo) == config):
+    if commit != reviewed and not (
+            commit == os.environ.get("CANDIDATE_SHA") and shipped_configuration(repo) == reviewed):
         raise ValueError("Delta review does not identify the exact configuration")
     base, number = os.environ.get("DELTA_BASE", ""), os.environ.get("DELTA_PR", "")
     if not SHA.fullmatch(base) or not number.isdigit():
@@ -588,6 +621,9 @@ def proposal(repo, config, directory):
            repair_head=state["head"], upstream=state["upstream"])
     comments = repair_comments(repo, state["number"])
     requests = [c for c in comments if FIX_REQUEST.search(c.get("body") or "")]
+    if not requests:
+        raise ValueError("Machine repair has no authenticated coding request")
+    pending_repair(min(comment["created_at"] for comment in requests))
     active = [c for c in requests
               if FIX_REQUEST.search(c["body"]).group(1) == state["head"]]
     if active or state["head"] == state["seed"]:
@@ -719,7 +755,13 @@ def check_policy(candidate):
         "suite=unittest.defaultTestLoader.discover(sys.argv[2],pattern='test_*.py');"
         "sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())"
     )
-    for tests in dict.fromkeys((ROOT / "scripts", candidate / "scripts")):
+    suites = list(dict.fromkeys((ROOT / "scripts", candidate / "scripts")))
+    if len(suites) == 2 and all(path.is_dir() for path in suites):
+        snapshots = [{path.name: path.read_bytes() for path in suite.glob("*.py")}
+                     for suite in suites]
+        if snapshots[0] and snapshots[0] == snapshots[1]:
+            suites = suites[:1]
+    for tests in suites:
         with tempfile.TemporaryDirectory(prefix="zed-policy-tests-") as temporary:
             root = Path(temporary)
             env = {name: os.environ[name] for name in ("PATH", "LANG", "LC_ALL", "TZ") if name in os.environ}
@@ -786,14 +828,20 @@ def request_text(sha, upstream, config):
         "Removal requires its regression to pass without that fix while retaining "
         "useful coverage; clean patch application or similar code is not proof.\n"
         "Read the entire downstream diff and its integration with upstream, including "
-        "unchanged affected callers. Also inspect the release policy at the pinned "
-        "configuration. Return the COMPLETE actionable list in one response, all "
-        "severities together; do not stop at the first finding. Do not compile, run "
+        "unchanged affected callers. The paired configuration-delta review covers "
+        "release policy at its own exact commit. Return the COMPLETE actionable list in one response, all "
+        "severities together. Account for known findings in open maintenance issues "
+        "against the actual callers and regression sources; omission from another "
+        "review is not proof of resolution. Inspect App versus Window async contexts, "
+        "pending terminal startup/close/restore ordering, retained test identities "
+        "and multi-item consent/edit races. Report every remaining finding together; "
+        "do not stop at the first finding. Do not compile, run "
         "tests, build or install dependencies: those run once after both reviews "
         "and the complete repair batch. Report findings in the normal Codex review format and identify the "
         "reviewed commit. Do not modify code, push commits, merge, publish or "
         "change a running editor or remote session.\n\n"
-        f"<!-- zed-codex:{sha} -->"
+        f"<!-- zed-codex:{sha} -->\n"
+        f"<!-- zed-full:{sha}:{config.rsplit('@', 1)[-1]} -->"
     )
 
 def repair_text(state, attempt, failure, prepared=None):
@@ -981,9 +1029,6 @@ def prepare(app):
         return
     mirror_main(repo)
     state = proposal(repo, config, app.parent)
-    deferred = state if state and state.get("deferred") else None
-    if deferred:
-        state = None
     if state and state["waiting"]:
         return
     upstream = state["upstream"] if state else select_upstream()[1]
@@ -995,7 +1040,7 @@ def prepare(app):
     output(ready=False, mode=mode, upstream=upstream, patchset=patchset,
            source_depth=len(patches) + 1,
            repair_pr=state["number"] if state else "",
-           repair_head=state["head"] if state else deferred["head"] if deferred else "")
+           repair_head=state["head"] if state else "")
     if app.exists():
         raise ValueError("Source destination must be fresh")
     run("git", "init", str(app))
@@ -1022,7 +1067,7 @@ def prepare(app):
     output(sha=sha, version=version, release=release)
     existing = next((item for item in pages(f"repos/{repo}/releases")
                      if item["tag_name"] == release and not item["draft"]), None)
-    if existing:
+    if existing and not state:
         verify_published_release(repo, existing, sha, upstream, patchset, version)
         query = urlencode({"state": "all", "head": f"{repo.split('/')[0]}:{head}", "base": base})
         for pull in pages(f"repos/{repo}/pulls?{query}"):
@@ -1032,9 +1077,7 @@ def prepare(app):
             if not ready:
                 raise ValueError(reason)
             minor = bool(minor_findings(repo, pull["number"], sha))
-            output(followup=minor or bool(deferred and deferred.get("nonblocking")), pr=pull["number"])
-            if deferred:
-                close_recovered_repair(repo, config, state=deferred, has_minor=minor)
+            output(followup=minor, pr=pull["number"])
             close_published_reviews(repo, sha, upstream, head)
             output(ready=False, reason=f"Already published: {release}")
             return
@@ -1051,11 +1094,14 @@ def prepare(app):
                  f"patch SHA-256: `{patchset}`.\n\nApplication commit: `{sha}`.\n\n"
                  "Review-only PR: publication uses this exact commit; no merge or live-editor changes.")})
     pr = pull["number"]
+    if pull["state"] == "closed" and pull["head"]["sha"] == sha:
+        pull = api(f"repos/{repo}/pulls/{pr}", method="PATCH", data={"state": "open"})
     if pull["state"] != "open" or pull["head"]["sha"] != sha:
         raise ValueError("Existing review PR is closed or its head changed")
     marker = f"<!-- zed-codex:{sha} -->"
+    full_marker = f"<!-- zed-full:{sha}:{review_config} -->"
     comments = pages(f"repos/{repo}/issues/{pr}/comments")
-    if not any(marker in (comment.get("body") or "")
+    if not any(full_marker in (comment.get("body") or "")
                and comment.get("user", {}).get("login") == repo.split("/")[0] for comment in comments):
         api(f"repos/{repo}/issues/{pr}/comments", method="POST",
             data={"body": request_text(sha, upstream, f"{repo}@{state['head'] if state else config}")},
@@ -1071,7 +1117,7 @@ def prepare(app):
         comments = pages(f"repos/{repo}/issues/{pr}/comments")
         requested = [comment for comment in comments if marker in (comment.get("body") or "")
                      and comment.get("user", {}).get("login") == repo.split("/")[0]]
-        pending_review(min(comment["created_at"] for comment in requested))
+        pending_review(max(comment["created_at"] for comment in requested))
         return
     findings = minor_findings(repo, pr, sha) + minor_findings(repo, delta_pr, delta_sha)
     if not ready or not delta_ready or findings:
@@ -1083,10 +1129,15 @@ def prepare(app):
         raise ValueError("Consolidated review batch:\n" + "\n\n".join(dict.fromkeys(details)))
     output(ready=True, reason="Both complete reviews accepted; no outstanding findings",
            sha=sha, upstream=upstream, patchset=patchset, version=version,
-           release=release, pr=pr, followup=False)
-    if not state:
-        final_attempt(repo, pr, sha, config)
-        output(release_id=reserve_release(repo, release, sha, upstream, patchset, version, config))
+           release=release, pr=pr, followup=False, candidate_config=review_config,
+           already_published=bool(existing))
+    if not existing:
+        # Cheap setup must succeed before the single expensive sequence is spent.
+        release_id = reserve_release(repo, release, sha, upstream, patchset, version, review_config)
+        final_attempt(repo, pr, sha, review_config)
+        output(release_id=release_id)
+    else:
+        final_attempt(repo, pr, sha, review_config, policy_only=True)
 
 def build_identity():
     result = {"schema": 1, "repository": os.environ["GITHUB_REPOSITORY"],
@@ -1329,7 +1380,7 @@ def verify_published_release(repo, release, sha, upstream, patchset, version):
 
 def request_repair(directory, *, config=None, upstream=None, evidence=None, nonblocking=False):
     repo = os.environ["GITHUB_REPOSITORY"]
-    config = config or os.environ["GITHUB_SHA"]
+    config = config or os.environ.get("CONFIG_SHA", os.environ["GITHUB_SHA"])
     if api(f"repos/{repo}/commits/downstream")["sha"] != config:
         print("Configuration superseded; do not repair an obsolete candidate")
         return
@@ -1514,7 +1565,8 @@ def publish(directory):
     notes = (
         f"Upstream `{UPSTREAM}@{upstream}`; application `{sha}`; "
         f"configuration `{config}`; patch SHA-256 `{patchset}`.\n\n"
-        f"Exact-source Codex review: https://github.com/{repo}/pull/{os.environ['CANDIDATE_PR']}\n\n"
+        f"Complete-project review: https://github.com/{repo}/pull/{os.environ['CANDIDATE_PR']}\n"
+        f"Unshipped-change review: https://github.com/{repo}/pull/{os.environ['DELTA_PR']}\n\n"
         "macOS Apple Silicon; ad-hoc signed, not notarized. The shipped DMG and "
         "matching symbols passed the preserved regressions and artifact inspection. "
         "No running editor or remote session is restarted by this workflow.\n\n"
@@ -1539,6 +1591,19 @@ def main():
                 "check-policy": check_policy, "land": land_repair}
     commands[args.command](args.directory.resolve())
 
+def complete_adoption(repo, state, commit):
+    verify_adopted_configuration(repo, state["head"], commit)
+    if os.environ.get("ALREADY_PUBLISHED") == "true":
+        close_published_reviews(repo, os.environ["CANDIDATE_SHA"], state["upstream"],
+                                f"review/{state['upstream']}-{os.environ['PATCHSET_SHA256']}")
+    else:
+        reserved = reserve_release(
+            repo, os.environ["RELEASE_TAG"], os.environ["CANDIDATE_SHA"], state["upstream"],
+            os.environ["PATCHSET_SHA256"], os.environ["APP_VERSION"], commit)
+        if reserved != int(os.environ["RELEASE_ID"]):
+            raise ValueError("Adoption changed the reserved final release identifier")
+    output(config=commit)
+
 def land_repair(directory):
     repo, config = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"]
     state = repair_pull(repo, config)
@@ -1556,6 +1621,10 @@ def land_repair(directory):
     finding_pr = int(os.environ["CANDIDATE_PR"])
     finding_sha = os.environ["CANDIDATE_SHA"]
     followup = minor_findings(repo, finding_pr, finding_sha)
+    if followup:
+        raise ValueError(f"Outstanding review batch on PR #{finding_pr} at {finding_sha}:\n"
+                         + "\n\n".join(f"{item.get('path')}:{item.get('line')}\n{item['body']}"
+                                       for item in followup))
     if api(f"repos/{repo}/commits/downstream")["sha"] != config:
         raise ValueError("Default configuration changed; do not land stale repairs")
     directory.mkdir(parents=True, exist_ok=True)
@@ -1597,27 +1666,19 @@ def land_repair(directory):
     env = {**os.environ, "GH_TOKEN": owner_token(repo)} if ".github/workflows/release.yml" in changed else None
     run("git", "push", f"https://github.com/{repo}.git", f"{commit}:refs/heads/downstream",
         cwd=work, env=env)
+    complete_adoption(repo, state, commit)
     api(f"repos/{repo}/issues/{state['number']}/comments", method="POST",
         data={"body": f"Reviewed repair consolidated as `{commit}`; source-context files were not merged. "
-                       "Runtime verification is deferred to the single final validation/build sequence."})
+                       "Policy checks passed without credentials; the same frozen final run "
+                       "continues application validation without repeating them."})
     api(f"repos/{repo}/pulls/{state['number']}", method="PATCH", data={"state": "closed"})
     marker = f"<!-- zed-escalation:{config}:{state['upstream']} -->"
     for issue in pages(f"repos/{repo}/issues?state=open"):
         if (marker in (issue.get("body") or "")
                 and issue.get("user", {}).get("login") in {"github-actions[bot]", repo.split("/")[0]}):
             api(f"repos/{repo}/issues/{issue['number']}", method="PATCH", data={"state": "closed"})
-    if followup:
-        scope = "policy" if policy else "application"
-        evidence = (f"Nonblocking {scope} findings on https://github.com/{repo}/pull/{finding_pr} "
-                    f"at reviewed commit {finding_sha}; adopted as {commit}.\n\n"
-                    + "\n\n".join(f"{item.get('path')}:{item.get('line')}\n{item['body']}"
-                                  for item in followup))
-        request_repair(directory / "followup", config=commit, upstream=state["upstream"],
-                       evidence=evidence, nonblocking=True)
-    api(f"repos/{repo}/actions/workflows/release.yml/dispatches", method="POST",
-        data={"ref": "downstream"})
     cleanup_closed_pull_refs(repo, state["number"], state["head"])
-    print(f"Adopted {commit}; requested normal exact-source verification and release")
+    print(f"Consolidated {commit}; the same final run continues without repeating policy tests")
 
 def added_cases(diff):
     cases = set()
@@ -1691,10 +1752,20 @@ def isolated_environment(root):
         env[key] = str(path)
     env.update(CI="true", CARGO_INCREMENTAL="0", CARGO_TERM_COLOR="never",
                CARGO_PROFILE_RELEASE_DEBUG="line-tables-only")
+    if sys.platform == "darwin":
+        # Match bundle-mac's explicit target so the final tests and shipped build
+        # share Cargo's dependency artifacts instead of compiling two target trees.
+        env["CARGO_BUILD_TARGET"] = "aarch64-apple-darwin"
     return env
 
 def capture(args, *, cwd, env):
-    return subprocess.check_output(args, cwd=cwd, env=env, text=True)
+    try:
+        return subprocess.check_output(args, cwd=cwd, env=env, text=True)
+    except subprocess.CalledProcessError as error:
+        # Cargo JSON and git-am diagnostics otherwise disappear inside the
+        # exception, leaving a failed final run without its actual cause.
+        print(error.stdout or "", end="", flush=True)
+        raise
 
 def run_regressions(app, manifest, upstream, candidate):
     if not all(re.fullmatch(r"[0-9a-f]{40}", value) for value in (upstream, candidate)):

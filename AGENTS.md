@@ -54,6 +54,11 @@ release maintenance.
   candidate once, then publish its verified artifacts. Never rebuild just because
   a repair was adopted or a callback/schedule repeated. Reuse verified artifacts
   only when their complete source identity matches.
+- In that final sequence, check proposed release policy in the credential-free
+  sandbox before adopting it or executing it with write credentials. Verify that
+  adoption preserves every reviewed product-file blob and the regression
+  contract, then continue Rust tests, build and publication in the same run.
+  Do not dispatch a second validation cycle after a mechanical adoption.
 - A failed final check blocks publication and stops automatic expensive retries;
   retain its diagnostics and the working release. Do not hide a failure, skip a
   required check, or silently rebuild a changed candidate under an old approval.
