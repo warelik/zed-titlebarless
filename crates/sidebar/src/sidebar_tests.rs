@@ -17515,6 +17515,11 @@ fn test_terminal_remote_connection_match_distinguishes_ssh_arguments() {
         Some(&persisted),
         Some(&different_endpoint)
     ));
+    let without = connection(&[]);
+    let mut restored = without.clone();
+    if let RemoteConnectionOptions::Ssh(options) = &mut restored { options.args = None; }
+    assert!(same_terminal_remote_connection(Some(&without), Some(&restored)));
+
 }
 
 

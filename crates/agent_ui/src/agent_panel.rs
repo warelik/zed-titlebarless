@@ -147,15 +147,21 @@ fn reconnect_if_remote_disconnected(project: Entity<Project>, cx: &mut App) {
     }
 }
 
+struct CloseTerminalErrorToast;
+
 fn kill_persistent_terminal_session_and_delete_metadata(
     project: Entity<Project>,
     workspace: WeakEntity<Workspace>,
     terminal_id: TerminalId,
+    pending_close_completed: bool,
     cx: &mut App,
 ) {
     let store = TerminalThreadMetadataStore::try_global(cx);
     if store.as_ref().is_some_and(|store| {
-        !store.update(cx, |store, _| store.begin_intentional_close(terminal_id))
+        !store.update(cx, |store, _| {
+            (pending_close_completed && store.is_intentionally_closing(terminal_id))
+                || store.begin_intentional_close(terminal_id)
+        })
     }) {
         return;
     }
@@ -176,7 +182,6 @@ fn kill_persistent_terminal_session_and_delete_metadata(
                 );
                 workspace
                     .update(cx, |workspace, cx| {
-                        struct CloseTerminalErrorToast;
                         workspace.show_toast(
                             workspace::Toast::new(
                                 workspace::notifications::NotificationId::unique::<CloseTerminalErrorToast>(),
@@ -2234,6 +2239,7 @@ impl AgentPanel {
                                 this.project.clone(),
                                 this.workspace.clone(),
                                 terminal_id,
+                                true,
                                 cx,
                             );
                             return;
@@ -2341,6 +2347,7 @@ impl AgentPanel {
                             this.project.clone(),
                             this.workspace.clone(),
                             terminal_id,
+                            true,
                             cx,
                         );
                     }
@@ -2548,23 +2555,7 @@ impl AgentPanel {
                 // The thread outlives its process: an SSH drop, sleep or `exit`
                 // leaves it to be restarted, and only closing it removes it.
                 TerminalEvent::ProcessExited => {
-                    let is_persistent = this
-                        .terminals
-                        .get(&terminal_id)
-                        .is_some_and(|terminal| terminal.persistent);
-                    if is_persistent {
-                        if let Some(terminal) = this.terminals.get_mut(&terminal_id) {
-                            terminal.exited = true;
-                        }
-                        if this.pending_reconnect_restart.remove(&terminal_id) {
-                            let is_active = this.active_terminal_id() == Some(terminal_id);
-                            this.restart_terminal(terminal_id, is_active, false, window, cx);
-                        }
-                        cx.emit(AgentPanelEvent::EntryChanged);
-                        cx.notify();
-                    } else {
-                        this.close_terminal_internal(terminal_id, false, true, window, cx);
-                    }
+                    this.handle_terminal_process_exited(terminal_id, window, cx);
                 }
                 TerminalEvent::CloseTerminal
                 | TerminalEvent::BlinkChanged(_)
@@ -2605,6 +2596,12 @@ impl AgentPanel {
         self.terminals.insert(terminal_id, terminal);
         self.persist_terminal_metadata(terminal_id, cx);
         self.emit_terminal_thread_started(terminal_id, source, cx);
+        if terminal_entity.read(cx).has_exited() {
+            self.handle_terminal_process_exited(terminal_id, window, cx);
+            if !persistent {
+                return;
+            }
+        }
         let should_select = match select_mode {
             TerminalSelectMode::Always => true,
             TerminalSelectMode::Never => false,
@@ -2690,9 +2687,19 @@ impl AgentPanel {
             .terminal_session_may_exist(terminal_id, cx)
             .unwrap_or(true);
 
-        let spawn_is_pending = self.pending_terminal_spawns.remove(&terminal_id)
-            || self.closed_terminal_spawns.contains(&terminal_id);
+        let spawn_is_pending = self.is_terminal_spawn_pending(terminal_id);
         if spawn_is_pending {
+            if !self.closed_terminal_spawns.contains(&terminal_id) {
+                let owns_close = TerminalThreadMetadataStore::try_global(cx).map_or(true, |store| {
+                    store.update(cx, |store, _| store.begin_intentional_close(terminal_id))
+                });
+                if !owns_close {
+                    // A sidebar close already owns this startup and will wait
+                    // for its result; do not dispatch a second close operation.
+                    return;
+                }
+            }
+            self.pending_terminal_spawns.remove(&terminal_id);
             self.closed_terminal_spawns.insert(terminal_id);
         }
         self.pending_reconnect_restart.remove(&terminal_id);
@@ -2707,6 +2714,7 @@ impl AgentPanel {
                 self.project.clone(),
                 self.workspace.clone(),
                 terminal_id,
+                false,
                 cx,
             );
         } else if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
@@ -2764,6 +2772,31 @@ impl AgentPanel {
                 panel.read(cx).terminal_session_may_exist(terminal_id, cx).unwrap_or(true)
             }))
         })
+    }
+
+    fn handle_terminal_process_exited(
+        &mut self,
+        terminal_id: TerminalId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let is_persistent = self
+            .terminals
+            .get(&terminal_id)
+            .is_some_and(|terminal| terminal.persistent);
+        if is_persistent {
+            if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
+                terminal.exited = true;
+            }
+            if self.pending_reconnect_restart.remove(&terminal_id) {
+                let is_active = self.active_terminal_id() == Some(terminal_id);
+                self.restart_terminal(terminal_id, is_active, false, window, cx);
+            }
+            cx.emit(AgentPanelEvent::EntryChanged);
+            cx.notify();
+        } else {
+            self.close_terminal_internal(terminal_id, false, true, window, cx);
+        }
     }
 
     fn terminal_has_exited(&self, terminal_id: TerminalId, cx: &App) -> bool {
@@ -17641,6 +17674,14 @@ mod tests {
             panel.closed_terminal_spawns.contains(&terminal_id)
         }));
         assert!(fake_shpool.kill_history().is_empty());
+        cx.update(|_, cx| assert!(TerminalThreadMetadataStore::global(cx).read(cx).is_restore_blocked(terminal_id)));
+        let other_panel = workspace.update_in(&mut cx, |workspace, window, cx| {
+            cx.new(|cx| AgentPanel::new(workspace, window, cx))
+        });
+        other_panel.update_in(&mut cx, |other, window, cx| {
+            other.restore_terminal(metadata.clone(), true, AgentThreadSource::AgentPanel, None, window, cx);
+            assert!(!other.is_terminal_spawn_pending(terminal_id), "a different panel must observe the global pending close");
+        });
 
         cx.update(|_, cx| {
             TerminalThreadMetadataStore::global(cx)
@@ -17661,11 +17702,13 @@ mod tests {
             assert!(store.entry(terminal_id).is_some());
             assert!(!store.has_deleted_terminal_id(terminal_id));
         });
-        assert_eq!(
-            workspace.read_with(&cx, |workspace, _cx| workspace.notification_ids()),
-            original_notification_ids,
-            "a closed spawn error should not add an error notification"
-        );
+        let after_close = workspace.read_with(&cx, |workspace, _| workspace.notification_ids());
+        let close_error = workspace::notifications::NotificationId::unique::<CloseTerminalErrorToast>();
+        assert!(after_close.contains(&close_error), "failed cleanup is retryable and must be visible");
+        assert!(original_notification_ids.iter().all(|id| after_close.contains(id)));
+        assert!(after_close.iter().all(|id| original_notification_ids.contains(id) || id == &close_error),
+                "a cancelled spawn must not add a separate open/spawn error notification");
+        cx.update(|_, cx| assert!(!TerminalThreadMetadataStore::global(cx).read(cx).is_restore_blocked(terminal_id)));
         assert!(fake_shpool.attach_history().is_empty());
         assert!(fake_shpool.has_session(&terminal_id.session_name()));
         assert_eq!(fake_shpool.kill_history(), vec![terminal_id.session_name()]);
@@ -17702,6 +17745,7 @@ mod tests {
                 store.save(open_terminal_metadata.clone(), cx);
             });
         });
+        let notifications_before_open = workspace.read_with(&cx, |workspace, _| workspace.notification_ids());
         panel.update_in(&mut cx, |panel, window, cx| {
             panel.restore_terminal(
                 open_terminal_metadata,
@@ -17715,7 +17759,7 @@ mod tests {
         cx.run_until_parked();
         assert!(
             workspace.read_with(&cx, |workspace, _cx| workspace.notification_ids().len())
-                > original_notification_ids.len(),
+                > notifications_before_open.len(),
             "a non-closed spawn error should remain visible"
         );
     }
@@ -18518,4 +18562,31 @@ mod tests {
             );
         });
     }
+    #[gpui::test]
+    async fn test_terminal_exit_before_insertion_uses_the_normal_lifecycle(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        cx.update(|_, cx| TerminalThreadMetadataStore::init_global(cx));
+        let project = panel.read_with(&cx, |panel, _| panel.project.clone());
+        let fake = project.update(&mut cx, |project, _| project.enable_fake_shpool(&[]));
+        for persistent in [false, true] {
+            let (terminal_id, terminal, view) = panel.update_in(&mut cx, |panel, window, cx| {
+                let terminal = panel.build_display_only_terminal(cx);
+                let view = cx.new(|cx| TerminalView::new(terminal.clone(), panel.workspace.clone(),
+                    panel.workspace_id, panel.project.downgrade(), window, cx));
+                (TerminalId::new(), terminal, view)
+            });
+            terminal.update(&mut cx, |terminal, cx| terminal.simulate_process_exit(cx));
+            cx.run_until_parked();
+            assert!(terminal.read_with(&cx, |terminal, _| terminal.has_exited()));
+            panel.update_in(&mut cx, |panel, window, cx| {
+                panel.insert_terminal(terminal_id, view, None, None, None, None, persistent,
+                    TerminalSelectMode::Never, false, AgentThreadSource::AgentPanel, window, cx);
+                assert_eq!(panel.has_terminal(terminal_id), persistent);
+                if persistent { assert!(panel.terminals.get(&terminal_id).unwrap().exited); }
+            });
+            cx.run_until_parked();
+        }
+        assert!(fake.kill_history().is_empty(), "an exited unmanaged shell needs no shpool cleanup");
+    }
+
 }

@@ -734,7 +734,7 @@ fn same_terminal_remote_connection(
     }
     match (left, right) {
         (Some(RemoteConnectionOptions::Ssh(left)), Some(RemoteConnectionOptions::Ssh(right))) => {
-            left.args == right.args
+            left.args.as_deref().unwrap_or_default() == right.args.as_deref().unwrap_or_default()
         }
         _ => true,
     }
