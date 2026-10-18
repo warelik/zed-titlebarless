@@ -13334,6 +13334,7 @@ mod tests {
         let (workspace, cx) =
             cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
         add_an_item_to_active_pane(cx, &workspace, 1);
+        add_an_item_to_active_pane(cx, &workspace, 2);
 
         let tab_width =
             |min_width: Option<f32>, max_width: Option<f32>, cx: &mut VisualTestContext| {
