@@ -5066,6 +5066,64 @@ async fn test_successful_delayed_terminal_kill_deletes_metadata_after_sidebar_is
 }
 
 #[gpui::test]
+async fn test_timed_out_terminal_close_keeps_metadata_and_allows_retry(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let project = init_test_project_with_agent_panel("/main-project", cx).await;
+    let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
+    let (multi_workspace, cx) = cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let (sidebar, _panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+    let terminal_id = TerminalId::new();
+    let session_name = terminal_id.session_name();
+    fake.add_session(&session_name);
+    fake.state.lock().kill_delay = Some(Duration::from_secs(60));
+    let main_paths = PathList::new(&[PathBuf::from("/main-project")]);
+    let closed_paths = PathList::new(&[PathBuf::from("/worktrees/feature-a")]);
+    let metadata = TerminalThreadMetadata {
+        terminal_id, title: "Timed out close".into(), custom_title: None,
+        created_at: chrono::Utc::now(),
+        worktree_paths: WorktreePaths::from_path_lists(main_paths.clone(), closed_paths.clone()).unwrap(),
+        remote_connection: None, working_directory: None,
+    };
+    cx.update(|_, cx| {
+        TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx));
+    });
+    save_thread_metadata_with_main_paths("blocking-thread", "Blocking Thread", closed_paths, main_paths,
+                                         chrono::Utc::now(), cx);
+    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+    cx.run_until_parked();
+    close_terminal_from_sidebar(&sidebar, terminal_id, cx);
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        assert!(TerminalThreadMetadataStore::global(cx).read(cx).is_intentionally_closing(terminal_id));
+    });
+    cx.executor().advance_clock(Duration::from_secs(18));
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        let store = TerminalThreadMetadataStore::global(cx);
+        let store = store.read(cx);
+        assert!(store.entry(terminal_id).is_some());
+        assert!(!store.is_intentionally_closing(terminal_id));
+        assert!(!store.is_restore_blocked(terminal_id));
+    });
+    assert!(fake.has_session(&session_name));
+    cx.executor().advance_clock(Duration::from_secs(60));
+    cx.run_until_parked();
+    assert!(fake.has_session(&session_name), "timed out kill must not finish late");
+    fake.state.lock().kill_delay = None;
+    close_terminal_from_sidebar(&sidebar, terminal_id, cx);
+    cx.run_until_parked();
+    assert_eq!(fake.kill_history().len(), 2);
+    assert!(!fake.has_session(&session_name));
+    cx.update(|_, cx| {
+        let store = TerminalThreadMetadataStore::global(cx);
+        let store = store.read(cx);
+        assert!(store.entry(terminal_id).is_none());
+        assert!(!store.is_intentionally_closing(terminal_id));
+        assert!(store.is_restore_blocked(terminal_id));
+    });
+}
+
+#[gpui::test]
 async fn test_failed_close_terminal_entry_retains_metadata_until_session_kill_succeeds(
     cx: &mut TestAppContext,
 ) {
