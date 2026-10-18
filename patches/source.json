@@ -340,6 +340,10 @@
   ],
   "regression_cases": [
     [
+      "agent_settings",
+      "test_threads_sidebar_minimum_is_independent_of_layout_opt_ins"
+    ],
+    [
       "agent_ui",
       "test_close_during_unavailable_pending_restore_preserves_existing_metadata"
     ],
@@ -361,11 +365,19 @@
     ],
     [
       "agent_ui",
+      "test_external_file_drop_on_thread_does_not_paste_into_later_terminal"
+    ],
+    [
+      "agent_ui",
       "test_failed_close_of_new_pending_session_keeps_retry_metadata"
     ],
     [
       "agent_ui",
       "test_failed_session_kill_retains_metadata_for_retry"
+    ],
+    [
+      "agent_ui",
+      "test_imported_task_retains_output_until_native_close_and_does_not_become_persistent"
     ],
     [
       "agent_ui",
@@ -445,11 +457,43 @@
     ],
     [
       "project",
+      "test_persistent_terminal_honors_configured_shell_arguments"
+    ],
+    [
+      "project",
+      "test_shpool_command_preserves_shell_program_and_arguments"
+    ],
+    [
+      "project",
+      "test_shpool_command_round_trips_literal_shell_arguments"
+    ],
+    [
+      "project",
       "test_shpool_kill_ignores_only_requested_session_not_found"
     ],
     [
       "project",
       "test_shpool_kill_prelude_fails_when_client_is_missing"
+    ],
+    [
+      "project",
+      "test_shpool_kill_timeout_is_retryable_and_cancels_delayed_kill"
+    ],
+    [
+      "recent_projects",
+      "test_remove_project_group_waits_for_close_consent"
+    ],
+    [
+      "sidebar",
+      "test_agent_panel_terminal_notifications_update_sidebar"
+    ],
+    [
+      "sidebar",
+      "test_archive_removes_worktree_even_when_workspace_paths_diverge"
+    ],
+    [
+      "sidebar",
+      "test_background_thread_completion_triggers_notification"
     ],
     [
       "sidebar",
@@ -465,11 +509,35 @@
     ],
     [
       "sidebar",
+      "test_escape_from_search_focuses_first_thread"
+    ],
+    [
+      "sidebar",
       "test_failed_close_terminal_entry_retains_metadata_until_session_kill_succeeds"
     ],
     [
       "sidebar",
+      "test_parallel_threads_shown_with_live_status"
+    ],
+    [
+      "sidebar",
       "test_project_tab_opens_panel_only_after_closed_target_workspace_loads"
+    ],
+    [
+      "sidebar",
+      "test_search_matches_regardless_of_case"
+    ],
+    [
+      "sidebar",
+      "test_search_matches_workspace_name"
+    ],
+    [
+      "sidebar",
+      "test_search_narrows_visible_threads_to_matches"
+    ],
+    [
+      "sidebar",
+      "test_search_only_shows_workspace_headers_with_matches"
     ],
     [
       "sidebar",
@@ -481,6 +549,14 @@
     ],
     [
       "sidebar",
+      "test_sidebar_width_minimum_is_independent_of_layout_opt_ins"
+    ],
+    [
+      "sidebar",
+      "test_subagent_permission_request_marks_parent_sidebar_thread_waiting"
+    ],
+    [
+      "sidebar",
       "test_successful_delayed_terminal_kill_deletes_metadata_after_sidebar_is_dropped"
     ],
     [
@@ -488,8 +564,24 @@
       "test_terminal_remote_connection_match_distinguishes_ssh_arguments"
     ],
     [
+      "sidebar",
+      "test_timed_out_terminal_close_keeps_metadata_and_allows_retry"
+    ],
+    [
       "terminal",
       "test_init_command_skips_exit_without_child_status"
+    ],
+    [
+      "terminal",
+      "test_task_exit_preserves_output_and_emits_only_its_hide_decision"
+    ],
+    [
+      "terminal",
+      "test_terminal_closes_after_nonzero_exit"
+    ],
+    [
+      "terminal",
+      "test_terminal_no_exit_on_spawn_failure"
     ],
     [
       "terminal",
@@ -505,11 +597,27 @@
     ],
     [
       "workspace",
+      "test_cancel_project_close_preserves_transient_retention"
+    ],
+    [
+      "workspace",
       "test_item_close_guard_preserves_discard_and_saved_formatting"
     ],
     [
       "workspace",
       "test_item_close_guard_rejects_item_dirtied_after_consent"
+    ],
+    [
+      "workspace",
+      "test_remove_project_group_keeps_workspace_opened_during_consent"
+    ],
+    [
+      "workspace",
+      "test_remove_project_group_preserves_row_when_close_is_cancelled"
+    ],
+    [
+      "workspace",
+      "test_remove_unloaded_project_group_still_removes_its_row"
     ],
     [
       "workspace",

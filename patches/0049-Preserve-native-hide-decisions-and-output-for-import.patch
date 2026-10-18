@@ -1,0 +1,251 @@
+From 1b1e70e710e77cc13e7cef9711ecefda161c6881 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 20:23:25 +0000
+Subject: [PATCH] Preserve native hide decisions and output for imported task
+ terminals
+
+Treat ProcessExited as completion and honor CloseTerminal for nonpersistent imports. Keep finished tasks selectable in place without shpool conversion or managed-session restart controls. Reuse native task-mode pairing in a test-only display fixture and cover all hide policies and success/failure. Retain all ordinary-terminal assertions with its real native completion stimulus.
+---
+ crates/agent_ui/src/agent_panel.rs | 123 +++++++++++++++++++++++------
+ crates/terminal/src/terminal.rs    |  45 +++++++++++
+ 2 files changed, 146 insertions(+), 22 deletions(-)
+
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index 9619875..eaeeafc 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -2587,13 +2587,19 @@ impl AgentPanel {
+                     this.report_terminal_program(terminal_id, source, cx);
+                 }
+                 TerminalEvent::Bell => this.mark_terminal_notification(terminal_id, window, cx),
+-                // The thread outlives its process: an SSH drop, sleep or `exit`
+-                // leaves it to be restarted, and only closing it removes it.
++                // Managed threads outlive their process; imported tasks keep
++                // their native completion and HideStrategy decisions.
+                 TerminalEvent::ProcessExited => {
+                     this.handle_terminal_process_exited(terminal_id, window, cx);
+                 }
+-                TerminalEvent::CloseTerminal
+-                | TerminalEvent::BlinkChanged(_)
++                TerminalEvent::CloseTerminal => {
++                    // Imported terminals retain their native task/shell hide policy.
++                    // Managed sessions outlive their client and close only explicitly.
++                    if this.terminals.get(&terminal_id).is_some_and(|terminal| !terminal.persistent) {
++                        this.close_terminal_internal(terminal_id, false, true, window, cx);
++                    }
++                }
++                TerminalEvent::BlinkChanged(_)
+                 | TerminalEvent::OutputReplaced
+                 | TerminalEvent::SelectionsChanged
+                 | TerminalEvent::NewNavigationTarget(_)
+@@ -2815,23 +2821,21 @@ impl AgentPanel {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
+-        let is_persistent = self
+-            .terminals
+-            .get(&terminal_id)
+-            .is_some_and(|terminal| terminal.persistent);
+-        if is_persistent {
+-            if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
++        let is_persistent = match self.terminals.get_mut(&terminal_id) {
++            Some(terminal) => {
+                 terminal.exited = true;
++                terminal.persistent
+             }
+-            if self.pending_reconnect_restart.remove(&terminal_id) {
+-                let is_active = self.active_terminal_id() == Some(terminal_id);
+-                self.restart_terminal(terminal_id, is_active, false, window, cx);
+-            }
+-            cx.emit(AgentPanelEvent::EntryChanged);
+-            cx.notify();
+-        } else {
+-            self.close_terminal_internal(terminal_id, false, true, window, cx);
++            None => return,
++        };
++        if is_persistent && self.pending_reconnect_restart.remove(&terminal_id) {
++            let is_active = self.active_terminal_id() == Some(terminal_id);
++            self.restart_terminal(terminal_id, is_active, false, window, cx);
+         }
++        // ProcessExited reports completion. CloseTerminal separately carries
++        // the native HideStrategy decision, including failed task output.
++        cx.emit(AgentPanelEvent::EntryChanged);
++        cx.notify();
+     }
+ 
+     fn terminal_has_exited(&self, terminal_id: TerminalId, cx: &App) -> bool {
+@@ -3127,7 +3131,10 @@ impl AgentPanel {
+             return;
+         }
+         if self.has_terminal(metadata.terminal_id)
+-            && !self.terminal_has_exited(metadata.terminal_id, cx)
++            && (!self.terminal_has_exited(metadata.terminal_id, cx)
++                || self.terminals.get(&metadata.terminal_id).is_some_and(|terminal| {
++                    terminal.view.read(cx).terminal().read(cx).task().is_some()
++                }))
+         {
+             let should_select = match select_mode {
+                 TerminalSelectMode::Always => true,
+@@ -7501,7 +7508,10 @@ impl Render for AgentPanel {
+                         .and_then(|terminal| terminal.search_bar.clone());
+                     let exited_terminal_id = self
+                         .active_terminal_id()
+-                        .filter(|terminal_id| self.terminal_has_exited(*terminal_id, cx));
++                        .filter(|terminal_id| {
++                            self.terminals.get(terminal_id).is_some_and(|terminal| terminal.persistent)
++                                && self.terminal_has_exited(*terminal_id, cx)
++                        });
+                     let terminal_content = v_flex()
+                         .size_full()
+                         .when_some(search_bar, |this, search_bar| {
+@@ -10965,6 +10975,75 @@ mod tests {
+         });
+     }
+ 
++    #[gpui::test]
++    async fn test_imported_task_retains_output_until_native_close_and_does_not_become_persistent(
++        cx: &mut TestAppContext,
++    ) {
++        let (panel, mut visual_context) = setup_panel(cx).await;
++        visual_context.update(|_, cx| {
++            cx.update_flags(true, vec!["agent-panel-terminal".to_string()]);
++            TerminalThreadMetadataStore::init_global(cx);
++        });
++        visual_context.run_until_parked();
++        let project = panel.read_with(&visual_context, |panel, _| panel.project.clone());
++        let fake = project.update(&mut visual_context, |project, _| project.enable_fake_shpool(&[]));
++        let workspace = panel.read_with(&visual_context, |panel, _| panel.workspace.upgrade()).unwrap();
++        let (view, dragged) = workspace.update_in(&mut visual_context, |workspace, window, cx| {
++            let source = workspace.active_pane().clone();
++            let project = workspace.project().clone();
++            let settings = TerminalSettings::get_global(cx).clone();
++            let path_style = project.read(cx).path_style(cx);
++            let terminal = cx.new(|cx| terminal::TerminalBuilder::new_display_only(
++                settings.cursor_shape, settings.alternate_scroll, settings.max_scroll_history_lines,
++                0, cx.background_executor(), path_style,
++            ).with_test_task(task::SpawnInTerminal {
++                hide: task::HideStrategy::Never, label: "Imported task".into(), ..Default::default()
++            }).subscribe(cx));
++            let view = cx.new(|cx| TerminalView::new(terminal, workspace.weak_handle(),
++                workspace.database_id(), project.downgrade(), window, cx));
++            source.update(cx, |pane, cx| {
++                pane.add_item(Box::new(view.clone()), true, false, None, window, cx);
++            });
++            let dragged = DraggedTab {
++                pane: source, item: Box::new(view.clone()), ix: 0, detail: 0, is_active: true,
++            };
++            (view, dragged)
++        });
++        assert!(panel.update_in(&mut visual_context, |panel, window, cx| {
++            panel.handle_dragged_terminal_tab(&dragged, window, cx)
++        }));
++        let id = panel.read_with(&visual_context, |panel, _| panel.active_terminal_id()).unwrap();
++        let terminal = view.read_with(&visual_context, |view, _| view.terminal().clone());
++        terminal.update(&mut visual_context, |terminal, cx| {
++            terminal.write_output(b"keep completed task output", cx);
++            terminal.simulate_process_exit(cx);
++        });
++        visual_context.run_until_parked();
++        panel.read_with(&visual_context, |panel, cx| {
++            assert_eq!(panel.terminals.get(&id).unwrap().view, view);
++            assert!(!panel.terminals.get(&id).unwrap().persistent);
++            assert!(panel.terminal_has_exited(id, cx));
++            assert!(panel.terminal_metadata(id, cx).is_none());
++            assert!(TerminalThreadMetadataStore::global(cx).read(cx).entry(id).is_none());
++        });
++        assert!(terminal.read_with(&visual_context, |terminal, _| terminal.get_content())
++            .contains("keep completed task output"));
++        let metadata = panel.read_with(&visual_context, |panel, cx| {
++            panel.terminal_metadata_for_display(id, cx)
++        }).unwrap();
++        panel.update_in(&mut visual_context, |panel, window, cx| {
++            panel.restore_terminal_with_select_mode(metadata, TerminalSelectMode::Always, false,
++                AgentThreadSource::AgentPanel, None, window, cx);
++        });
++        visual_context.run_until_parked();
++        assert_eq!(panel.read_with(&visual_context, |panel, _| panel.terminals.get(&id).unwrap().view.clone()), view);
++        assert!(fake.attach_history().is_empty());
++        terminal.update(&mut visual_context, |_, cx| cx.emit(TerminalEvent::CloseTerminal));
++        visual_context.run_until_parked();
++        assert!(!panel.read_with(&visual_context, |panel, _| panel.has_terminal(id)));
++        assert!(fake.kill_history().is_empty());
++    }
++
+     #[gpui::test]
+     async fn test_dragged_terminal_tab_is_non_persistent_and_closes_on_process_exit(
+         cx: &mut TestAppContext,
+@@ -11096,8 +11175,8 @@ mod tests {
+             "reconnect should not schedule a dragged terminal for restart"
+         );
+ 
+-        terminal.update(&mut visual_context, |_terminal, cx| {
+-            cx.emit(TerminalEvent::ProcessExited);
++        terminal.update(&mut visual_context, |terminal, cx| {
++            terminal.simulate_process_exit(cx);
+         });
+         visual_context.run_until_parked();
+         assert!(
+diff --git a/crates/terminal/src/terminal.rs b/crates/terminal/src/terminal.rs
+index 635538c..e111d1c 100644
+--- a/crates/terminal/src/terminal.rs
++++ b/crates/terminal/src/terminal.rs
+@@ -1125,6 +1125,17 @@ impl TerminalBuilder {
+         }
+     }
+ 
++    /// Attach a real paired task state to a display-only regression fixture.
++    #[cfg(any(test, feature = "test-support"))]
++    pub fn with_test_task(mut self, spawned_task: SpawnInTerminal) -> Self {
++        let TerminalModeKind::Task { state, completion_tx } = TerminalMode::task(spawned_task).0 else {
++            unreachable!("task constructor must return task mode");
++        };
++        self.terminal.task = Some(state);
++        self.terminal.completion_tx = Some(completion_tx);
++        self
++    }
++
+     pub fn new(
+         working_directory: Option<PathBuf>,
+         mode: TerminalMode,
+@@ -4711,6 +4722,40 @@ mod tests {
+         );
+     }
+ 
++    #[cfg(unix)]
++    #[gpui::test]
++    async fn test_task_exit_preserves_output_and_emits_only_its_hide_decision(cx: &mut TestAppContext) {
++        use std::os::unix::process::ExitStatusExt;
++        init_test(cx);
++        for (hide, code, should_close) in [
++            (HideStrategy::Never, 0, false), (HideStrategy::Never, 1, false),
++            (HideStrategy::Always, 0, true), (HideStrategy::Always, 1, true),
++            (HideStrategy::OnSuccess, 0, true), (HideStrategy::OnSuccess, 1, false),
++        ] {
++            let terminal = cx.new(|cx| TerminalBuilder::new_display_only(
++                SettingsCursorShape::default(), AlternateScroll::On, None, 0,
++                cx.background_executor(), PathStyle::local(),
++            ).with_test_task(SpawnInTerminal { hide, ..Default::default() }).subscribe(cx));
++            let events = Arc::new(Mutex::new(Vec::<Event>::new()));
++            let recorded = events.clone();
++            let _subscription = cx.update(|cx| {
++                cx.subscribe(&terminal, move |_, event, _| recorded.lock().push(event.clone()))
++            });
++            terminal.update(cx, |terminal, cx| {
++                terminal.write_output(b"retained task output", cx);
++                terminal.register_task_finished(Some(ExitStatus::from_raw(code << 8)), cx);
++            });
++            cx.run_until_parked();
++            let recorded = events.lock();
++            assert!(recorded.contains(&Event::ProcessExited));
++            assert_eq!(recorded.contains(&Event::CloseTerminal), should_close, "{hide:?}, exit {code}");
++            terminal.read_with(cx, |terminal, _| {
++                assert_eq!(terminal.task().unwrap().status, TaskStatus::Completed { success: code == 0 });
++                assert!(terminal.get_content().contains("retained task output"));
++            });
++        }
++    }
++
+     #[test]
+     fn test_rgb_for_index() {
+         // Test every possible value in the color cube.
