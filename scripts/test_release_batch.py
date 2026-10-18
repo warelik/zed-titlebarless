@@ -223,8 +223,12 @@ class BatchedReviewTests(unittest.TestCase):
         self.assertIn("pathlib.Path('trusted/scripts')", preparation)
         self.assertIn("release.ROOT = pathlib.Path('configuration')", preparation)
         self.assertNotIn("python3 scripts/release.py prepare", preparation)
+        self.assertLess(preparation.index("Require The Trusted Default Branch"),
+                        preparation.index("Record A Successful Read-Only Bootstrap"))
         bootstrap = workflow.split("\n  bootstrap-policy:\n", 1)[1].split("\n  prepare:\n", 1)[0]
         self.assertNotIn("secrets.", bootstrap)
+        self.assertLess(bootstrap.index("Require The Trusted Default Branch"),
+                        bootstrap.index("Run The Final Approved Policy Suite Once"))
         self.assertIn("Require Both Complete Exact-Source Reviews Before Any Tests", bootstrap)
         self.assertIn("ref: dbf40ff4bd626082e0ad3d9873c5b6ad5fa7f941", bootstrap)
         self.assertNotIn("ref: ${{ vars.ZED_TRUSTED_POLICY", bootstrap)
@@ -239,6 +243,7 @@ class BatchedReviewTests(unittest.TestCase):
         policy = workflow.split("\n  policy-check:\n", 1)[1].split("\n  test:\n", 1)[0]
         self.assertIn("always() && needs.prepare.result == 'success'", policy)
         repair = workflow.split("\n  repair:\n", 1)[1]
+        self.assertIn("github.ref == 'refs/heads/downstream'", repair)
         self.assertIn("(vars.ZED_TRUSTED_POLICY != '' || needs.bootstrap-policy.result == 'success')", repair)
 
     def test_current_adoption_receipt_advances_the_authenticated_history_cutoff(self):
