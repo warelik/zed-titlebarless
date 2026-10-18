@@ -1132,7 +1132,7 @@ class PublicationBoundaryTests(unittest.TestCase):
         phases = []
         def api(path, *, method="GET", data=None):
             calls.append((path, method, data))
-            return {"draft": True}
+            return {"id": 42, "draft": True}
         def validate(published):
             phases.append(published)
             if published:
@@ -1159,13 +1159,37 @@ class PublicationBoundaryTests(unittest.TestCase):
             calls.append((method, data))
             if method == "PATCH" and data["draft"] is False:
                 raise RuntimeError("response lost")
-            return {"draft": True}
+            return {"id": 42, "draft": True}
         with patch.object(release, "api", side_effect=api):
             with self.assertRaisesRegex(RuntimeError, "response lost"):
                 release.publish_checked_draft("owner/fork", 42, "notes", lambda published: None)
         self.assertEqual([data["draft"] for method, data in calls if method == "PATCH"],
                          [False, True])
 
+
+    def test_withdrawal_reads_back_an_ambiguous_patch_before_retrying(self):
+        calls = []
+        def api(path, *, method="GET", data=None):
+            calls.append(method)
+            if method == "PATCH":
+                raise RuntimeError("response lost after server accepted withdrawal")
+            return {"id": 42, "draft": True}
+        with patch.object(release, "api", side_effect=api):
+            release.withdraw_candidate_release("owner/fork", 42)
+        self.assertEqual(calls, ["PATCH", "GET"])
+
+    def test_transient_withdrawal_failure_retries_and_confirms_the_exact_release(self):
+        responses = [RuntimeError("temporary failure"), {"id": 42, "draft": False},
+                     {}, {"id": 42, "draft": True}]
+        with patch.object(release, "api", side_effect=responses) as api:
+            release.withdraw_candidate_release("owner/fork", 42)
+        self.assertEqual(api.call_count, 4)
+
+    def test_unconfirmed_withdrawal_is_bounded_and_reports_publication_risk(self):
+        with patch.object(release, "api", return_value={"id": 42, "draft": False}) as api:
+            with self.assertRaisesRegex(ValueError, "after 3 bounded attempts.*may still be public"):
+                release.withdraw_candidate_release("owner/fork", 42)
+        self.assertEqual(api.call_count, 6)
 
 class RustRegressionRunnerTests(unittest.TestCase):
     def assert_isolated(self, env):

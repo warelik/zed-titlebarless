@@ -41,7 +41,8 @@ ADOPTION_NOTE = ("Policy checks passed without credentials; the same frozen fina
                  "continues application validation without repeating them.")
 RUST_TEST_NAME = r"[A-Za-z_][A-Za-z0-9_]*"
 TEST_FUNCTION = re.compile(
-    r"(?m)^[ \t]*#\[(?:test|gpui::test)(?:\([^\]]*\))?\][ \t]*\n"
+    r"(?m)^(?:[ \t]*#\[[^\]]*\][ \t]*\n)*"
+    r"[ \t]*#\[(?:test|gpui::test)(?:\([^\]]*\))?\][ \t]*\n"
     r"(?:[ \t]*#\[[^\]]*\][ \t]*\n)*"
     rf"[ \t]*(?:async[ \t]+)?fn[ \t]+({RUST_TEST_NAME})[ \t]*\("
 )
@@ -58,7 +59,7 @@ def api(path, *, method="GET", data=None, token=None):
     if data is not None:
         command += ["--input", "-"]
     result = subprocess.run(command, input=json.dumps(data) if data is not None else None,
-                            text=True, stdout=subprocess.PIPE, check=True, env=env)
+                            text=True, stdout=subprocess.PIPE, check=True, env=env, timeout=60)
     return json.loads(result.stdout) if result.stdout.strip() else None
 
 def pages(path):
@@ -940,7 +941,9 @@ def request_text(sha, upstream, config):
         "This is upstream stable Zed plus the smallest necessary downstream patches, "
         "not an independently developed editor. Preserve the existing requested "
         "behavior and regression coverage; do not add unrelated features.\n"
-        "Check stock behavior when opt-in layout settings are disabled, title-bar "
+        "Check stock behavior when opt-in layout settings are disabled while preserving "
+        "the separately documented unconditional downstream behavior (including the "
+        "100px threads-sidebar minimum and one-em single-line-editor padding). Check title-bar "
         "and traffic-light placement, pane/sidebar/thread identity, GPUI lifetime "
         "and thread safety, terminal persistence and intentional close semantics, "
         "SSH authentication cancellation and transient reconnect behavior, and "
@@ -1659,6 +1662,29 @@ def ensure_forward_release(repo, version, upstream, *, release_id=None):
             or (current_version == old_version and upstream != previous_upstream)):
         raise ValueError("Refusing an older stable version or a retagged same-version source")
 
+def withdraw_candidate_release(repo, release_id):
+    last_error = "candidate remains published"
+    for _ in range(3):
+        try:
+            api(f"repos/{repo}/releases/{release_id}", method="PATCH",
+                data={"draft": True, "make_latest": "false"})
+        except Exception as error:
+            last_error = str(error)
+        # A failed PATCH response is ambiguous; read back even after failure.
+        try:
+            current = api(f"repos/{repo}/releases/{release_id}")
+            if current.get("id") == release_id and current.get("draft") is True:
+                return
+            last_error = "candidate withdrawal was not confirmed by native metadata"
+        except Exception as error:
+            last_error = str(error)
+    raise ValueError(
+        f"Cannot confirm release withdrawal after 3 bounded attempts: "
+        f"https://github.com/{repo}/releases (release ID {release_id}). "
+        f"The candidate may still be public; publication remains failed and requires "
+        f"explicit maintenance escalation. Last error: {last_error}")
+
+
 def publish_checked_draft(repo, release_id, notes, validate):
     # GitHub has no transaction spanning release publication and PR/ref state.
     # Check at the boundary, then compensate any failed post-publication check.
@@ -1670,11 +1696,7 @@ def publish_checked_draft(repo, release_id, notes, validate):
     except Exception:
         # Also withdraw after an ambiguous PATCH error: the server may have
         # applied the request even when its response did not reach the runner.
-        api(f"repos/{repo}/releases/{release_id}", method="PATCH",
-            data={"draft": True, "make_latest": "false"})
-        withdrawn = api(f"repos/{repo}/releases/{release_id}")
-        if not withdrawn.get("draft"):
-            raise ValueError("Publication failed and GitHub did not withdraw the candidate")
+        withdraw_candidate_release(repo, release_id)
         raise
 
 

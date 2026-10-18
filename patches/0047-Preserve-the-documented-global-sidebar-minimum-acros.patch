@@ -1,0 +1,85 @@
+From c9485fd4471291088196272baa5c3cc2ea7a1891 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 19:51:13 +0000
+Subject: [PATCH] Preserve the documented global sidebar minimum across layouts
+
+The original patch explicitly lowers the minimum for every user, independently of compact and in-agent-panel settings. Keep that required behavior and cover settings, dragging and restored state under all four layout combinations rather than accepting a contradictory review assumption.
+---
+ crates/agent_settings/src/agent_settings.rs | 19 ++++++++++++++++
+ crates/sidebar/src/sidebar_tests.rs         | 25 +++++++++++++++++++++
+ 2 files changed, 44 insertions(+)
+
+diff --git a/crates/agent_settings/src/agent_settings.rs b/crates/agent_settings/src/agent_settings.rs
+index 5ac5d29..f34a2d7 100644
+--- a/crates/agent_settings/src/agent_settings.rs
++++ b/crates/agent_settings/src/agent_settings.rs
+@@ -34,6 +34,8 @@ pub const COMPACTION_PROMPT: &str = include_str!("prompts/compaction_prompt.txt"
+ /// Bounds on the width of the threads list. They constrain the configured
+ /// default as well as the width the user drags to, so that no width the sidebar
+ /// can hold is able to crowd out the editor or collapse the list.
++// The downstream 100px minimum is intentional even with compact/in-panel
++// layout disabled; it is separately documented under "Without any setting".
+ pub const THREADS_LIST_MIN_WIDTH: Pixels = px(100.0);
+ pub const THREADS_LIST_MAX_WIDTH: Pixels = px(800.0);
+ 
+@@ -1120,6 +1122,23 @@ mod tests {
+         }
+     }
+ 
++    #[gpui::test]
++    fn test_threads_sidebar_minimum_is_independent_of_layout_opt_ins(cx: &mut gpui::App) {
++        let store = SettingsStore::test(cx);
++        cx.set_global(store);
++        project::DisableAiSettings::register(cx);
++        AgentSettings::register(cx);
++        for (compact, in_agent_panel) in [(false, false), (false, true), (true, false), (true, true)] {
++            let content = serde_json::json!({"agent": {"threads_sidebar": {
++                "compact": compact, "in_agent_panel": in_agent_panel, "default_width": 5
++            }}}).to_string();
++            SettingsStore::update_global(cx, |store, cx| {
++                store.set_user_settings(&content, cx).expect("valid sidebar settings");
++            });
++            assert_eq!(AgentSettings::get_global(cx).threads_sidebar.default_width, px(100.0));
++        }
++    }
++
+     #[gpui::test]
+     fn test_threads_sidebar_settings(cx: &mut gpui::App) {
+         let store = SettingsStore::test(cx);
+diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
+index 77a6e7c..1d2e4c2 100644
+--- a/crates/sidebar/src/sidebar_tests.rs
++++ b/crates/sidebar/src/sidebar_tests.rs
+@@ -1153,6 +1153,31 @@ async fn test_restored_width_preserves_legacy_resizes(cx: &mut TestAppContext) {
+     }
+ }
+ 
++#[gpui::test]
++async fn test_sidebar_width_minimum_is_independent_of_layout_opt_ins(cx: &mut TestAppContext) {
++    let project = init_test_project("/my-project", cx).await;
++    let (multi_workspace, cx) = cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    let sidebar = setup_sidebar(&multi_workspace, cx);
++    for (compact, in_agent_panel) in [(false, false), (false, true), (true, false), (true, true)] {
++        cx.update(|_window, cx| {
++            let content = serde_json::json!({"agent": {"threads_sidebar": {
++                "compact": compact, "in_agent_panel": in_agent_panel, "default_width": 300
++            }}}).to_string();
++            SettingsStore::update_global(cx, |store, cx| {
++                store.set_user_settings(&content, cx).expect("valid layout settings");
++            });
++        });
++        cx.run_until_parked();
++        sidebar.update_in(cx, |sidebar, _, cx| sidebar.set_width(Some(px(5.0)), cx));
++        assert_eq!(sidebar.read_with(cx, |sidebar, _| sidebar.width), px(100.0));
++        sidebar.update_in(cx, |sidebar, window, cx| {
++            sidebar.restore_serialized_state(r#"{"width":5,"width_set_by_user":true}"#, window, cx);
++        });
++        assert_eq!(sidebar.read_with(cx, |sidebar, _| sidebar.width), px(100.0));
++        assert!(sidebar.read_with(cx, |sidebar, _| sidebar.width_set_by_user));
++    }
++}
++
+ #[gpui::test]
+ async fn test_configured_width_is_clamped_into_range(cx: &mut TestAppContext) {
+     let project = init_test_project("/my-project", cx).await;

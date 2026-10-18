@@ -200,6 +200,33 @@ class ApplicationRegressionExtractorTests(unittest.TestCase):
             },
         )
 
+    def test_leading_configuration_attributes_preserve_new_test_selection(self):
+        diff = """diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
+--- a/crates/project/src/terminals.rs
++++ b/crates/project/src/terminals.rs
+@@ -0,0 +1,6 @@
++#[cfg(unix)]
++#[test]
++fn test_leading_cfg() {}
++#[cfg(feature = "test-support")]
++#[gpui::test]
++async fn configured_gpui(cx: &mut TestAppContext) {}
+"""
+        self.assertEqual(release.added_cases(diff),
+            {("project", "test_leading_cfg"), ("project", "configured_gpui")})
+
+    def test_configuration_attribute_only_change_selects_the_existing_test(self):
+        diff = """diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
+--- a/crates/project/src/terminals.rs
++++ b/crates/project/src/terminals.rs
+@@ -1,3 +1,3 @@
+-#[cfg(target_os = "linux")]
++#[cfg(unix)]
+ #[test]
+ fn test_existing_configuration() {}
+"""
+        self.assertEqual(release.added_cases(diff), {("project", "test_existing_configuration")})
+
     def test_manifest_accepts_rust_names_and_rejects_malformed_identities(self):
         self.assertEqual(
             release.manifest_cases({"test_cases": [["askpass", "preserves_reason"]]}),

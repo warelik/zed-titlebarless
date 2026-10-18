@@ -41,7 +41,7 @@ Popovers open upward from the status bar:
 
 Without any setting:
 
-- The threads sidebar minimum width is halved (200 → 100 px). The clamp also applies to `agent.threads_sidebar.default_width`, so its valid range now starts at 100.
+- The threads sidebar minimum width is halved (200 → 100 px). The clamp also applies to `agent.threads_sidebar.default_width`, so its valid range now starts at 100. This is intentional with `compact` and `in_agent_panel` disabled too; those switches control layout, not this independent width change.
 - Single-line editors (such as the threads sidebar search) reserve one em instead of two after the text.
 - A flat light theme, Mono Light, is bundled. It only appears in the theme picker (`"theme": "Mono Light"`); the default theme is unchanged.
 - Auto-update uses this repository's immutable releases. Same-version fixes use the native GitHub `release.id` without changing Zed's upstream version; SSH remoting still downloads the official remote server. Already-installed clients learn this comparison on a one-time install or their next ordinary higher-upstream-version update.
@@ -101,7 +101,7 @@ See [Known limitations](RELEASE_NOTES.md#known-limitations).
 - Keep one active candidate, its two review PRs and at most one coding task. Superseded review PRs are closed and their temporary heads retired only after their exact commits remain available through GitHub pull refs. Release identity includes the version, upstream, patch-set digest and exact application commit.
 - The preserved real-shpool regression uses the pinned official Apple Silicon shpool fixture in an isolated daemon, home and runtime directory. CI enables that case explicitly and fails if its fixture or activation is missing; it cannot count an early return as verified daemon behavior.
 - The five release assets are `Zed.dmg`, `latest.json`, `provenance.json`, `SHA256SUMS`, and the versioned debug-symbol archive. Same-version fixes advance the native GitHub release ID while preserving the official Zed version and SSH remote-server compatibility.
-- The release boundary rechecks both reviews, branch identity and verified artifacts immediately before and after publication. A failed post-publication check returns the candidate to draft, preserving its diagnostics and the previous working release. GitHub does not offer a transaction covering release, branch and review state; a concurrent invalidation can therefore cause brief visibility before withdrawal. This limitation is not an atomic-publication guarantee.
+- The release boundary rechecks both reviews, branch identity and verified artifacts immediately before and after publication. A failed post-publication check returns the candidate to draft through at most three PATCH/read-back attempts (each API call is bounded to 60 seconds), preserving its diagnostics and the previous working release. GitHub does not offer a transaction covering release, branch and review state; a concurrent invalidation can therefore cause brief visibility before withdrawal. This limitation is not an atomic-publication guarantee.
 - Publication is not live installation. This workflow does not restart an editor or remote session; installation and validation of a running version are separate steps.
 - [AGENTS.md](AGENTS.md) defines the maintenance, verification, recovery, and cleanup contract. The presence of a workflow does not by itself prove that the entire cycle is automated.
 
