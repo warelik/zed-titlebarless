@@ -1646,6 +1646,12 @@ impl AgentPanel {
             },
         );
 
+        // Metadata may finish reloading after this panel is created. Keep the
+        // in-panel restoration warning synchronized with reload and recovery.
+        if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+            cx.observe(&store, |_this, _store, cx| cx.notify()).detach();
+        }
+
         let _observe_project = None;
 
         let _settings_subscription = cx.observe_global::<SettingsStore>(|this, cx| {
@@ -7434,6 +7440,12 @@ impl AgentPanel {
 impl Render for AgentPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar_history = Self::sidebar_history(window, cx);
+        let terminal_load_error = workspace::threads_sidebar_in_agent_panel(cx)
+            .then(|| {
+                TerminalThreadMetadataStore::try_global(cx)
+                    .and_then(|store| store.read(cx).load_error().cloned())
+            })
+            .flatten();
         // WARNING: Changes to this element hierarchy can have
         // non-obvious implications to the layout of children.
         //
@@ -7489,6 +7501,15 @@ impl Render for AgentPanel {
                 }
             }))
             .child(self.render_toolbar(window, cx))
+            .when_some(terminal_load_error, |this, error| {
+                this.child(
+                    div()
+                        .id("terminal-metadata-load-error")
+                        .p_2()
+                        .flex_shrink_0()
+                        .child(Label::new(error).size(LabelSize::Small).color(Color::Warning)),
+                )
+            })
             .children(self.render_new_user_onboarding(window, cx))
             .when_some(sidebar_history.clone(), |parent, history| {
                 parent.child(div().flex_1().min_h_0().child(history))
