@@ -1291,6 +1291,8 @@ fn validate_fork_release(
     Ok(version)
 }
 
+const MAX_RELEASE_JSON_SIZE: u64 = 64 * 1024;
+
 async fn fetch_release_json<T: DeserializeOwned>(
     client: &HttpClientWithUrl,
     url: &str,
@@ -1298,8 +1300,18 @@ async fn fetch_release_json<T: DeserializeOwned>(
 ) -> Result<T> {
     let mut response = client.get(url, Default::default(), true).await?;
     let mut body = Vec::new();
-    response.body_mut().read_to_end(&mut body).await?;
+    response
+        .body_mut()
+        .take(MAX_RELEASE_JSON_SIZE + 1)
+        .read_to_end(&mut body)
+        .await?;
 
+    anyhow::ensure!(
+        body.len() <= MAX_RELEASE_JSON_SIZE as usize,
+        "{} exceeds the maximum size of {} bytes",
+        description,
+        MAX_RELEASE_JSON_SIZE,
+    );
     anyhow::ensure!(
         response.status().is_success(),
         "failed to fetch {}: {:?}",
@@ -2500,6 +2512,31 @@ mod tests {
         let path = path.unwrap();
         assert_eq!(path, tmp_dir.path().join("zed"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), "<fake-zed-update>");
+    }
+
+    #[gpui::test]
+    async fn test_fetch_release_json_rejects_oversized_response(cx: &mut TestAppContext) {
+        cx.background_executor.allow_parking();
+
+        let client = FakeHttpClient::create(|_req| async {
+            Ok(Response::builder()
+                .status(200)
+                .body(vec![b' '; MAX_RELEASE_JSON_SIZE as usize + 1].into())
+                .unwrap())
+        });
+
+        let error = fetch_release_json::<serde_json::Value>(
+            &client,
+            "https://test.example/latest.json",
+            "release manifest",
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "release manifest exceeds the maximum size of 65536 bytes"
+        );
     }
 
     #[gpui::test]
