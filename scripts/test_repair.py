@@ -34,7 +34,7 @@ def request(head=SEED, attempt=1, age=0):
 class RepairBoundaryTests(unittest.TestCase):
     def test_deferred_proposal_preserves_recovery_and_bounded_repair_paths(self):
         candidate, patchset = "7" * 40, "8" * 64
-        tag = f"build-1.24.2-{UPSTREAM[:12]}-{patchset[:12]}-{candidate[:12]}"
+        tag = f"build-1.24.2-{UPSTREAM[:12]}-{patchset[:12]}"
 
         for nonblocking, broken, expected_followup in (
             (False, False, False), (True, False, True), (False, True, False),

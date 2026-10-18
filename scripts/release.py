@@ -896,7 +896,7 @@ def prepare(app):
             or api(f"repos/{UPSTREAM}/commits/v{version}")["sha"] != upstream):
         raise ValueError("Patch series must preserve the exact supported upstream version")
     ensure_forward_release(repo, version, upstream)
-    release = f"build-{version}-{upstream[:12]}-{patchset[:12]}-{sha[:12]}"
+    release = f"build-{version}-{upstream[:12]}-{patchset[:12]}"
     base, head = f"review-base/{upstream}", f"review/{upstream}-{patchset}"
     output(sha=sha, version=version, release=release)
     existing = next((item for item in pages(f"repos/{repo}/releases")
@@ -972,7 +972,7 @@ def build_identity():
     if result["release_id"] >= 2 ** 64:
         raise ValueError("Release ID exceeds the updater's native identifier range")
     expected = (f"build-{result['version']}-{result['upstream_sha'][:12]}-"
-                f"{result['patchset_sha256'][:12]}-{result['candidate_sha'][:12]}")
+                f"{result['patchset_sha256'][:12]}")
     if os.environ["RELEASE_TAG"] != expected:
         raise ValueError("Release tag does not identify this upstream and patch set")
     return result
@@ -1128,7 +1128,7 @@ def validate_metadata(provenance, manifest, sums, expected, assets, tag):
                             provenance.get(key, "")):
             raise ValueError("Artifact provenance has no inspected Mach-O UUID")
     expected_tag = (f"build-{provenance['version']}-{provenance['upstream_sha'][:12]}-"
-                    f"{provenance['patchset_sha256'][:12]}-{provenance['candidate_sha'][:12]}")
+                    f"{provenance['patchset_sha256'][:12]}")
     if expected_tag != tag:
         raise ValueError("Artifact provenance does not identify the release tag")
     digests = {}
@@ -1175,7 +1175,7 @@ def asset_bytes(repo, asset):
     return data
 
 def verify_published_release(repo, release, sha, upstream, patchset, version):
-    tag = f"build-{version}-{upstream[:12]}-{patchset[:12]}-{sha[:12]}"
+    tag = f"build-{version}-{upstream[:12]}-{patchset[:12]}"
     if (release["draft"] or release["prerelease"] or release["tag_name"] != tag
             or release["target_commitish"] != sha):
         raise ValueError("Published release does not identify the reviewed source")
