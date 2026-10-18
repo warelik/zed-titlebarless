@@ -5093,7 +5093,7 @@ async fn test_timed_out_terminal_close_keeps_metadata_and_allows_retry(cx: &mut 
     cx.update(|_, cx| {
         TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx));
     });
-    save_thread_metadata_with_main_paths("blocking-thread", "Blocking Thread", closed_paths, main_paths,
+    save_thread_metadata_with_main_paths("blocking-thread", "Blocking Thread", closed_paths.clone(), main_paths.clone(),
                                          chrono::Utc::now(), cx);
     // Keep this a closed-workspace kill test, not an archive auto-load test.
     save_thread_metadata_with_main_paths("timeout-blocker", "Blocking Thread",
