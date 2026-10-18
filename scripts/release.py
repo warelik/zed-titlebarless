@@ -905,6 +905,7 @@ def check_policy(candidate):
             env.update(CI="true", PYTHONDONTWRITEBYTECODE="1")
             command = ["docker", "run", "--rm", "--read-only", "--network=none",
                        "--cap-drop=ALL", "--security-opt=no-new-privileges",
+                       "--pids-limit=256", "--cpus=2", "--memory=2g",
                        "--user", f"{os.getuid()}:{os.getgid()}", "--workdir", str(root)]
             for source in dict.fromkeys((ROOT.resolve(), candidate.resolve())):
                 command += ["--mount", f"type=bind,source={source},target={source},readonly"]

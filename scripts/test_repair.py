@@ -1337,6 +1337,8 @@ class AdoptionTests(unittest.TestCase):
             self.assertIn("--network=none", args)
             self.assertIn("--cap-drop=ALL", args)
             self.assertIn("--security-opt=no-new-privileges", args)
+            for limit in ("--pids-limit=256", "--cpus=2", "--memory=2g"):
+                self.assertIn(limit, args)
             mounts = [args[i + 1] for i, value in enumerate(args) if value == "--mount"]
             self.assertEqual(sum(m.endswith(",readonly") for m in mounts), 2)
             for name in ("HOME", "TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
