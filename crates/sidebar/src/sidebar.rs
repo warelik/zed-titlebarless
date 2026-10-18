@@ -5243,7 +5243,10 @@ impl Sidebar {
     ) -> Task<anyhow::Result<Entity<project::Project>>> {
         let multi_workspace = self.multi_workspace.clone();
         let connection_options = metadata.remote_connection.clone();
-        let paths = metadata.folder_paths().paths().to_vec();
+        #[cfg(any(test, feature = "test-support"))]
+        let inherited_fake = self.find_project_for_remote_connection(connection_options.as_ref(), cx)
+            .and_then(|project| project.read(cx).fake_shpool());
+        let paths = metadata.folder_paths().ordered_paths().cloned().collect::<Vec<_>>();
         cx.spawn_in(window, async move |_, cx| {
             let (modal_workspace, app_state) = gpui::AsyncApp::update(cx, |cx| {
                 let multi_workspace = multi_workspace.upgrade()
@@ -5274,6 +5277,12 @@ impl Sidebar {
                     None, project::LocalProjectFlags::default(), cx,
                 ),
             });
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(fake) = inherited_fake {
+                project.update(cx, |project, _| {
+                    if project.fake_shpool().is_none() { project.set_fake_shpool(fake); }
+                });
+            }
             // Load the saved roots so per-project terminal settings/environment
             // select the same daemon as terminal activation would.
             for path in paths {
@@ -5286,6 +5295,87 @@ impl Sidebar {
         })
     }
 
+    fn terminal_owners(
+        metadata: &TerminalThreadMetadata,
+        cx: &App,
+    ) -> Vec<(gpui::AnyWindowHandle, Entity<Workspace>, Entity<AgentPanel>)> {
+        let mut owners = Vec::new();
+        for handle in cx.windows() {
+            let Some(window) = handle.downcast::<MultiWorkspace>() else { continue };
+            let Ok(workspaces) = window.read_with(cx, |mw, _| mw.workspaces().cloned().collect::<Vec<_>>()) else { continue };
+            for workspace in workspaces {
+                let state = workspace.read(cx);
+                if !same_terminal_remote_connection(
+                    state.project().read(cx).remote_connection_options(cx).as_ref(),
+                    metadata.remote_connection.as_ref(),
+                ) { continue; }
+                let Some(panel) = state.panel::<AgentPanel>(cx) else { continue };
+                if panel.read(cx).has_terminal(metadata.terminal_id)
+                    || panel.read(cx).is_terminal_spawn_pending(metadata.terminal_id)
+                {
+                    owners.push((handle, workspace, panel));
+                }
+            }
+        }
+        owners
+    }
+
+    fn close_terminal_if_owned_elsewhere(
+        &mut self,
+        metadata: &TerminalThreadMetadata,
+        origin: gpui::WindowId,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((_, workspace, _)) = Self::terminal_owners(metadata, cx).into_iter()
+            .find(|(window, _, _)| window.window_id() != origin)
+        else { return false };
+        let project = workspace.read(cx).project().clone();
+        let metadata = metadata.clone();
+        let id = metadata.terminal_id;
+        cx.spawn(async move |this, cx| {
+            if !cx.update(|cx| begin_terminal_close(id, cx)) {
+                return;
+            }
+            let result = async {
+                // The global intent blocks new restorations. Every startup
+                // already in flight must settle before the shared session ends.
+                let owners = cx.update(|cx| Self::terminal_owners(&metadata, cx));
+                let mut may_exist = owners.is_empty();
+                for (window, _, panel) in &owners {
+                    let pending = panel.update(cx, |panel, cx| {
+                        panel.wait_for_terminal_spawn(id, window.window_id(), cx)
+                    });
+                    may_exist |= pending.await?;
+                }
+                if may_exist {
+                    project.update(cx, |project, cx| {
+                        project.kill_persistent_terminal_session(id.session_name(), cx)
+                    }).await?;
+                }
+                cx.update(|cx| {
+                    // Re-read after waiting: a workspace may have moved to a
+                    // different window. Remove only this terminal's views, not
+                    // their workspaces, buffers or worktree directories.
+                    for (window, _, panel) in Self::terminal_owners(&metadata, cx) {
+                        window.update(cx, |_, window, cx| {
+                            panel.update(cx, |panel, cx| {
+                                panel.close_terminal_after_session_kill(id, false, window, cx);
+                            });
+                        }).log_err();
+                    }
+                    complete_terminal_close_metadata(id, true, cx);
+                });
+                anyhow::Ok(())
+            }.await;
+            if let Err(error) = result {
+                cx.update(|cx| complete_terminal_close_metadata(id, false, cx));
+                log::error!("failed to close terminal {id} across windows: {error:#}");
+                this.update(cx, |this, cx| this.show_terminal_close_error(id, cx)).ok();
+            }
+        }).detach();
+        true
+    }
+
     fn finish_close_terminal(
         &mut self,
         metadata: &TerminalThreadMetadata,
@@ -5293,10 +5383,13 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.close_terminal_if_owned_elsewhere(metadata, window.window_handle().window_id(), cx) {
+            return;
+        }
         let project = match workspace {
             ThreadEntryWorkspace::Open(workspace) => Some(workspace.read(cx).project().clone()),
             ThreadEntryWorkspace::Closed { .. } => {
-                self.find_project_for_remote_connection(metadata.remote_connection.as_ref(), cx)
+                self.find_project_for_terminal_context(metadata, cx)
             }
         };
         if let Some(project) = project {
@@ -5316,6 +5409,9 @@ impl Sidebar {
                 }
             };
             this.update_in(cx, |this, window, cx| {
+                if this.close_terminal_if_owned_elsewhere(&metadata, window.window_handle().window_id(), cx) {
+                    return;
+                }
                 // Re-read live state after connection setup: activation may have
                 // started the same terminal while authentication was pending.
                 let live_workspace = this.find_workspace_in_current_window(cx, |workspace, cx| {
@@ -5419,6 +5515,9 @@ impl Sidebar {
                 }) {
                     return anyhow::Ok(());
                 }
+                if this.update(cx, |this, cx| {
+                    this.close_terminal_if_owned_elsewhere(&metadata, close_window_id, cx)
+                })? { return anyhow::Ok(()); }
                 if !gpui::AsyncApp::update(cx, |cx| begin_terminal_close(terminal_id, cx)) {
                     return anyhow::Ok(());
                 }
@@ -5508,6 +5607,9 @@ impl Sidebar {
                     }) {
                         return Ok(false);
                     }
+                    if sidebar.update(cx, |this, cx| {
+                        this.close_terminal_if_owned_elsewhere(&metadata, close_window_id, cx)
+                    })? { return Ok(false); }
                     if !gpui::AsyncApp::update(cx, |cx| begin_terminal_close(terminal_id, cx)) {
                         return Ok(false);
                     }
@@ -5647,6 +5749,20 @@ impl Sidebar {
                 );
             },
         );
+    }
+
+    fn find_project_for_terminal_context(
+        &self,
+        metadata: &TerminalThreadMetadata,
+        cx: &App,
+    ) -> Option<Entity<project::Project>> {
+        self.find_workspace_in_current_window(cx, |workspace, cx| {
+            let project = workspace.read(cx).project().read(cx);
+            same_terminal_remote_connection(
+                project.remote_connection_options(cx).as_ref(), metadata.remote_connection.as_ref(),
+            ) && project.worktree_paths(cx).folder_path_list().ordered_paths()
+                .eq(metadata.folder_paths().ordered_paths())
+        }).map(|workspace| workspace.read(cx).project().clone())
     }
 
     fn find_project_for_remote_connection(
