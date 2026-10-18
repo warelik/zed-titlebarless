@@ -66,7 +66,7 @@ jobs:
       # The executable bootstrap gate above remains immutable and independent.
       - uses: actions/checkout@v4
         with:
-          ref: 1d69e9e4c67debd594e7327f2ae05926689eb306
+          ref: 6fc742213574cd532cdaaf5e8b5def384a49dd68
           path: baseline
           persist-credentials: false
       - name: Require Both Complete Exact-Source Reviews Before Any Tests

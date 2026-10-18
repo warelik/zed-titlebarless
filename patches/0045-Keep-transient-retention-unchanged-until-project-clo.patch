@@ -1,0 +1,90 @@
+From 9269c148253538f781ae29bfab7e67c8c2d06f5e Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 19:37:53 +0000
+Subject: [PATCH] Keep transient retention unchanged until project close
+ consent
+
+Include the active workspace directly in the removal set instead of pinning it before consent. Cancelled closes preserve transient state while a concurrent explicit user retention remains intact.
+---
+ crates/workspace/src/multi_workspace.rs       | 14 +++----
+ crates/workspace/src/multi_workspace_tests.rs | 39 +++++++++++++++++++
+ 2 files changed, 44 insertions(+), 9 deletions(-)
+
+diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
+index 53500f0..4e34a33 100644
+--- a/crates/workspace/src/multi_workspace.rs
++++ b/crates/workspace/src/multi_workspace.rs
+@@ -1032,20 +1032,16 @@ impl MultiWorkspace {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) -> Task<Result<bool>> {
+-        // The active workspace can remain unpinned while the sidebar is
+-        // closed. Pin it first: this puts it in the removal set below, and
+-        // keeps `activate`'s retention bookkeeping stable while switching
+-        // to the replacement. The project row stays until close consent.
++        // Include the displayed workspace without changing retention before
++        // consent. A cancelled close must not turn a transient view persistent.
+         let active_workspace = self.workspace().clone();
++        let mut workspaces = self.workspaces_for_project_group(group_key, cx);
+         if active_workspace.read(cx).project_group_key(cx) == *group_key
+-            && !self.is_workspace_retained(&active_workspace)
++            && !workspaces.contains(&active_workspace)
+         {
+-            let index = self.hold(active_workspace, window, cx);
+-            self.pin(index, group_key.clone(), cx);
++            workspaces.push(active_workspace);
+         }
+ 
+-        let workspaces = self.workspaces_for_project_group(group_key, cx);
+-
+         if workspaces.is_empty() {
+             let previous_len = self.project_groups.len();
+             self.project_groups.retain(|group| group.key != *group_key);
+diff --git a/crates/workspace/src/multi_workspace_tests.rs b/crates/workspace/src/multi_workspace_tests.rs
+index 17f3adc..223e118 100644
+--- a/crates/workspace/src/multi_workspace_tests.rs
++++ b/crates/workspace/src/multi_workspace_tests.rs
+@@ -2153,3 +2153,42 @@ async fn test_remove_unloaded_project_group_still_removes_its_row(cx: &mut TestA
+     assert!(!task.await.unwrap(), "no loaded workspace was detached");
+     assert!(multi_workspace.read_with(cx, |mw, _| mw.group_state_by_key(&key).is_none()));
+ }
++
++
++#[gpui::test]
++async fn test_cancel_project_close_preserves_transient_retention(cx: &mut TestAppContext) {
++    init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    fs.insert_tree("/transient", json!({"file.txt": ""})).await;
++    let project = Project::test(fs, ["/transient".as_ref()], cx).await;
++    let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
++    let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
++        MultiWorkspace::test_new(project, window, cx)
++    });
++    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
++    let dirty = cx.new(|cx| TestItem::new(cx).with_dirty(true));
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.add_item_to_active_pane(Box::new(dirty), None, true, window, cx);
++    });
++    assert!(!multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&workspace)));
++    let before = multi_workspace.read_with(cx, |mw, _| mw.project_group_keys());
++    let task = multi_workspace.update_in(cx, |mw, window, cx| mw.remove_project_group(&key, window, cx));
++    cx.run_until_parked();
++    assert!(cx.has_pending_prompt());
++    assert!(!multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&workspace)));
++    cx.simulate_prompt_answer("Cancel");
++    cx.run_until_parked();
++    assert!(!task.await.unwrap());
++    assert!(!multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&workspace)));
++    assert_eq!(multi_workspace.read_with(cx, |mw, _| mw.project_group_keys()), before);
++
++    // An explicit user retention made while a second close is pending survives.
++    let task = multi_workspace.update_in(cx, |mw, window, cx| mw.remove_project_group(&key, window, cx));
++    cx.run_until_parked();
++    assert!(cx.has_pending_prompt());
++    multi_workspace.update(cx, |mw, cx| mw.retain_active_workspace(cx));
++    cx.simulate_prompt_answer("Cancel");
++    cx.run_until_parked();
++    assert!(!task.await.unwrap());
++    assert!(multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&workspace)));
++}

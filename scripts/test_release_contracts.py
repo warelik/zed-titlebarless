@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import release
 
@@ -1119,6 +1119,54 @@ class DraftPublicationFailureTests(unittest.TestCase):
         )
 
 
+class PublicationBoundaryTests(unittest.TestCase):
+    def test_failed_prepublication_gate_never_exposes_the_draft(self):
+        with patch.object(release, "api") as api:
+            with self.assertRaisesRegex(ValueError, "changed review"):
+                release.publish_checked_draft("owner/fork", 42, "notes",
+                    lambda published: (_ for _ in ()).throw(ValueError("changed review")))
+        api.assert_not_called()
+
+    def test_postpublication_invalidation_withdraws_the_candidate(self):
+        calls = []
+        phases = []
+        def api(path, *, method="GET", data=None):
+            calls.append((path, method, data))
+            return {"draft": True}
+        def validate(published):
+            phases.append(published)
+            if published:
+                raise ValueError("branch advanced during publication")
+        with patch.object(release, "api", side_effect=api):
+            with self.assertRaisesRegex(ValueError, "branch advanced"):
+                release.publish_checked_draft("owner/fork", 42, "notes", validate)
+        self.assertEqual(phases, [False, True])
+        self.assertEqual([data["draft"] for _, method, data in calls if method == "PATCH"],
+                         [False, True])
+        self.assertTrue(all(path.endswith("/releases/42") for path, _, _ in calls))
+
+    def test_successful_publication_passes_both_boundary_checks(self):
+        validate = MagicMock()
+        with patch.object(release, "api") as api:
+            release.publish_checked_draft("owner/fork", 42, "notes", validate)
+        self.assertEqual([call.args for call in validate.call_args_list], [(False,), (True,)])
+        self.assertEqual(api.call_count, 1)
+        self.assertFalse(api.call_args.kwargs["data"]["draft"])
+
+    def test_ambiguous_publish_error_also_withdraws_the_candidate(self):
+        calls = []
+        def api(path, *, method="GET", data=None):
+            calls.append((method, data))
+            if method == "PATCH" and data["draft"] is False:
+                raise RuntimeError("response lost")
+            return {"draft": True}
+        with patch.object(release, "api", side_effect=api):
+            with self.assertRaisesRegex(RuntimeError, "response lost"):
+                release.publish_checked_draft("owner/fork", 42, "notes", lambda published: None)
+        self.assertEqual([data["draft"] for method, data in calls if method == "PATCH"],
+                         [False, True])
+
+
 class RustRegressionRunnerTests(unittest.TestCase):
     def assert_isolated(self, env):
         self.assertFalse(
@@ -1183,6 +1231,7 @@ class RustRegressionRunnerTests(unittest.TestCase):
         real_shpool_case=False,
         result_output="test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out",
         result_code=0,
+        runtime_timeout=False,
     ):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1274,6 +1323,8 @@ class RustRegressionRunnerTests(unittest.TestCase):
                 if args[0] == "git":
                     return SimpleNamespace(returncode=0, stdout="")
                 test_runs.append((args, env.copy()))
+                if runtime_timeout:
+                    raise subprocess.TimeoutExpired(args, 60, output=result_output)
                 if result_code and check:
                     raise subprocess.CalledProcessError(result_code, args, output=result_output)
                 return SimpleNamespace(returncode=result_code, stdout=result_output)
@@ -1348,6 +1399,51 @@ class RustRegressionRunnerTests(unittest.TestCase):
         summary = captured.getvalue().split("Complete required Rust regression failure list:")[1]
         self.assertTrue(all(name in summary for name in expected))
         self.assertNotIn("Passed all", captured.getvalue())
+
+    def test_timed_out_case_does_not_prevent_later_regressions(self):
+        captured = io.StringIO()
+        with patch("sys.stdout", captured), self.assertRaises(subprocess.TimeoutExpired):
+            self.exercise(runtime_timeout=True, result_output="last output before hang\n")
+        self.assertEqual(len(self.last_test_runs), 4)
+        summary = captured.getvalue().split("Complete required Rust regression failure list:")[1]
+        self.assertTrue(all(command[2] in summary for command, _ in self.last_test_runs))
+        self.assertNotIn("Passed all", captured.getvalue())
+
+    def test_process_case_preserves_exit_status_and_captured_output(self):
+        for code in [0, 1]:
+            with self.subTest(code=code):
+                process = MagicMock()
+                process.__enter__.return_value = process
+                process.returncode = code
+                process.communicate.return_value = ("test output", None)
+                with patch.object(release.subprocess, "Popen", return_value=process):
+                    if code:
+                        with self.assertRaises(subprocess.CalledProcessError) as raised:
+                            release.run_rust_case(["test"], cwd=Path("/app"), env={}, check=True,
+                                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                        self.assertEqual(raised.exception.returncode, code)
+                        self.assertEqual(raised.exception.stdout, "test output")
+                    else:
+                        result = release.run_rust_case(["test"], cwd=Path("/app"), env={}, check=True,
+                            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                        self.assertEqual(result.stdout, "test output")
+                        self.assertEqual(result.returncode, 0)
+
+    def test_case_timeout_kills_the_process_group_and_preserves_output(self):
+        process = MagicMock()
+        process.pid = 43210
+        process.communicate.side_effect = [subprocess.TimeoutExpired(["test"], 60), ("partial output", None)]
+        process.__enter__.return_value = process
+        with patch.object(release.subprocess, "Popen", return_value=process) as spawn, \
+                patch.object(release.os, "killpg") as kill:
+            with self.assertRaises(subprocess.TimeoutExpired) as raised:
+                release.run_rust_case(["test"], cwd=Path("/app"), env={}, check=True,
+                                      text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.assertEqual(raised.exception.stdout, "partial output")
+        self.assertTrue(spawn.call_args.kwargs["start_new_session"])
+        kill.assert_called_once_with(43210, release.signal.SIGKILL)
+        self.assertEqual(process.communicate.call_args_list[0].kwargs["timeout"], 60)
+        self.assertEqual(process.communicate.call_args_list[1].kwargs["timeout"], 5)
 
     def test_missing_package_case_and_out_of_source_binary_fail_closed(self):
         with self.assertRaisesRegex(ValueError, "package is missing"):

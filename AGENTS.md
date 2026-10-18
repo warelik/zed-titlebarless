@@ -53,7 +53,9 @@ release maintenance.
   tests once in the final validation sequence, then build and inspect that same
   candidate once, then publish its verified artifacts. Collect all selected runtime
   regression failures in that final attempt before reporting the complete batch;
-  any required failure blocks the bundle and publication. Never rebuild just because
+  any required failure blocks the bundle and publication. Bound individual test
+  processes and their child processes so one hang cannot hide the remaining cases.
+  Never rebuild just because
   a repair was adopted or a callback/schedule repeated. Reuse verified artifacts
   only when their complete source identity matches.
 - In that final sequence, check proposed release policy in the credential-free

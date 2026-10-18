@@ -10,6 +10,7 @@ from pathlib import Path
 import plistlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -1658,6 +1659,25 @@ def ensure_forward_release(repo, version, upstream, *, release_id=None):
             or (current_version == old_version and upstream != previous_upstream)):
         raise ValueError("Refusing an older stable version or a retagged same-version source")
 
+def publish_checked_draft(repo, release_id, notes, validate):
+    # GitHub has no transaction spanning release publication and PR/ref state.
+    # Check at the boundary, then compensate any failed post-publication check.
+    validate(False)
+    try:
+        api(f"repos/{repo}/releases/{release_id}", method="PATCH",
+            data={"body": notes, "draft": False, "make_latest": "true"})
+        validate(True)
+    except Exception:
+        # Also withdraw after an ambiguous PATCH error: the server may have
+        # applied the request even when its response did not reach the runner.
+        api(f"repos/{repo}/releases/{release_id}", method="PATCH",
+            data={"draft": True, "make_latest": "false"})
+        withdrawn = api(f"repos/{repo}/releases/{release_id}")
+        if not withdrawn.get("draft"):
+            raise ValueError("Publication failed and GitHub did not withdraw the candidate")
+        raise
+
+
 def publish(directory):
     identity = build_identity()
     repo, config = identity["repository"], identity["config_sha"]
@@ -1673,6 +1693,8 @@ def publish(directory):
         if not ready:
             raise ValueError(reason)
         minor = bool(minor_findings(repo, int(os.environ["CANDIDATE_PR"]), sha))
+        if minor:
+            raise ValueError("Published candidate now has unresolved review findings")
         close_published_reviews(repo, sha, upstream, f"review/{upstream}-{patchset}")
         close_recovered_repair(repo, config, has_minor=minor,
                                expected_head=os.environ.get("REPAIR_HEAD"))
@@ -1736,11 +1758,21 @@ def publish(directory):
         "matching symbols passed the preserved regressions and artifact inspection. "
         "No running editor or remote session is restarted by this workflow.\n\n"
         + (ROOT / "RELEASE_NOTES.md").read_text())
-    api(f"repos/{repo}/releases/{identity['release_id']}", method="PATCH",
-        data={"body": notes, "draft": False, "make_latest": "true"})
-    published = api(f"repos/{repo}/releases/{identity['release_id']}")
-    verify_published_release(repo, published, sha, upstream, patchset, version)
-    minor = bool(minor_findings(repo, int(os.environ["CANDIDATE_PR"]), sha))
+    def validate_boundary(published):
+        if published:
+            current = api(f"repos/{repo}/releases/{identity['release_id']}")
+            verify_published_release(repo, current, sha, upstream, patchset, version)
+        ready, reason = check_review(repo, int(os.environ["CANDIDATE_PR"]), sha, upstream)
+        if not ready:
+            raise ValueError(f"Publication review was invalidated: {reason}")
+        check_delta_for_publication(repo, config)
+        if minor_findings(repo, int(os.environ["CANDIDATE_PR"]), sha):
+            raise ValueError("Publication full-project review has unresolved findings")
+        if api(f"repos/{repo}/commits/downstream")["sha"] != config:
+            raise ValueError("Publication configuration was invalidated")
+
+    publish_checked_draft(repo, identity["release_id"], notes, validate_boundary)
+    minor = False  # Both review scopes were checked at the publication boundary.
     close_published_reviews(repo, sha, upstream, f"review/{upstream}-{patchset}")
     close_recovered_repair(repo, config, has_minor=minor,
                            expected_head=os.environ.get("REPAIR_HEAD"))
@@ -1980,6 +2012,33 @@ def capture(args, *, cwd, env):
         print(error.stdout or "", end="", flush=True)
         raise
 
+# The selected upstream nextest default terminates ordinary cases after 60s.
+# This is a runtime resource limit, not a compiler/profile override.
+RUST_CASE_TIMEOUT_SECONDS = 60
+
+
+def run_rust_case(args, *, cwd, env, check, text, stdout, stderr):
+    with subprocess.Popen(args, cwd=cwd, env=env, text=text, stdout=stdout,
+                          stderr=stderr, start_new_session=True) as process:
+        try:
+            output, _ = process.communicate(timeout=RUST_CASE_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as error:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                output, _ = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired as drain_error:
+                output = drain_error.output or error.output or ""
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", errors="replace")
+            raise subprocess.TimeoutExpired(args, RUST_CASE_TIMEOUT_SECONDS, output=output)
+        if check and process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, args, output=output)
+        return subprocess.CompletedProcess(args, process.returncode, stdout=output)
+
+
 def run_regressions(app, manifest, upstream, candidate):
     if not all(re.fullmatch(r"[0-9a-f]{40}", value) for value in (upstream, candidate)):
         raise ValueError("Rust regressions require exact source commits")
@@ -2044,10 +2103,10 @@ def run_regressions(app, manifest, upstream, candidate):
                               if name.rsplit("::", 1)[-1] == "test_isolated_shpool_daemon_probe_and_kill"
                               else {})
             try:
-                result = subprocess.run([str(binary), "--exact", name, "--nocapture"],
+                result = run_rust_case([str(binary), "--exact", name, "--nocapture"],
                                         cwd=app, env=test_env, check=True, text=True,
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            except subprocess.CalledProcessError as error:
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
                 print(error.stdout or "", end="", flush=True)
                 failures.append((name, error))
                 continue
