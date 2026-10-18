@@ -1113,6 +1113,8 @@ mod tests {
                 pending_terminal_ops_tx,
                 _db_operations_task: Task::ready(()),
                 deleted_terminal_ids: HashSet::default(),
+                closing_terminal_ids: HashSet::default(),
+                intentionally_closed_terminal_ids: HashSet::default(),
             })
         });
         let _held_operations_receiver = pending_terminal_ops_rx;
