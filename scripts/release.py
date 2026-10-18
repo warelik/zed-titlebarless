@@ -273,23 +273,71 @@ def delta_review(repo, config, application, *, allow_closed=False):
     ready, reason = check_review(repo, pr, review_sha, base, allow_closed=allow_closed)
     return pr, base, review_sha, ready, reason
 
+def unspent_heavy_attempt(repo, sha, body):
+    """Return the old configuration only when native CI proves macOS never ran."""
+    configuration = re.search(
+        rf"Final validation and single build of `{re.escape(sha)}` / `([0-9a-f]{{40}})`", body)
+    run = re.search(rf"https://github\.com/{re.escape(repo)}/actions/runs/([1-9][0-9]*)", body)
+    revision = re.search(r"<!-- zed-final-workflow:([0-9a-f]{40}) -->", body)
+    if not configuration or not run:
+        return None
+    expected_revision = revision[1] if revision else configuration[1]
+    try:
+        info = api(f"repos/{repo}/actions/runs/{run[1]}")
+        # For pull_request_target GitHub reports the PR head in head_sha,
+        # while GITHUB_SHA is the downstream workflow/base revision. The
+        # authenticated receipt records that execution revision separately.
+        pull_target = (revision is not None and info.get("event") == "pull_request_target"
+                       and (info.get("head_repository") or {}).get("full_name") == repo
+                       and info.get("head_branch", "").startswith("repair/"))
+        if (info.get("status") != "completed" or info.get("conclusion") != "failure"
+                or (info.get("head_sha") != expected_revision and not pull_target)
+                or info.get("path", "").split("@", 1)[0] != ".github/workflows/release.yml"):
+            return None
+        record = api(f"repos/{repo}/actions/runs/{run[1]}/jobs?per_page=100")
+        jobs = record.get("jobs", [])
+        macos = [job for job in jobs if job.get("name") == "Test, Build And Inspect One macOS Application"]
+        if (record.get("total_count", 101) > 100 or len(macos) != 1
+                or macos[0].get("status") != "completed"
+                or macos[0].get("conclusion") != "skipped" or macos[0].get("steps")):
+            return None
+    except (subprocess.CalledProcessError, KeyError, TypeError, ValueError):
+        return None
+    return configuration[1]
+
 def final_attempt(repo, pr, sha, config, *, policy_only=False):
-    """One final validation/build sequence; callbacks cannot spend it again."""
-    identity = f"policy-{config}" if policy_only else sha
+    """Deduplicate complete candidates; never repeat an app's started heavy pass."""
+    identity = f"policy-{config}" if policy_only else f"{sha}:{config}"
     marker = f"<!-- zed-final:{identity} -->"
+    application_marker = f"<!-- zed-final:{sha} -->"
     comments = pages(f"repos/{repo}/issues/{pr}/comments")
     for item in comments:
         user = item.get("user") or {}
-        if (marker in (item.get("body") or "")
-                and user.get("login") in {repo.split('/')[0], "github-actions[bot]"}):
-            output(final_failed=True)
-            raise ValueError("Final validation was already started for this frozen candidate; "
-                             "inspect its recorded run and reuse its artifacts, do not rebuild")
+        body = item.get("body") or ""
+        if user.get("login") not in {repo.split('/')[0], "github-actions[bot]"}:
+            continue
+        if policy_only:
+            if marker not in body:
+                continue
+            output(final_failed=False)
+        else:
+            if application_marker not in body and not re.search(
+                    rf"<!-- zed-final:{re.escape(sha)}:[0-9a-f]{{40}} -->", body):
+                continue
+            old_configuration = unspent_heavy_attempt(repo, sha, body)
+            if old_configuration and old_configuration != config:
+                continue
+            output(final_failed=old_configuration is None)
+        raise ValueError("Final validation was already started for this frozen candidate; "
+                         "inspect its recorded run and reuse its artifacts, do not rebuild")
+    revision = os.environ.get("GITHUB_SHA", config)
     api(f"repos/{repo}/issues/{pr}/comments", method="POST", data={
         "body": (f"Final validation and single build of `{sha}` / `{config}`: "
                  f"https://github.com/{repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}. "
                  "Both reviews and the full repair batch are complete. A failure blocks "
-                 "publication and automatic expensive retries.\n\n" + marker)})
+                 "publication and automatic expensive retries.\n\n" + marker
+                 + ("\n" + application_marker if not policy_only else "")
+                 + f"\n<!-- zed-final-workflow:{revision} -->")})
 
 def verify_adopted_configuration(repo, reviewed, adopted):
     """Only context removal and additive regression discovery may change at adoption."""

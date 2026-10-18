@@ -128,6 +128,71 @@ class BatchedReviewTests(unittest.TestCase):
         api.assert_not_called()
         self.assertTrue(output.call_args.kwargs["final_failed"])
 
+    def final_receipt_fixture(self, *, macos="skipped", revision_matches=True, pull_target=False):
+        sha, old_config, revision = "c" * 40, "a" * 40, "d" * 40
+        receipt = {"body": f"Final validation and single build of `{sha}` / `{old_config}`: "
+                           "https://github.com/maintainer/zed-fork/actions/runs/123.\n"
+                           f"<!-- zed-final:{sha}:{old_config} -->\n"
+                           f"<!-- zed-final:{sha} -->\n<!-- zed-final-workflow:{revision} -->",
+                   "user": {"login": "github-actions[bot]"}}
+        created = []
+
+        def api(path, **kwargs):
+            if kwargs.get("method") == "POST":
+                created.append(kwargs["data"]["body"])
+                return {"id": 1}
+            if path.endswith("/runs/123"):
+                return {"status": "completed", "conclusion": "failure",
+                        "head_sha": "f" * 40 if pull_target else revision if revision_matches else "e" * 40,
+                        "event": "pull_request_target" if pull_target else "workflow_dispatch",
+                        "head_branch": "repair/checked-policy" if pull_target else "downstream",
+                        "head_repository": {"full_name": "maintainer/zed-fork"},
+                        "path": ".github/workflows/release.yml"}
+            if path.endswith("/jobs?per_page=100"):
+                return {"total_count": 1, "jobs": [{
+                    "name": "Test, Build And Inspect One macOS Application",
+                    "status": "completed", "conclusion": macos,
+                    "steps": [] if macos == "skipped" else [{"name": "Compile"}],
+                }]}
+            raise AssertionError(path)
+
+        return receipt, api, created
+
+    def test_corrected_policy_can_validate_same_app_only_before_native_macos_started(self):
+        sha, config = "c" * 40, "b" * 40
+        for pull_target in (False, True):
+            with self.subTest(pull_target=pull_target):
+                receipt, api, created = self.final_receipt_fixture(pull_target=pull_target)
+                with (patch.dict(os.environ, {"GITHUB_RUN_ID": "456", "GITHUB_SHA": config}, clear=True),
+                      patch.object(release, "pages", return_value=[receipt]),
+                      patch.object(release, "api", side_effect=api)):
+                    release.final_attempt("maintainer/zed-fork", 1, sha, config)
+                self.assertEqual(len(created), 1)
+                self.assertIn(f"<!-- zed-final:{sha}:{config} -->", created[0])
+                self.assertIn(f"<!-- zed-final:{sha} -->", created[0])
+
+    def test_new_configuration_cannot_refund_started_or_unverifiable_heavy_attempt(self):
+        for macos, matching in [("failure", True), ("success", True), ("skipped", False)]:
+            with self.subTest(macos=macos, matching=matching):
+                receipt, api, created = self.final_receipt_fixture(macos=macos, revision_matches=matching)
+                with (patch.object(release, "pages", return_value=[receipt]),
+                      patch.object(release, "api", side_effect=api),
+                      patch.object(release, "output") as output,
+                      self.assertRaisesRegex(ValueError, "already started")):
+                    release.final_attempt("maintainer/zed-fork", 1, "c" * 40, "b" * 40)
+                self.assertEqual(created, [])
+                self.assertTrue(output.call_args.kwargs["final_failed"])
+
+    def test_same_candidate_callback_cannot_repeat_failed_light_validation(self):
+        receipt, api, created = self.final_receipt_fixture()
+        with (patch.object(release, "pages", return_value=[receipt]),
+              patch.object(release, "api", side_effect=api),
+              patch.object(release, "output") as output,
+              self.assertRaisesRegex(ValueError, "already started")):
+            release.final_attempt("maintainer/zed-fork", 1, "c" * 40, "a" * 40)
+        self.assertEqual(created, [])
+        self.assertFalse(output.call_args.kwargs["final_failed"], "no heavy budget was spent")
+
     def test_fresh_full_request_cannot_reuse_an_older_same_source_completion(self):
         sha, upstream = "c" * 40, "b" * 40
         owner = {"login": "maintainer", "type": "User"}
@@ -263,7 +328,8 @@ class BatchedReviewTests(unittest.TestCase):
         policy = workflow.split("\n  policy-check:\n", 1)[1].split("\n  test:\n", 1)[0]
         self.assertIn("always() && needs.prepare.result == 'success'", policy)
         repair = workflow.split("\n  repair:\n", 1)[1]
-        self.assertIn("ref: ${{ needs.activate-policy.outputs.policy_ref || needs.prepare.outputs.trusted_policy", repair)
+        self.assertIn("ref: ${{ needs.activate-policy.outputs.policy_ref ||", repair)
+        self.assertIn("needs.bootstrap-policy.result == 'failure' && 'dbf40ff4bd626082e0ad3d9873c5b6ad5fa7f941'", repair)
         self.assertIn("github.ref == 'refs/heads/downstream'", repair)
         self.assertIn("(vars.ZED_TRUSTED_POLICY != '' || needs.bootstrap-policy.result == 'success')", repair)
 

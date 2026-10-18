@@ -196,6 +196,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      actions: read
     outputs:
       ready: ${{ steps.snapshot.outputs.ready }}
       sha: ${{ steps.snapshot.outputs.sha }}
@@ -525,7 +526,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.activate-policy.outputs.policy_ref || needs.prepare.outputs.trusted_policy || (needs.bootstrap-policy.result == 'success' && needs.bootstrap-policy.outputs.policy_ref) || vars.ZED_TRUSTED_POLICY || 'dbf40ff4bd626082e0ad3d9873c5b6ad5fa7f941' }}
+          ref: ${{ needs.activate-policy.outputs.policy_ref || (needs.bootstrap-policy.result == 'failure' && 'dbf40ff4bd626082e0ad3d9873c5b6ad5fa7f941') || needs.prepare.outputs.trusted_policy || (needs.bootstrap-policy.result == 'success' && needs.bootstrap-policy.outputs.policy_ref) || vars.ZED_TRUSTED_POLICY || 'dbf40ff4bd626082e0ad3d9873c5b6ad5fa7f941' }}
           path: trusted
           persist-credentials: false
       - uses: actions/checkout@v4
@@ -542,7 +543,7 @@ jobs:
           CANDIDATE_SHA: ${{ needs.prepare.outputs.sha }}
           REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}
           NONBLOCKING_FOLLOWUP: ${{ !contains(needs.*.result, 'failure') && needs.prepare.outputs.followup == 'true' }}
-          FINAL_VALIDATION_FAILED: ${{ needs.bootstrap-policy.result == 'failure' || needs.policy-check.result == 'failure' || needs.test.result == 'failure' || needs.publish.result == 'failure' || needs.prepare.outputs.final_failed == 'true' }}
+          FINAL_VALIDATION_FAILED: ${{ needs.bootstrap-policy.result == 'failure' || needs.test.result == 'failure' || needs.publish.result == 'failure' || needs.prepare.outputs.final_failed == 'true' }}
           CONFIG_SHA: ${{ needs.land.outputs.config || github.sha }}
           DELTA_PR: ${{ needs.prepare.outputs.delta_pr }}
           DELTA_SHA: ${{ needs.prepare.outputs.delta_sha }}

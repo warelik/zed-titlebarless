@@ -92,6 +92,10 @@ release maintenance.
    For changed Rust fields or APIs, inspect every constructor, struct literal and
    caller, including test fixtures and feature/target-gated code, before the final
    compilation. Keep existing regression fixtures and their assertions intact.
+   A policy correction with unchanged application code may validate again only
+   when native run metadata proves the earlier macOS job was skipped. A changed
+   configuration or adoption SHA must never refund a started heavy application
+   attempt; callbacks of the same complete candidate remain deduplicated.
    Upstream contribution procedures requiring a README banner and manual author
    confirmation do not apply to this downstream cycle. Do not copy those banners
    into patches: independent exact-SHA Codex review is the required review gate.
