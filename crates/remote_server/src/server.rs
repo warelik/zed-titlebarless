@@ -588,6 +588,7 @@ pub fn execute_run(
             // we are running outside gpui
             #[allow(clippy::disallowed_methods)]
             |duration| FutureExt::map(Timer::after(duration), |_| ()),
+            paths::logs_dir().clone(),
         )))
     } else {
         crashes::force_backtrace();
@@ -863,6 +864,7 @@ pub(crate) fn execute_proxy(
             // we are running outside gpui
             #[allow(clippy::disallowed_methods)]
             |duration| FutureExt::map(Timer::after(duration), |_| ()),
+            paths::logs_dir().clone(),
         ))
         .detach();
     };
