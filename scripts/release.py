@@ -1216,8 +1216,11 @@ def prepare(app):
     if (patched["package"]["version"] != version
             or api(f"repos/{UPSTREAM}/commits/v{version}")["sha"] != upstream):
         raise ValueError("Patch series must preserve the exact supported upstream version")
-    # Recipe porting is ordinary machine work, before spending a final attempt.
-    verify_upstream_recipes(app, upstream)
+    # The checked controller may validate its own recipe early. A proposed policy
+    # must first pass its sandbox; its checked Linux activation then validates the
+    # recipe before macOS. Never let an obsolete controller block a policy port.
+    if policy_verified:
+        verify_upstream_recipes(app, upstream)
     ensure_forward_release(repo, version, upstream)
     release = release_tag(version, upstream, patchset, sha)
     base, head = f"review-base/{upstream}", f"review/{upstream}-{patchset}"
@@ -1946,7 +1949,7 @@ def upstream_test_configuration(app):
 
 def isolated_environment(root):
     keep = ("PATH", "LANG", "LC_ALL", "TZ", "DEVELOPER_DIR", "SDKROOT",
-            "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "MACOSX_DEPLOYMENT_TARGET")
+            "CARGO_HOME", "RUSTUP_HOME")
     env = {key: os.environ[key] for key in keep if key in os.environ}
     # Preserve optional toolchain inputs without requiring a user database entry.
     if "CARGO_HOME" not in env or "RUSTUP_HOME" not in env:

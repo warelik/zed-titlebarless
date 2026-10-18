@@ -476,6 +476,21 @@ jobs:
     outputs:
       policy_ref: ${{ steps.pin.outputs.policy_ref }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.candidate_config }}
+          path: checked
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: ${{ needs.prepare.outputs.source_depth }}
+          path: app
+          persist-credentials: false
+      - name: Verify Recipes With The Exact Sandbox-Checked Controller Before macOS
+        env:
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream }}
+        run: python3 checked/scripts/release.py check-upstream-recipe "$GITHUB_WORKSPACE/app"
       - name: Pin The Checked Controller For Subsequent Runs
         id: pin
         env:
@@ -485,12 +500,6 @@ jobs:
           [[ "$POLICY_REF" =~ ^[0-9a-f]{40}$ ]]
           gh variable set ZED_TRUSTED_POLICY --repo "$GITHUB_REPOSITORY" --body "$POLICY_REF"
           echo "policy_ref=$POLICY_REF" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
-        if: needs.prepare.outputs.already_published == 'true' && needs.prepare.outputs.repair_pr == ''
-        with:
-          ref: ${{ needs.prepare.outputs.candidate_config }}
-          path: checked
-          persist-credentials: false
       - name: Finish Policy-Only Maintenance Without Rebuilding The Published Application
         if: needs.prepare.outputs.already_published == 'true' && needs.prepare.outputs.repair_pr == ''
         env:

@@ -1136,7 +1136,8 @@ class RustRegressionRunnerTests(unittest.TestCase):
         )
         self.assertEqual(env["CARGO_HOME"], "/toolchain-cache/cargo")
         self.assertEqual(env["RUSTUP_HOME"], "/toolchain-cache/rustup")
-        self.assertEqual(env["RUSTUP_TOOLCHAIN"], "pinned-toolchain")
+        self.assertNotIn("RUSTUP_TOOLCHAIN", env)
+        self.assertNotIn("MACOSX_DEPLOYMENT_TARGET", env)
         for key in (
             "HOME",
             "TMPDIR",
@@ -1698,10 +1699,26 @@ class UpstreamCompilerRecipeTests(unittest.TestCase):
     def test_host_compiler_overrides_are_not_forwarded(self):
         injected = {"CARGO_PROFILE_RELEASE_LTO": "fat", "CARGO_PROFILE_DEV_CODEGEN_UNITS": "1",
                     "CARGO_PROFILE_RELEASE_DEBUG": "none", "RUSTFLAGS": "-C lto=fat",
-                    "CARGO_INCREMENTAL": "0", "CARGO_BUILD_TARGET": "x86_64-apple-darwin"}
+                    "CARGO_INCREMENTAL": "0", "CARGO_BUILD_TARGET": "x86_64-apple-darwin",
+                    "RUSTUP_TOOLCHAIN": "nightly", "MACOSX_DEPLOYMENT_TARGET": "99.0"}
         with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, injected):
             environment = release.isolated_environment(Path(temporary))
             self.assertFalse(injected.keys() & environment.keys())
+
+    def test_checked_linux_recipe_validation_precedes_pin_and_macos(self):
+        import re
+        text = (release.ROOT / ".github/workflows/release.yml").read_text()
+        activation = re.search(r"(?ms)^  activate-policy:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", text)[1]
+        self.assertIn("needs.policy-check.result == 'success'", activation)
+        check = activation.index("checked/scripts/release.py check-upstream-recipe")
+        pin = activation.index("Pin The Checked Controller For Subsequent Runs")
+        self.assertLess(check, pin)
+        checkout = activation[:check]
+        self.assertIn("ref: ${{ needs.prepare.outputs.candidate_config }}", checkout)
+        self.assertIn("path: checked\n          persist-credentials: false", checkout)
+        self.assertNotIn("GH_TOKEN:", checkout)
+        macos = re.search(r"(?ms)^  test:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", text)[1]
+        self.assertIn("needs: [prepare, activate-policy, land]", macos)
 
     def test_cancelled_workflows_cannot_continue_expensive_or_publishing_jobs(self):
         text = (release.ROOT / ".github/workflows/release.yml").read_text()

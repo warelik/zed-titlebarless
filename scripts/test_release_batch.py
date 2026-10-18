@@ -15,7 +15,7 @@ import release
 
 class BatchedReviewTests(unittest.TestCase):
     def prepare_candidate(self, full, delta, findings=(), *, published=False, changed_policy=False,
-                          recipe_failure=False):
+                          recipe_failure=False, verified_policy=False):
         config, upstream, candidate = "a" * 40, "b" * 40, "c" * 40
         outputs = {}
         order = []
@@ -48,6 +48,8 @@ class BatchedReviewTests(unittest.TestCase):
                 "GITHUB_REPOSITORY": "maintainer/zed-fork", "GITHUB_SHA": config,
                 "GITHUB_RUN_ID": "123",
             }, clear=True))
+            if verified_policy:
+                stack.enter_context(patch.dict(os.environ, {"ZED_TRUSTED_POLICY_SHA": config}))
             for name, value in {
                 "mirror_main": None, "proposal": None,
                 "active_snapshot": None,
@@ -86,12 +88,21 @@ class BatchedReviewTests(unittest.TestCase):
 
     def test_upstream_recipe_drift_stops_before_reservation_and_heavy_receipt(self):
         outputs, final, reserve, failure = self.prepare_candidate(
-            (True, "complete"), (True, "complete"), recipe_failure=True)
+            (True, "complete"), (True, "complete"), recipe_failure=True, verified_policy=True)
         self.assertFalse(outputs["ready"])
         self.assertEqual(failure, "upstream recipe drift")
         self.assertEqual((final, reserve), (0, 0))
         self.assertEqual(len(self.last_recipe_checks), 1)
         self.assertEqual(self.last_recipe_checks[0].args[1], "b" * 40)
+
+    def test_unverified_policy_port_defers_to_its_checked_linux_controller(self):
+        outputs, final, reserve, failure = self.prepare_candidate(
+            (True, "complete"), (True, "complete"), recipe_failure=True)
+        self.assertIsNone(failure, "the obsolete controller must not block its reviewed replacement")
+        self.assertTrue(outputs["ready"])
+        self.assertFalse(outputs["policy_verified"])
+        self.assertEqual(self.last_recipe_checks, [])
+        self.assertEqual((final, reserve), (1, 1))
 
     def test_one_blocking_report_waits_for_the_other_complete_list(self):
         for full, delta in (
