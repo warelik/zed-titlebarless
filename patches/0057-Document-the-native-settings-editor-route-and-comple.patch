@@ -1,0 +1,200 @@
+From 461b0062d0f097420f1970b8f74554398df8471d Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 22:17:04 +0000
+Subject: [PATCH] Document the native settings-editor route and complete
+ fork-setting examples
+
+Show the actual Edit in settings.json action for fork options without dedicated controls. Supply correctly nested standalone examples for sidebar layouts, tab chips and widths, toolbar compact mode, panel rows, shadows and titlebar placement; align the related visual-customization example. Application behavior is unchanged.
+---
+ docs/src/reference/all-settings.md | 102 +++++++++++++++++++++++++++++
+ docs/src/visual-customization.md   |   3 +
+ 2 files changed, 105 insertions(+)
+
+diff --git a/docs/src/reference/all-settings.md b/docs/src/reference/all-settings.md
+index 1168f98..6e388b5 100644
+--- a/docs/src/reference/all-settings.md
++++ b/docs/src/reference/all-settings.md
+@@ -179,6 +179,19 @@ Widths saved by older versions of Zed are preserved if they differ from the prev
+ 
+ `boolean` values
+ 
++Open the Settings Editor and choose **Edit in settings.json**. This option is
++configured in JSON:
++
++```json [settings]
++{
++  "agent": {
++    "threads_sidebar": {
++      "compact": true
++    }
++  }
++}
++```
++
+ ### Threads Sidebar in Agent Panel
+ 
+ - Description: Whether projects, threads, and terminals appear as two rows of tabs at the top of the agent panel instead of in the Threads Sidebar.
+@@ -189,6 +202,19 @@ Widths saved by older versions of Zed are preserved if they differ from the prev
+ 
+ `boolean` values
+ 
++Open the Settings Editor and choose **Edit in settings.json**. This option is
++configured in JSON:
++
++```json [settings]
++{
++  "agent": {
++    "threads_sidebar": {
++      "in_agent_panel": true
++    }
++  }
++}
++```
++
+ ### Threads Sidebar Auto Open {#agent-threads-sidebar-auto-open}
+ 
+ - Description: Whether opening a folder in an existing window automatically opens the [Threads Sidebar](../ai/parallel-agents.md#threads-sidebar).
+@@ -1698,6 +1724,17 @@ or
+ 
+ `boolean` values
+ 
++Open the Settings Editor and choose **Edit in settings.json**. This option is
++configured in JSON:
++
++```json [settings]
++{
++  "tab_bar": {
++    "pinned_tab_chips": true
++  }
++}
++```
++
+ ### Unpinned Tab Chips
+ 
+ - Description: Whether unpinned tabs are rendered as compact, borderless chips that hug their contents.
+@@ -1708,6 +1745,17 @@ or
+ 
+ `boolean` values
+ 
++Open the Settings Editor and choose **Edit in settings.json**. This option is
++configured in JSON:
++
++```json [settings]
++{
++  "tab_bar": {
++    "unpinned_tab_chips": true
++  }
++}
++```
++
+ ## Editor Tabs
+ 
+ - Description: Configuration for the editor tabs.
+@@ -1739,6 +1787,17 @@ or
+ 
+ A pixel value or `null`.
+ 
++Open the Settings Editor and choose **Edit in settings.json**. This option is
++configured in JSON:
++
++```json [settings]
++{
++  "tabs": {
++    "min_width": 120
++  }
++}
++```
++
+ ### Maximum Width
+ 
+ - Description: Maximum width of an editor tab in pixels. Longer titles are truncated in the middle. `null` keeps tabs as wide as their title.
+@@ -1749,6 +1808,17 @@ A pixel value or `null`.
+ 
+ A pixel value or `null`.
+ 
++Open the Settings Editor and choose **Edit in settings.json**. This option is
++configured in JSON:
++
++```json [settings]
++{
++  "tabs": {
++    "max_width": 240
++  }
++}
++```
++
+ ### Close Position
+ 
+ - Description: Where to display close button within a tab.
+@@ -1994,6 +2064,17 @@ Each display option controls a particular toolbar element. If all elements are h
+ 
+ - `compact`: Whether to shrink pane toolbars to the height of the tab bar. The default is `false`.
+ 
++Open the Settings Editor and choose **Edit in settings.json**. This option is
++configured in JSON:
++
++```json [settings]
++{
++  "toolbar": {
++    "compact": true
++  }
++}
++```
++
+ ## Use System Tabs
+ 
+ - Description: Whether to allow windows to tab together based on the user's tabbing preference (macOS only).
+@@ -5462,10 +5543,22 @@ Processing stops at the first regex that matches the terminal line, even if the
+ 
+ `boolean` values
+ 
++Open the Settings Editor and choose **Edit in settings.json**. This option is
++configured in JSON:
++
++```json [settings]
++{
++  "panel_rows_tab_height": true
++}
++```
++
+ ## Shadows
+ 
+ - Description: Controls individual shadows in the user interface.
+ - Setting: `shadows`
++Open the Settings Editor and choose **Edit in settings.json**. Configure these
++shadow options in JSON.
++
+ - Default:
+ 
+ ```json [settings]
+@@ -5616,6 +5709,15 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a
+ 
+ `boolean` values
+ 
++Open the Settings Editor and choose **Edit in settings.json**. This option is
++configured in JSON:
++
++```json [settings]
++{
++  "title_bar_to_status_bar": true
++}
++```
++
+ ## Window Title Format
+ 
+ - Description: Template for the window title. Use `${separator}` to insert a
+diff --git a/docs/src/visual-customization.md b/docs/src/visual-customization.md
+index 3cf5fa0..4ed3359 100644
+--- a/docs/src/visual-customization.md
++++ b/docs/src/visual-customization.md
+@@ -139,6 +139,9 @@ To disable this behavior use:
+ 
+ ### Titlebar
+ 
++To configure `title_bar_to_status_bar` (macOS only), open the Settings Editor and
++choose **Edit in settings.json**, then add it to your settings:
++
+ ```json [settings]
+ {
+   // Hide the title bar and show its contents in the status bar instead (macOS only)
