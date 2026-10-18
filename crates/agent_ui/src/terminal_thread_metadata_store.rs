@@ -312,6 +312,18 @@ impl TerminalThreadMetadataStore {
         cx.notify();
     }
 
+    /// A confirmed newly created session must stay recoverable even if its
+    /// window disappeared or a close is waiting for creation to finish.
+    pub fn retain_created_session(&mut self, metadata: TerminalThreadMetadata, cx: &mut Context<Self>) {
+        let id = metadata.terminal_id;
+        if self.intentionally_closed_terminal_ids.contains(&id) || self.entry(id).is_some() {
+            return;
+        }
+        self.deleted_terminal_ids.remove(&id);
+        self.save_internal(metadata);
+        cx.notify();
+    }
+
     pub fn begin_intentional_close(&mut self, terminal_id: TerminalId) -> bool {
         !self.intentionally_closed_terminal_ids.contains(&terminal_id)
             && self.closing_terminal_ids.insert(terminal_id)
