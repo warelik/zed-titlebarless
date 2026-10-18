@@ -1154,6 +1154,31 @@ async fn test_restored_width_preserves_legacy_resizes(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_sidebar_width_minimum_is_independent_of_layout_opt_ins(cx: &mut TestAppContext) {
+    let project = init_test_project("/my-project", cx).await;
+    let (multi_workspace, cx) = cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+    for (compact, in_agent_panel) in [(false, false), (false, true), (true, false), (true, true)] {
+        cx.update(|_window, cx| {
+            let content = serde_json::json!({"agent": {"threads_sidebar": {
+                "compact": compact, "in_agent_panel": in_agent_panel, "default_width": 300
+            }}}).to_string();
+            SettingsStore::update_global(cx, |store, cx| {
+                store.set_user_settings(&content, cx).expect("valid layout settings");
+            });
+        });
+        cx.run_until_parked();
+        sidebar.update_in(cx, |sidebar, _, cx| sidebar.set_width(Some(px(5.0)), cx));
+        assert_eq!(sidebar.read_with(cx, |sidebar, _| sidebar.width), px(100.0));
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.restore_serialized_state(r#"{"width":5,"width_set_by_user":true}"#, window, cx);
+        });
+        assert_eq!(sidebar.read_with(cx, |sidebar, _| sidebar.width), px(100.0));
+        assert!(sidebar.read_with(cx, |sidebar, _| sidebar.width_set_by_user));
+    }
+}
+
+#[gpui::test]
 async fn test_configured_width_is_clamped_into_range(cx: &mut TestAppContext) {
     let project = init_test_project("/my-project", cx).await;
     cx.update(|cx| set_threads_sidebar_default_width(5000.0, cx));

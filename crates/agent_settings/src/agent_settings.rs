@@ -34,6 +34,8 @@ pub const COMPACTION_PROMPT: &str = include_str!("prompts/compaction_prompt.txt"
 /// Bounds on the width of the threads list. They constrain the configured
 /// default as well as the width the user drags to, so that no width the sidebar
 /// can hold is able to crowd out the editor or collapse the list.
+// The downstream 100px minimum is intentional even with compact/in-panel
+// layout disabled; it is separately documented under "Without any setting".
 pub const THREADS_LIST_MIN_WIDTH: Pixels = px(100.0);
 pub const THREADS_LIST_MAX_WIDTH: Pixels = px(800.0);
 
@@ -1117,6 +1119,23 @@ mod tests {
                 expected,
                 "{content}"
             );
+        }
+    }
+
+    #[gpui::test]
+    fn test_threads_sidebar_minimum_is_independent_of_layout_opt_ins(cx: &mut gpui::App) {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        project::DisableAiSettings::register(cx);
+        AgentSettings::register(cx);
+        for (compact, in_agent_panel) in [(false, false), (false, true), (true, false), (true, true)] {
+            let content = serde_json::json!({"agent": {"threads_sidebar": {
+                "compact": compact, "in_agent_panel": in_agent_panel, "default_width": 5
+            }}}).to_string();
+            SettingsStore::update_global(cx, |store, cx| {
+                store.set_user_settings(&content, cx).expect("valid sidebar settings");
+            });
+            assert_eq!(AgentSettings::get_global(cx).threads_sidebar.default_width, px(100.0));
         }
     }
 
