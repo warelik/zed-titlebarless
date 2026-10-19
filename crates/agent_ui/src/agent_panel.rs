@@ -2291,9 +2291,10 @@ impl AgentPanel {
             let result = terminal_task.await;
             let closed = cx.update(|cx| {
                 let store = TerminalThreadMetadataStore::try_global(cx);
-                if result.is_ok() {
-                    recovery_metadata.shpool_context = spawn_project.read(cx)
-                        .persistent_terminal_context(&terminal_id.session_name()).cloned();
+                if let Some(context) = spawn_project.read(cx)
+                    .persistent_terminal_context(&terminal_id.session_name()).cloned()
+                {
+                    recovery_metadata.shpool_context = Some(context);
                 }
                 let context = recovery_metadata.shpool_context.clone();
                 if result.as_ref().is_ok_and(|terminal| terminal.session != PersistentSession::Unavailable) {
@@ -2301,13 +2302,11 @@ impl AgentPanel {
                         store.update(cx, |store, cx| store.retain_created_session(recovery_metadata, cx));
                     }
                 }
-                if result.is_ok() {
-                    if let Some((store, context)) = store.as_ref().zip(context) {
-                        store.update(cx, |store, cx| {
-                            store.remember_shpool_context(terminal_id, context,
-                                spawn_project.read(cx).remote_connection_options(cx), cx);
-                        });
-                    }
+                if let Some((store, context)) = store.as_ref().zip(context) {
+                    store.update(cx, |store, cx| {
+                        store.remember_shpool_context(terminal_id, context,
+                            spawn_project.read(cx).remote_connection_options(cx), cx);
+                    });
                 }
                 let closed = this.update(cx, |this, cx| {
                     let closed = this.closed_terminal_spawns.remove(&terminal_id);
@@ -2489,7 +2488,7 @@ impl AgentPanel {
         let saved = TerminalThreadMetadataStore::try_global(cx)
             .and_then(|store| store.read(cx).entry(terminal_id).cloned());
         let stored_context = saved.as_ref().and_then(|metadata| metadata.shpool_context.clone());
-        if context.as_ref().zip(stored_context.as_ref()).is_some_and(|(left, right)| !left.same_daemon(right)) {
+        if context.as_ref().zip(stored_context.as_ref()).is_some_and(|(left, right)| left != right) {
             return Task::ready(Err(anyhow::anyhow!("saved terminal daemon context changed")));
         }
         let context = stored_context.or(context);

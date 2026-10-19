@@ -738,10 +738,15 @@ impl Project {
         cx: &mut Context<Self>,
     ) -> Task<Result<PersistentTerminal>> {
         let known = self.terminals.session_contexts.get(&session_name).cloned();
-        if context.as_ref().zip(known.as_ref()).is_some_and(|(left, right)| !left.same_daemon(right)) {
+        if context.as_ref().zip(known.as_ref()).is_some_and(|(left, right)| left != right) {
             return Task::ready(Err(anyhow::anyhow!("persistent session daemon context changed")));
         }
         let context = context.or(known);
+        if let Some(context) = &context {
+            if let Err(error) = context.validate() { return Task::ready(Err(error)); }
+            self.terminals.session_contexts.entry(session_name.clone())
+                .or_insert_with(|| context.clone());
+        }
         let legacy_restore = restoring_existing && context.is_none();
         let pinned = context.is_some();
         let probe = match context {
@@ -801,6 +806,17 @@ impl Project {
             };
             let terminal = project
                 .update(cx, |project, cx| {
+                    if let Some(context) = &context {
+                        if project.terminals.session_contexts.get(&session_name)
+                            .is_some_and(|known| known != context)
+                        {
+                            return Task::ready(Err(anyhow::anyhow!(
+                                "persistent session client changed before attachment"
+                            )));
+                        }
+                        project.terminals.session_contexts.entry(session_name.clone())
+                            .or_insert_with(|| context.clone());
+                    }
                     #[cfg(any(test, feature = "test-support"))]
                     if let Some(fake) = &project.fake_shpool {
                         let location = project.terminal_settings_location(cwd.as_deref(), cx);
@@ -841,17 +857,6 @@ impl Project {
                     project.create_terminal_shell_internal(cwd, false, command, pty_startup, cx)
                 })?
                 .await?;
-            if let Some(context) = context {
-                project.update(cx, |project, _| {
-                    anyhow::ensure!(
-                        project.terminals.session_contexts.get(&session_name)
-                            .is_none_or(|known| known.same_daemon(&context)),
-                        "persistent session daemon context changed during startup",
-                    );
-                    project.terminals.session_contexts.entry(session_name).or_insert(context);
-                    anyhow::Ok(())
-                })??;
-            }
             Ok(PersistentTerminal { terminal, session })
         })
     }
@@ -919,7 +924,7 @@ impl Project {
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
         let known = self.terminals.session_contexts.get(&session_name).cloned();
-        if context.as_ref().zip(known.as_ref()).is_some_and(|(left, right)| !left.same_daemon(right)) {
+        if context.as_ref().zip(known.as_ref()).is_some_and(|(left, right)| left != right) {
             return Task::ready(Err(anyhow::anyhow!("persistent session daemon context changed")));
         }
         let context = context.or(known);
@@ -939,7 +944,7 @@ impl Project {
                 let kill = project.update(cx, |project, cx| {
                     anyhow::ensure!(
                         project.terminals.session_contexts.get(&name)
-                            .is_none_or(|known| known.same_daemon(&context)),
+                            .is_none_or(|known| known == &context),
                         "original daemon changed while locating the legacy session",
                     );
                     project.terminals.session_contexts.entry(name.clone()).or_insert_with(|| context.clone());
@@ -1972,6 +1977,47 @@ mod tests {
         assert!(command.contains("/shpool"));
         assert!(!command.contains("/different/shpool"));
         assert!(command.contains(" -D -s "));
+    }
+
+    #[gpui::test]
+    async fn test_persistent_terminal_rejects_different_client_for_the_same_socket(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = settings::SettingsStore::test(cx);
+            cx.set_global(store);
+            TerminalSettings::register(cx);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
+        let _terminal = project.update(cx, |project, cx| {
+            project.create_persistent_terminal_shell(None, "zed-client".into(), None, cx)
+        }).await.unwrap();
+        let original = project.read_with(cx, |project, _| {
+            project.persistent_terminal_context("zed-client").cloned().unwrap()
+        });
+        let conflicting = ShpoolSessionContext::new(
+            "/incompatible/shpool".into(), original.socket.clone().into(),
+        ).unwrap();
+        assert!(original.same_daemon(&conflicting), "owner identity is socket-scoped");
+        assert_ne!(original, conflicting, "the complete original locator is immutable");
+        assert!(project.update(cx, |project, cx| {
+            project.create_persistent_terminal_shell_in_context(
+                None, "zed-client".into(), None, Some(conflicting.clone()), true, cx,
+            )
+        }).await.is_err());
+        assert!(project.update(cx, |project, cx| {
+            project.kill_persistent_terminal_session_in_context(
+                "zed-client".into(), Some(conflicting), cx,
+            )
+        }).await.is_err());
+        assert_eq!(fake.attach_history(), vec!["zed-client".to_string()]);
+        assert!(fake.kill_history().is_empty());
+        assert!(fake.has_session("zed-client"));
+        assert_eq!(project.read_with(cx, |project, _| {
+            project.persistent_terminal_context("zed-client").cloned()
+        }), Some(original));
     }
 
     #[gpui::test]
