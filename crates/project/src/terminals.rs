@@ -2140,7 +2140,13 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
             "the enabled real-shpool regression requires shpool on PATH"
         );
 
-        let temp_dir = tempfile::tempdir().expect("tempdir creation");
+        // Darwin's default TMPDIR is deeply nested; shpool binds both control
+        // and event Unix sockets. Keep this fixture's paths below sun_path's
+        // limit even after /tmp is resolved to /private/tmp.
+        let temp_dir = tempfile::Builder::new()
+            .prefix("zed-shpool-")
+            .tempdir_in("/tmp")
+            .expect("short isolated tempdir creation");
         let isolated_runtime = temp_dir.path().join("runtime");
         let isolated_home = temp_dir.path().join("home");
         std::fs::create_dir_all(&isolated_runtime).expect("create isolated runtime");
@@ -2181,7 +2187,15 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
         let task = project.update(cx, |p, cx| p.exec_script_in_sh(probe_script, cx));
         let mut cmd = task.await.expect("probe command creation");
         let output = cmd.output().await.expect("probe execution");
-        assert!(output.status.success(), "probe script must succeed");
+        assert!(
+            output.status.success(),
+            "probe script must succeed: status={}; stdout={}; stderr={}; daemon log={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+            std::fs::read_to_string(isolated_runtime.join("shpool/daemonized-shpool.log"))
+                .unwrap_or_else(|error| format!("unavailable: {error}")),
+        );
         let stdout = String::from_utf8_lossy(&output.stdout);
         let probe = parse_shpool_probe(&stdout)
             .expect("should parse output")

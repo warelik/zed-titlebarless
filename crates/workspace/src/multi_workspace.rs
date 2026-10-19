@@ -1716,7 +1716,14 @@ impl MultiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<Workspace> {
-        let workspace = cx.new(|cx| Workspace::test_new(project, window, cx));
+        let app_state = self.workspace().read(cx).app_state().clone();
+        let workspace = if std::sync::Arc::ptr_eq(&project.read(cx).client(), &app_state.client) {
+            // One client owns one WorkspaceStore (and one Follow handler), as
+            // in production. Reusing that client must reuse its application state.
+            cx.new(|cx| Workspace::new(None, project, app_state, window, cx))
+        } else {
+            cx.new(|cx| Workspace::test_new(project, window, cx))
+        };
         self.activate(workspace.clone(), None, window, cx);
         workspace
     }

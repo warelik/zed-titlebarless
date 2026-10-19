@@ -1103,6 +1103,7 @@ impl TerminalBuilder {
             },
             child_exited: None,
             process_exited: false,
+            close_on_exit_requested: false,
             keyboard_input_sent: false,
             init_command_startup_marker: None,
             init_command_startup_tx: None,
@@ -1424,6 +1425,7 @@ impl TerminalBuilder {
                 },
                 child_exited: None,
                 process_exited: false,
+                close_on_exit_requested: false,
                 keyboard_input_sent: false,
                 init_command_startup_marker: None,
                 init_command_startup_tx: None,
@@ -1637,6 +1639,9 @@ pub struct Terminal {
     // The PTY can report `Exit` without a `ChildExit` status, so `child_exited`
     // alone does not tell whether the process is gone.
     process_exited: bool,
+    // A subscriber can attach after completion; preserve the native hide
+    // decision instead of replaying only the ProcessExited half of the event.
+    close_on_exit_requested: bool,
     keyboard_input_sent: bool,
     init_command_startup_marker: Option<String>,
     init_command_startup_tx: Option<Sender<()>>,
@@ -3358,6 +3363,10 @@ impl Terminal {
         self.process_exited
     }
 
+    pub fn close_on_exit_requested(&self) -> bool {
+        self.close_on_exit_requested
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn simulate_process_exit(&mut self, cx: &mut Context<Self>) {
         self.register_task_finished(None, cx);
@@ -3393,6 +3402,7 @@ impl Terminal {
                     self.child_exited.is_none_or(|e| e.code() == Some(0))
                 };
                 if should_close {
+                    self.close_on_exit_requested = true;
                     cx.emit(Event::CloseTerminal);
                 }
                 return;
@@ -3431,10 +3441,12 @@ impl Terminal {
         match hide {
             HideStrategy::Never => {}
             HideStrategy::Always => {
+                self.close_on_exit_requested = true;
                 cx.emit(Event::CloseTerminal);
             }
             HideStrategy::OnSuccess => {
                 if finished_successfully {
+                    self.close_on_exit_requested = true;
                     cx.emit(Event::CloseTerminal);
                 }
             }
@@ -4741,6 +4753,7 @@ mod tests {
             assert!(recorded.contains(&Event::ProcessExited));
             assert_eq!(recorded.contains(&Event::CloseTerminal), should_close, "{hide:?}, exit {code}");
             terminal.read_with(cx, |terminal, _| {
+                assert_eq!(terminal.close_on_exit_requested(), should_close, "{hide:?}, exit {code}");
                 assert_eq!(terminal.task().unwrap().status, TaskStatus::Completed { success: code == 0 });
                 assert!(terminal.get_content().contains("retained task output"));
             });

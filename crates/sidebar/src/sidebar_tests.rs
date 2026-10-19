@@ -5335,8 +5335,14 @@ async fn test_terminal_close_coordinates_live_owners_in_all_windows(cx: &mut Tes
     let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
     fake.add_session(&session_name);
     let origin_window_handle = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-    let target_window_handle = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
     let origin_multi_workspace = origin_window_handle.root(cx).unwrap();
+    let shared_app_state = origin_multi_workspace.read_with(cx, |multi_workspace, cx| {
+        multi_workspace.workspace().read(cx).app_state().clone()
+    });
+    let target_window_handle = cx.add_window(|window, cx| {
+        let workspace = cx.new(|cx| Workspace::new(None, project.clone(), shared_app_state, window, cx));
+        MultiWorkspace::new(workspace, window, cx)
+    });
     let target_multi_workspace = target_window_handle.root(cx).unwrap();
     let mut origin_context = VisualTestContext::from_window(origin_window_handle.into(), cx);
     let mut target_context = VisualTestContext::from_window(target_window_handle.into(), cx);
@@ -5450,8 +5456,14 @@ async fn test_terminal_close_waits_for_pending_owner_in_another_window(cx: &mut 
     fake.add_session(&session_name);
     fake.state.lock().probe_delay = Some(Duration::from_secs(1));
     let origin_window_handle = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-    let target_window_handle = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
     let origin_multi_workspace = origin_window_handle.root(cx).unwrap();
+    let shared_app_state = origin_multi_workspace.read_with(cx, |multi_workspace, cx| {
+        multi_workspace.workspace().read(cx).app_state().clone()
+    });
+    let target_window_handle = cx.add_window(|window, cx| {
+        let workspace = cx.new(|cx| Workspace::new(None, project.clone(), shared_app_state, window, cx));
+        MultiWorkspace::new(workspace, window, cx)
+    });
     let target_multi_workspace = target_window_handle.root(cx).unwrap();
     let mut origin_context = VisualTestContext::from_window(origin_window_handle.into(), cx);
     let mut target_context = VisualTestContext::from_window(target_window_handle.into(), cx);

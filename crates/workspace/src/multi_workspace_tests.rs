@@ -1871,19 +1871,36 @@ async fn test_item_close_guard_preserves_discard_and_saved_formatting(cx: &mut T
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
     let item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
-    multi_workspace.update_in(cx, |_multi_workspace, window, cx| {
-        let mut discard = ItemCloseGuard::new(vec![Box::new(item.clone())], window, cx);
+    let mut discard = multi_workspace.update_in(cx, |_, window, cx| {
+        ItemCloseGuard::new(vec![Box::new(item.clone())], window, cx)
+    });
+    cx.update(|_, cx| {
         assert!(discard.accept_consent(cx), "an explicitly discarded unchanged buffer is accepted");
-        let mut saved_then_edited = ItemCloseGuard::new(vec![Box::new(item.clone())], window, cx);
-        item.update(cx, |item, cx| { item.is_dirty = false; cx.emit(ItemEvent::UpdateTab); });
-        item.update(cx, |item, cx| { item.is_dirty = true; cx.emit(ItemEvent::Edit); });
+    });
+    let mut saved_then_edited = multi_workspace.update_in(cx, |_, window, cx| {
+        ItemCloseGuard::new(vec![Box::new(item.clone())], window, cx)
+    });
+    // User edits and prompt responses are separate event turns. Let the
+    // window-scoped item subscriptions observe them before accepting consent.
+    item.update(cx, |item, cx| { item.is_dirty = false; cx.emit(ItemEvent::UpdateTab); });
+    item.update(cx, |item, cx| { item.is_dirty = true; cx.emit(ItemEvent::Edit); });
+    cx.run_until_parked();
+    cx.update(|_, cx| {
         assert!(!saved_then_edited.accept_consent(cx), "an edit during another prompt remains unsaved");
-        let mut formatting = ItemCloseGuard::new(vec![Box::new(item.clone())], window, cx);
-        item.update(cx, |item, cx| { item.is_dirty = true; cx.emit(ItemEvent::Edit); });
-        item.update(cx, |item, cx| { item.is_dirty = false; cx.emit(ItemEvent::UpdateTab); });
+    });
+    let mut formatting = multi_workspace.update_in(cx, |_, window, cx| {
+        ItemCloseGuard::new(vec![Box::new(item.clone())], window, cx)
+    });
+    item.update(cx, |item, cx| { item.is_dirty = true; cx.emit(ItemEvent::Edit); });
+    item.update(cx, |item, cx| { item.is_dirty = false; cx.emit(ItemEvent::UpdateTab); });
+    cx.run_until_parked();
+    cx.update(|_, cx| {
         assert!(formatting.accept_consent(cx), "saved formatting is part of accepted save consent");
         assert!(!formatting.changed(cx));
-        item.update(cx, |item, cx| { item.is_dirty = true; cx.emit(ItemEvent::Edit); });
+    });
+    item.update(cx, |item, cx| { item.is_dirty = true; cx.emit(ItemEvent::Edit); });
+    cx.run_until_parked();
+    cx.update(|_, cx| {
         assert!(formatting.changed(cx), "edits after consent still refuse destructive cleanup");
     });
 }
