@@ -1,0 +1,44 @@
+From 65bcafd1aa7273d4fe3a8117245f26d0f281a2d5 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 00:22:19 +0000
+Subject: [PATCH] Hide the dismissed Python banner before any later
+ compact-mode change
+
+Always emit the existing Hidden toolbar location on dismissal, including when compact mode is currently off, so the cached Secondary location cannot leave a blank compact row later. Preserve the persisted dismissal and notification, and remove the no-longer-used Toolbar import. No compiler/profile changes or intermediate tests/builds.
+---
+ crates/language_onboarding/src/python.rs | 14 ++++++--------
+ 1 file changed, 6 insertions(+), 8 deletions(-)
+
+diff --git a/crates/language_onboarding/src/python.rs b/crates/language_onboarding/src/python.rs
+index 6c2d304..d477b47 100644
+--- a/crates/language_onboarding/src/python.rs
++++ b/crates/language_onboarding/src/python.rs
+@@ -2,7 +2,7 @@ use db::kvp::Dismissable;
+ use editor::Editor;
+ use gpui::{Context, EventEmitter, Subscription};
+ use ui::{Banner, FluentBuilder as _, prelude::*};
+-use workspace::{Toolbar, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace};
++use workspace::{ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace};
+ 
+ pub struct BasedPyrightBanner {
+     dismissed: bool,
+@@ -66,13 +66,11 @@ impl Render for BasedPyrightBanner {
+                                     cx.listener(|this, _, _, cx| {
+                                         this.dismissed = true;
+                                         Self::set_dismissed(true, cx);
+-                                        // A dismissed banner renders nothing but keeps its
+-                                        // location, which would leave an empty compact row.
+-                                        if Toolbar::compact_row_height(cx).is_some() {
+-                                            cx.emit(ToolbarItemEvent::ChangeLocation(
+-                                                ToolbarItemLocation::Hidden,
+-                                            ));
+-                                        }
++                                        // Keep the cached location hidden if compact mode
++                                        // is enabled after this banner has been dismissed.
++                                        cx.emit(ToolbarItemEvent::ChangeLocation(
++                                            ToolbarItemLocation::Hidden,
++                                        ));
+                                         cx.notify();
+                                     }),
+                                 ))
