@@ -491,5 +491,209 @@ class FinalRetryAuthorizationTests(unittest.TestCase):
         self.assertIn(f"<!-- zed-final:{self.application}:{self.configuration} -->", posted[0]["body"])
 
 
+class CrossApplicationFinalHistoryTests(unittest.TestCase):
+    repo = "maintainer/zed-fork"
+    application = "a" * 40
+    configuration = "b" * 40
+    upstream = "d" * 40
+
+    def history(self, runs=(42,)):
+        owner = {"login": "maintainer", "type": "User"}
+        pull = {
+            "number": 7, "updated_at": "2026-10-18T18:00:00Z", "user": owner,
+            "base": {"sha": self.upstream, "ref": f"review-base/{self.upstream}"},
+            "head": {"sha": self.application, "repo": {"full_name": self.repo},
+                     "ref": f"review/{self.upstream}-{'1' * 64}"},
+        }
+        comments = [{
+            "user": {"login": "github-actions[bot]", "type": "Bot"},
+            "body": f"Final validation and single build of `{self.application}` / "
+                    f"`{self.configuration}`: https://github.com/{self.repo}/actions/runs/{number}\n"
+                    f"<!-- zed-final:{self.application}:{self.configuration} -->\n"
+                    f"<!-- zed-final-workflow:{self.configuration} -->",
+        } for number in runs]
+        published = [{"id": 1, "draft": False, "prerelease": False,
+                      "published_at": "2026-10-18T16:00:00Z"}]
+        metadata = {
+            number: {"status": "completed", "conclusion": "failure",
+                     "path": ".github/workflows/release.yml", "head_sha": self.configuration,
+                     "event": "workflow_dispatch", "updated_at": f"2026-10-18T17:{number - 30:02d}:00Z"}
+            for number in runs
+        }
+        jobs = {
+            number: {"total_count": 1, "jobs": [{
+                "name": "Test, Build And Inspect One macOS Application",
+                "status": "completed", "conclusion": "failure",
+                "started_at": "2026-10-18T17:00:00Z",
+                "completed_at": f"2026-10-18T17:{number - 31:02d}:00Z",
+                "steps": [{"name": "Compile", "conclusion": "failure"}],
+            }]} for number in runs
+        }
+
+        def pages(path):
+            if path.endswith("/releases"):
+                return published
+            if "/pulls?" in path:
+                return [pull]
+            if path.endswith("/issues/7/comments"):
+                return comments
+            raise AssertionError(path)
+
+        def api(path, **kwargs):
+            for number in runs:
+                if path.endswith(f"/runs/{number}"):
+                    return metadata[number]
+                if path.endswith(f"/runs/{number}/jobs?filter=all&per_page=100"):
+                    return jobs[number]
+            raise AssertionError(path)
+
+        return pages, api, metadata, jobs, published
+
+    def test_new_application_and_review_pr_keep_the_previous_failed_attempt(self):
+        pages, api, _, _, _ = self.history()
+        with (patch.object(release, "pages", side_effect=pages),
+              patch.object(release, "api", side_effect=api)):
+            self.assertEqual(release.previous_final_failure(self.repo), 42)
+        application, config = "e" * 40, "f" * 40
+        receipt = {"id": 101, "user": {"login": "github-actions[bot]"},
+                   "body": f"https://github.com/{self.repo}/actions/runs/43\n"
+                           f"<!-- zed-final:{application}:{config} -->"}
+        with (patch.object(release, "pages", return_value=[receipt]),
+              patch.object(release, "previous_final_failure", return_value=42),
+              patch.object(release, "api", return_value={"total_count": 0, "jobs": []}) as requests,
+              patch.dict(os.environ, {"GITHUB_RUN_ID": "43"}),
+              self.assertRaisesRegex(ValueError, "explicit owner grant")):
+            release.check_final_history(self.repo, 99, application, config)
+        self.assertTrue(all(call.kwargs.get("method", "GET") == "GET"
+                            for call in requests.call_args_list))
+
+    def test_failed_history_blocks_before_creating_another_release_draft(self):
+        with (patch.dict(os.environ, {"GITHUB_RUN_ID": "43"}),
+              patch.object(release, "pages", return_value=[]),
+              patch.object(release, "previous_final_failure", return_value=42),
+              patch.object(release, "api", return_value={"total_count": 0, "jobs": []}) as requests,
+              patch.object(release, "output") as output,
+              self.assertRaisesRegex(ValueError, "explicit owner grant")):
+            release.reserve_release(self.repo, "candidate", "e" * 40, self.upstream,
+                                    "1" * 64, "1.24.2", "f" * 40, 99)
+        self.assertTrue(all(call.kwargs.get("method", "GET") == "GET"
+                            for call in requests.call_args_list))
+        self.assertTrue(output.call_args.kwargs["final_failed"])
+
+    def test_later_skipped_macos_does_not_refund_an_earlier_heavy_failure(self):
+        pages, api, _, jobs, _ = self.history((42, 43))
+        jobs[43]["jobs"][0].update(conclusion="skipped", steps=[],
+                                   started_at=None, completed_at=None)
+        with (patch.object(release, "pages", side_effect=pages),
+              patch.object(release, "api", side_effect=api)):
+            self.assertEqual(release.previous_final_failure(self.repo), 42)
+
+    def test_current_reservation_is_excluded_without_erasing_previous_failure(self):
+        pages, api, metadata, jobs, _ = self.history((42, 43))
+        metadata[43]["status"] = "in_progress"
+        jobs[43]["jobs"][0].update(status="queued", started_at=None, completed_at=None)
+        with (patch.object(release, "pages", side_effect=pages),
+              patch.object(release, "api", side_effect=api)):
+            self.assertEqual(release.previous_final_failure(self.repo, exclude_run=43), 42)
+
+    def test_completion_order_selects_the_latest_stopped_run(self):
+        pages, api, _, jobs, _ = self.history((41, 42))
+        jobs[41]["jobs"][0]["completed_at"] = "2026-10-18T17:20:00Z"
+        with (patch.object(release, "pages", side_effect=pages),
+              patch.object(release, "api", side_effect=api)):
+            self.assertEqual(release.previous_final_failure(self.repo), 41)
+
+    def test_successful_final_or_verified_publication_closes_old_failure_history(self):
+        for outcome in ("successful-final", "new-publication"):
+            with self.subTest(outcome=outcome):
+                pages, api, metadata, jobs, published = self.history((41, 42))
+                if outcome == "successful-final":
+                    metadata[42]["conclusion"] = "success"
+                    jobs[42]["jobs"][0]["conclusion"] = "success"
+                else:
+                    published[0]["published_at"] = "2026-10-18T17:30:00Z"
+                with (patch.object(release, "pages", side_effect=pages),
+                      patch.object(release, "api", side_effect=api)):
+                    self.assertIsNone(release.previous_final_failure(self.repo))
+
+    def test_missing_truncated_or_active_native_evidence_blocks_the_next_heavy_attempt(self):
+        for invalid in ("missing", "truncated", "active", "wrong-workflow", "wrong-revision"):
+            with self.subTest(invalid=invalid):
+                pages, api, metadata, jobs, _ = self.history()
+                if invalid == "missing": jobs[42] = {"total_count": 0, "jobs": []}
+                elif invalid == "truncated": jobs[42]["total_count"] = 101
+                elif invalid == "active": jobs[42]["jobs"][0]["completed_at"] = None
+                elif invalid == "wrong-workflow": metadata[42]["path"] = ".github/workflows/other.yml"
+                else: metadata[42]["head_sha"] = "f" * 40
+                with (patch.object(release, "pages", side_effect=pages),
+                      patch.object(release, "api", side_effect=api),
+                      self.assertRaises(ValueError)):
+                    release.previous_final_failure(self.repo)
+
+    def test_cross_application_owner_grant_is_exact_latest_and_consumed_once(self):
+        application, config = "e" * 40, "f" * 40
+        for invalid in (None, "bot", "old-run", "wrong-source", "before-stop"):
+            with self.subTest(invalid=invalid):
+                comments = [{
+                    "id": 100, "user": {"login": "maintainer", "type": "User"},
+                    "created_at": "2026-10-18T18:00:00Z",
+                    "body": f"<!-- zed-final-retry:{application}:{config}:42 -->",
+                }, {
+                    "id": 101, "user": {"login": "github-actions[bot]"},
+                    "body": f"https://github.com/{self.repo}/actions/runs/43\n"
+                            f"<!-- zed-final:{application}:{config} -->",
+                }]
+                if invalid == "bot": comments[0]["user"] = {"login": "github-actions[bot]", "type": "Bot"}
+                elif invalid == "old-run": comments[0]["body"] = comments[0]["body"].replace(":42 -->", ":41 -->")
+                elif invalid == "wrong-source": comments[0]["body"] = comments[0]["body"].replace(application, "c" * 40)
+                elif invalid == "before-stop": comments[0]["created_at"] = "2026-10-18T16:00:00Z"
+                consumed = []
+                current_jobs = {"total_count": 0, "jobs": []}
+
+                def api(path, *, method="GET", data=None, **kwargs):
+                    if path.endswith("/runs/43/jobs?filter=all&per_page=100"):
+                        return current_jobs
+                    if method == "GET":
+                        return {"status": "completed", "conclusion": "failure",
+                                "path": ".github/workflows/release.yml",
+                                "updated_at": "2026-10-18T17:30:00Z"}
+                    self.assertEqual((path, method), (f"repos/{self.repo}/issues/comments/101", "PATCH"))
+                    consumed.append(data)
+                    comments[1].update(data)
+                    return {"id": 101}
+
+                with (patch.object(release, "pages", side_effect=lambda _: list(comments)),
+                      patch.object(release, "previous_final_failure", return_value=42),
+                      patch.object(release, "api", side_effect=api),
+                      patch.dict(os.environ, {"GITHUB_RUN_ID": "43"})):
+                    if invalid is None:
+                        release.check_final_history(self.repo, 99, application, config)
+                        current_jobs.update(total_count=1, jobs=[{
+                            "name": "Test, Build And Inspect One macOS Application",
+                            "status": "completed", "conclusion": "failure",
+                            "started_at": "2026-10-18T18:01:00Z", "steps": [{"name": "Compile"}],
+                        }])
+                        with self.assertRaisesRegex(ValueError, "already started"):
+                            release.check_final_history(self.repo, 99, application, config)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "explicit owner grant"):
+                            release.check_final_history(self.repo, 99, application, config)
+                self.assertEqual(len(consumed), 1 if invalid is None else 0)
+                if consumed:
+                    self.assertIn("<!-- zed-final-retry-used:100 -->", consumed[0]["body"])
+
+    def test_checked_linux_history_gate_blocks_macos_before_pin_or_adoption(self):
+        workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
+        activation = workflow.split("\n  activate-policy:\n", 1)[1].split("\n  repair:\n", 1)[0]
+        history = activation.index("release.check_final_history(")
+        pin = activation.index("Pin The Checked Controller For Subsequent Runs")
+        self.assertLess(history, pin)
+        self.assertIn("CONFIG_SHA: ${{ needs.prepare.outputs.candidate_config }}", activation)
+        self.assertIn("CANDIDATE_PR: ${{ needs.prepare.outputs.pr }}", activation)
+        application = workflow.split("\n  test:\n", 1)[1].split("\n  publish:\n", 1)[0]
+        self.assertIn("needs.activate-policy.result == 'success'", application)
+        self.assertIn("needs.activate-policy.outputs.final_failed == 'true'", workflow)
+
+
 if __name__ == "__main__":
     unittest.main()

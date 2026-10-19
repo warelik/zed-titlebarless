@@ -502,8 +502,10 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      actions: read
     outputs:
       policy_ref: ${{ steps.pin.outputs.policy_ref }}
+      final_failed: ${{ steps.history.outputs.final_failed }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -520,6 +522,27 @@ jobs:
         env:
           UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream }}
         run: python3 checked/scripts/release.py check-upstream-recipe "$GITHUB_WORKSPACE/app"
+      - name: Require Owner Authorization Across Repaired Application Identities
+        id: history
+        if: needs.prepare.outputs.already_published != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_PR: ${{ needs.prepare.outputs.pr }}
+          CANDIDATE_SHA: ${{ needs.prepare.outputs.sha }}
+          CONFIG_SHA: ${{ needs.prepare.outputs.candidate_config }}
+        run: |
+          python3 -B - <<'PY'
+          import os, pathlib, sys
+          sys.path.insert(0, str(pathlib.Path('checked/scripts').resolve()))
+          import release
+          try:
+              release.check_final_history(os.environ['GITHUB_REPOSITORY'],
+                  int(os.environ['CANDIDATE_PR']), os.environ['CANDIDATE_SHA'],
+                  os.environ['CONFIG_SHA'])
+          except Exception:
+              release.output(final_failed=True)
+              raise
+          PY
       - name: Pin The Checked Controller For Subsequent Runs
         id: pin
         env:
@@ -587,7 +610,7 @@ jobs:
           CANDIDATE_SHA: ${{ needs.prepare.outputs.sha }}
           REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}
           NONBLOCKING_FOLLOWUP: ${{ !contains(needs.*.result, 'failure') && needs.prepare.outputs.followup == 'true' }}
-          FINAL_VALIDATION_FAILED: ${{ needs.bootstrap-policy.result == 'failure' || needs.test.result == 'failure' || needs.publish.result == 'failure' || needs.prepare.outputs.final_failed == 'true' }}
+          FINAL_VALIDATION_FAILED: ${{ needs.bootstrap-policy.result == 'failure' || needs.test.result == 'failure' || needs.publish.result == 'failure' || needs.prepare.outputs.final_failed == 'true' || needs.activate-policy.outputs.final_failed == 'true' }}
           BOOTSTRAP_VALIDATION_FAILED: ${{ needs.bootstrap-policy.result == 'failure' && needs.bootstrap-policy.outputs.validation_started == 'true' }}
           BOOTSTRAP_FULL_PR: ${{ inputs.full_pr }}
           BOOTSTRAP_DELTA_PR: ${{ inputs.delta_pr }}

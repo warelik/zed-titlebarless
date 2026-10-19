@@ -77,7 +77,11 @@ release maintenance.
   existing source-review PR for the exact application/configuration and latest
   stopped run. Agents must never create that authorization without the owner
   granting it. The receipt is consumed by the ordinary final-candidate guard;
-  changing policy alone never refunds a spent attempt.
+  changing policy alone never refunds a spent attempt. Changing the application
+  SHA, selected upstream, patch digest or review PR never erases the latest failed
+  heavy attempt either: retain native receipts across source-review PRs and require
+  the exact owner grant for the latest stopped run before another heavy attempt.
+  Missing or incomplete native history blocks the attempt.
 - Use the compiler parameters and Cargo configuration of the exact selected
   upstream snapshot for each stage: upstream CI test parameters for regressions,
   upstream macOS bundle parameters for the shipped application. Do not invent

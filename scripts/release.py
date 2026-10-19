@@ -312,7 +312,93 @@ def unspent_heavy_attempt(repo, sha, body):
         return None
     return configuration[1]
 
-def final_retry_authorization(repo, sha, config, comments):
+def previous_final_failure(repo, *, exclude_run=None):
+    """Carry native heavy-attempt history across application and review identities."""
+    published = [item for item in pages(f"repos/{repo}/releases")
+                 if not item.get("draft") and not item.get("prerelease")]
+    if not published:
+        raise ValueError("Final attempt history requires the last published release")
+    cutoff = max(published, key=lambda item: item["id"]).get("published_at")
+    if not cutoff:
+        raise ValueError("Published release has no native publication time")
+    attempts = {}
+    for pull in pages(f"repos/{repo}/pulls?state=all&sort=updated&direction=desc"):
+        # Native PR updated_at includes new attempt comments. Old history is
+        # superseded only by an actual publication, never by a new source SHA.
+        if not pull.get("updated_at"):
+            raise ValueError("Incomplete native final-review history")
+        if pull["updated_at"] < cutoff:
+            continue
+        head, base = pull.get("head") or {}, pull.get("base") or {}
+        upstream = base.get("sha", "")
+        if (not SHA.fullmatch(upstream)
+                or base.get("ref") != f"review-base/{upstream}"
+                or not re.fullmatch(rf"review/{upstream}-[0-9a-f]{{64}}", head.get("ref", ""))
+                or (head.get("repo") or {}).get("full_name") != repo
+                or pull.get("user", {}).get("login") not in
+                    {repo.split('/')[0], "github-actions[bot]"}):
+            continue
+        application = head.get("sha", "")
+        if not SHA.fullmatch(application):
+            raise ValueError("Final review history has no exact application")
+        for item in pages(f"repos/{repo}/issues/{pull['number']}/comments"):
+            body = item.get("body") or ""
+            if item.get("user", {}).get("login") not in {repo.split('/')[0], "github-actions[bot]"}:
+                continue
+            if (f"<!-- zed-final:{application} -->" not in body
+                    and not re.search(rf"<!-- zed-final:{application}:[0-9a-f]{{40}} -->", body)):
+                continue
+            identity = re.search(
+                rf"Final validation and single build of `{application}` / `([0-9a-f]{{40}})`", body)
+            run_id = re.search(
+                rf"https://github\.com/{re.escape(repo)}/actions/runs/([1-9][0-9]*)", body)
+            revision = re.search(r"<!-- zed-final-workflow:([0-9a-f]{40}) -->", body)
+            if not identity or not run_id:
+                raise ValueError("Incomplete historical final-attempt receipt")
+            record = (application, revision[1] if revision else identity[1], revision is not None)
+            number = int(run_id[1])
+            if number == exclude_run:
+                continue
+            if number in attempts and attempts[number] != record:
+                raise ValueError("Conflicting historical final-attempt identity")
+            attempts[number] = record
+    latest = None
+    for number, (_, revision, recorded_revision) in attempts.items():
+        info = api(f"repos/{repo}/actions/runs/{number}")
+        if (info.get("path", "").split("@", 1)[0] != ".github/workflows/release.yml"
+                or not info.get("updated_at")):
+            raise ValueError("Unverifiable native historical final run")
+        pull_target = (recorded_revision and info.get("event") == "pull_request_target"
+                       and (info.get("head_repository") or {}).get("full_name") == repo
+                       and str(info.get("head_branch", "")).startswith("repair/"))
+        if info.get("head_sha") != revision and not pull_target:
+            raise ValueError("Historical final workflow revision changed")
+        if info["updated_at"] <= cutoff:
+            continue
+        record = api(f"repos/{repo}/actions/runs/{number}/jobs?filter=all&per_page=100")
+        jobs = record.get("jobs", [])
+        if (type(record.get("total_count")) is not int or record["total_count"] > 100
+                or len(jobs) != record["total_count"]):
+            raise ValueError("Incomplete native final-attempt job history")
+        macos = [job for job in jobs
+                 if job.get("name") == "Test, Build And Inspect One macOS Application"]
+        if not macos:
+            raise ValueError("Missing native historical macOS evidence")
+        for job in macos:
+            if (job.get("status") == "completed" and job.get("conclusion") == "skipped"
+                    and not job.get("steps")):
+                continue
+            if (not job.get("started_at") or not job.get("completed_at")
+                    or job.get("status") != "completed" or info.get("status") != "completed"):
+                raise ValueError("Historical heavy attempt is active or unverifiable")
+            failed = (job.get("conclusion") != "success" or info.get("conclusion") != "success")
+            candidate = (job["completed_at"], number, failed)
+            if latest is None or candidate[:2] > latest[:2]:
+                latest = candidate
+    return latest[1] if latest and latest[2] else None
+
+
+def final_retry_authorization(repo, sha, config, comments, *, previous_run=None):
     """An owner may grant one exact new candidate a further expensive attempt."""
     receipts = []
     grants = []
@@ -332,10 +418,11 @@ def final_retry_authorization(repo, sha, config, comments):
             match = re.search(rf"<!-- zed-final-retry:{sha}:{config}:([1-9][0-9]*) -->", body)
             if match:
                 grants.append((item, int(match[1])))
-    if not receipts:
+    if not receipts and previous_run is None:
         return None
+    required_previous = previous_run if previous_run is not None else max(receipts)
     for grant, previous in grants:
-        if previous != max(receipts):
+        if previous != required_previous:
             continue
         try:
             attempt = api(f"repos/{repo}/actions/runs/{previous}")
@@ -388,6 +475,55 @@ def final_attempt(repo, pr, sha, config, *, policy_only=False):
                  + ("\n" + application_marker if not policy_only else "")
                   + f"\n<!-- zed-final-workflow:{revision} -->"
                   + (f"\n<!-- zed-final-retry-used:{authorization} -->" if authorization is not None else ""))})
+
+def check_final_history(repo, pr, sha, config, *, reserved=True):
+    """Checked Linux gate: no repaired identity may erase a spent heavy attempt."""
+    if not all(SHA.fullmatch(value) for value in (sha, config)):
+        raise ValueError("Final history requires exact reviewed source identities")
+    current_run = os.environ["GITHUB_RUN_ID"]
+    if not re.fullmatch(r"[1-9][0-9]*", current_run):
+        raise ValueError("Final history requires a native current run")
+    record = api(f"repos/{repo}/actions/runs/{current_run}/jobs?filter=all&per_page=100")
+    jobs = record.get("jobs", [])
+    if (type(record.get("total_count")) is not int or record["total_count"] > 100
+            or len(jobs) != record["total_count"]):
+        raise ValueError("Incomplete current-run attempt history")
+    for job in jobs:
+        if (job.get("name") == "Test, Build And Inspect One macOS Application"
+                and job.get("status") != "queued"
+                and not (job.get("conclusion") == "skipped" and not job.get("steps"))):
+            raise ValueError("A macOS attempt already started in this run; never rerun it")
+    comments = pages(f"repos/{repo}/issues/{pr}/comments")
+    marker = f"<!-- zed-final:{sha}:{config} -->"
+    receipt = None
+    if reserved:
+        receipts = [item for item in comments
+                    if item.get("user", {}).get("login") in {repo.split('/')[0], "github-actions[bot]"}
+                    and marker in (item.get("body") or "")
+                    and re.search(rf"https://github\.com/{re.escape(repo)}/actions/runs/{current_run}(?![0-9])",
+                                  item.get("body") or "")]
+        if len(receipts) != 1 or type(receipts[0].get("id")) is not int:
+            raise ValueError("Missing exact current candidate reservation")
+        receipt = receipts[0]
+    previous = previous_final_failure(repo, exclude_run=int(current_run))
+    if previous is None:
+        return
+    authorization = final_retry_authorization(
+        repo, sha, config,
+        [item for item in comments if receipt is None or item["id"] != receipt["id"]],
+        previous_run=previous)
+    if authorization is None:
+        raise ValueError(
+            "The latest failed heavy attempt requires an explicit owner grant "
+            "for this exact repaired application/configuration: "
+            f"https://github.com/{repo}/actions/runs/{previous}")
+    if receipt is None:
+        return  # Before reservation: verify authority without consuming it.
+    consumed = f"<!-- zed-final-retry-used:{authorization} -->"
+    if consumed not in receipt["body"]:
+        api(f"repos/{repo}/issues/comments/{receipt['id']}", method="PATCH",
+            data={"body": receipt["body"] + "\n" + consumed})
+
 
 def verify_adopted_configuration(repo, reviewed, adopted):
     """Only context removal and additive regression discovery may change at adoption."""
@@ -1176,7 +1312,13 @@ def mirror_main(repo):
     if updated["object"]["sha"] != upstream:
         raise ValueError("Upstream mirror did not reach the selected commit")
 
-def reserve_release(repo, tag, sha, upstream, patchset, version, config):
+def reserve_release(repo, tag, sha, upstream, patchset, version, config, pr=None):
+    if pr is not None:
+        try:
+            check_final_history(repo, pr, sha, config, reserved=False)
+        except Exception:
+            output(final_failed=True)
+            raise
     identity = {"schema": 1, "candidate_sha": sha, "upstream_sha": upstream,
                 "patchset_sha256": patchset, "version": version, "config_sha": config}
     marker = "<!-- zed-candidate:v1 " + json.dumps(identity, sort_keys=True) + " -->"
@@ -1326,7 +1468,7 @@ def prepare(app):
            already_published=bool(existing), policy_verified=policy_verified)
     if not existing:
         # Cheap setup must succeed before the single expensive sequence is spent.
-        release_id = reserve_release(repo, release, sha, upstream, patchset, version, review_config)
+        release_id = reserve_release(repo, release, sha, upstream, patchset, version, review_config, pr)
         final_attempt(repo, pr, sha, review_config)
         output(release_id=release_id)
     else:
