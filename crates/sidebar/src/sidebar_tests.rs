@@ -5371,6 +5371,21 @@ async fn test_saved_terminal_checks_every_root_and_allows_retry(cx: &mut TestApp
         assert!(!store.read(cx).is_intentionally_closing(terminal_id));
     });
     fs.as_fake().insert_tree("/missing-second", serde_json::json!({})).await;
+    fs.remove_dir(Path::new("/available-first"), Default::default()).await.unwrap();
+    fs.as_fake().insert_file("/available-first", b"now a regular file".to_vec()).await;
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.close_terminal(&metadata, &entry_workspace, window, cx);
+    });
+    cx.run_until_parked();
+    assert!(fake.kill_history().is_empty(), "a former first directory must not select the global daemon");
+    assert!(fake.has_session(&session_name));
+    cx.update(|_, cx| {
+        let store = TerminalThreadMetadataStore::global(cx);
+        assert!(store.read(cx).entry(terminal_id).is_some());
+        assert!(!store.read(cx).is_intentionally_closing(terminal_id));
+    });
+    fs.remove_file(Path::new("/available-first"), Default::default()).await.unwrap();
+    fs.as_fake().insert_tree("/available-first", serde_json::json!({})).await;
     sidebar.update_in(cx, |sidebar, window, cx| {
         sidebar.close_terminal(&metadata, &entry_workspace, window, cx);
     });
