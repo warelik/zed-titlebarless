@@ -175,6 +175,18 @@ class ReviewPolicyTests(unittest.TestCase):
                   patch.object(release, "pages", side_effect=[[request, native_state()], [], []])):
                 self.assertEqual(release.check_review("maintainer/zed-fork", 1, HEAD, OTHER)[0], expected)
 
+class ApplicationPathValidationTests(unittest.TestCase):
+    def test_allows_root_rules_file_used_by_downstream_review_guidance(self):
+        release.validate_paths([".rules"])
+
+    def test_rules_file_exception_does_not_allow_other_root_metadata(self):
+        for path in (
+            "AGENTS.md", "README.md", ".github/workflows/release.yml", "crates/example/.rules",
+        ):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                release.validate_paths([path])
+
+
 class ApplicationRegressionExtractorTests(unittest.TestCase):
     def test_unannotated_test_named_helpers_are_excluded(self):
         diff = """diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs

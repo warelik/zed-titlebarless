@@ -1475,7 +1475,7 @@ def validate_paths(paths):
     for name in paths:
         path = Path(name)
         if ("AGENTS.md" in path.parts or path.is_absolute() or ".." in path.parts
-                or not (name in {"Cargo.toml", "Cargo.lock"}
+                or not (name in {".rules", "Cargo.toml", "Cargo.lock"}
                         or name.startswith(("assets/", "crates/", "docs/", "script/")))):
             raise ValueError(f"Patch changes release infrastructure or an unsupported path: {name}")
 
