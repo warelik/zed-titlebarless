@@ -581,6 +581,10 @@
     ],
     [
       "sidebar",
+      "test_concurrent_legacy_restores_reserve_one_original_client_across_projects"
+    ],
+    [
+      "sidebar",
       "test_confirm_on_historical_thread_activates_workspace"
     ],
     [

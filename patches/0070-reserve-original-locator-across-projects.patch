@@ -1,0 +1,242 @@
+From 5b84d1f3879d2af9b58955cf1179176e9944c986 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 05:15:54 +0000
+Subject: [PATCH] Atomically claim a legacy daemon locator across projects
+ before attachment
+
+Use the existing process-wide metadata row as the reservation after discovery and before any Project starts the client. Preserve low-level APIs, do not create provisional records for failed new spawns, and notify shared metadata without holding a Project lease. Add a deterministic two-window two-project conflicting-client regression.
+---
+ crates/agent_ui/src/agent_panel.rs            | 19 +++--
+ .../src/terminal_thread_metadata_store.rs     | 23 ++++++
+ crates/project/src/terminals.rs               | 27 +++++++
+ crates/sidebar/src/sidebar_tests.rs           | 75 +++++++++++++++++++
+ 4 files changed, 139 insertions(+), 5 deletions(-)
+
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index 22a64e8..efd6b5d 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -2484,14 +2484,22 @@ impl AgentPanel {
+         restoring_existing: bool,
+         cx: &mut Context<Self>,
+     ) -> Task<Result<PersistentTerminal>> {
+-        let saved = TerminalThreadMetadataStore::try_global(cx)
+-            .and_then(|store| store.read(cx).entry(terminal_id).cloned());
++        let store = TerminalThreadMetadataStore::try_global(cx);
++        let saved = store.as_ref().and_then(|store| store.read(cx).entry(terminal_id).cloned());
+         let stored_context = saved.as_ref().and_then(|metadata| metadata.shpool_context.clone());
+         if context.as_ref().zip(stored_context.as_ref()).is_some_and(|(left, right)| left != right) {
+             return Task::ready(Err(anyhow::anyhow!("saved terminal daemon context changed")));
+         }
+         let context = stored_context.or(context);
+         let restoring_existing = restoring_existing || saved.is_some();
++        let remote_connection = self.project.read(cx).remote_connection_options(cx);
++        let reserve_context = store.map(|store| -> project::terminals::ShpoolContextReservation {
++            Box::new(move |context, cx| {
++                store.update(cx, |store, cx| store.reserve_shpool_context(
++                    terminal_id, context.clone(), remote_connection, cx,
++                ))
++            })
++        });
+         // A real shell ties the spawn's timing to the host, so a test that needs
+         // to observe the panel mid-spawn installs a gate to pause before calling
+         // project.create_persistent_terminal_shell.
+@@ -2504,12 +2512,13 @@ impl AgentPanel {
+                 gate.await.ok();
+                 let shell_task = cx.update(|cx| {
+                     project.update(cx, |project, cx| {
+-                        project.create_persistent_terminal_shell_in_context(
++                        project.create_persistent_terminal_shell_with_reservation(
+                             working_directory,
+                             session_name,
+                             bounds,
+                             context,
+                             restoring_existing,
++                            reserve_context,
+                             cx,
+                         )
+                     })
+@@ -2521,8 +2530,8 @@ impl AgentPanel {
+         let session_name = terminal_id.session_name();
+         let bounds = self.laid_out_terminal_bounds(Some(terminal_id), cx);
+         self.project.update(cx, |project, cx| {
+-            project.create_persistent_terminal_shell_in_context(
+-                working_directory, session_name, bounds, context, restoring_existing, cx,
++            project.create_persistent_terminal_shell_with_reservation(
++                working_directory, session_name, bounds, context, restoring_existing, reserve_context, cx,
+             )
+         })
+     }
+diff --git a/crates/agent_ui/src/terminal_thread_metadata_store.rs b/crates/agent_ui/src/terminal_thread_metadata_store.rs
+index a420759..c9cf0ab 100644
+--- a/crates/agent_ui/src/terminal_thread_metadata_store.rs
++++ b/crates/agent_ui/src/terminal_thread_metadata_store.rs
+@@ -456,6 +456,29 @@ impl TerminalThreadMetadataStore {
+         }
+     }
+ 
++    /// Shared legacy records must claim the complete locator atomically,
++    /// before any project starts its attachment. Fresh IDs are unique until
++    /// their creator publishes metadata and therefore have no shared row yet.
++    pub fn reserve_shpool_context(
++        &mut self,
++        terminal_id: TerminalId,
++        context: project::terminals::ShpoolSessionContext,
++        remote_connection: Option<RemoteConnectionOptions>,
++        cx: &mut Context<Self>,
++    ) -> anyhow::Result<()> {
++        context.validate()?;
++        anyhow::ensure!(!self.intentionally_closed_terminal_ids.contains(&terminal_id),
++            "terminal was already closed before its daemon reservation");
++        if let Some(existing) = self.entry(terminal_id).and_then(|row| row.shpool_context.as_ref()) {
++            anyhow::ensure!(existing == &context,
++                "another project reserved a different original shpool locator");
++            return Ok(());
++        }
++        // No provisional row is created for a failed NEW spawn.
++        self.remember_shpool_context(terminal_id, context, remote_connection, cx);
++        Ok(())
++    }
++
+     /// Pin only an existing row. Pending closes may learn the locator, but
+     /// completed closes must never be resurrected by a late spawn result.
+     pub fn remember_shpool_context(
+diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
+index 3bc30ac..5515b26 100644
+--- a/crates/project/src/terminals.rs
++++ b/crates/project/src/terminals.rs
+@@ -109,6 +109,11 @@ impl ShpoolSessionContext {
+     }
+ }
+ 
++/// Optional application-level reservation, made after discovery and before
++/// attachment. The editor's metadata store owns the process-wide decision.
++pub type ShpoolContextReservation =
++    Box<dyn FnOnce(&ShpoolSessionContext, &mut App) -> Result<()> + 'static>;
++
+ pub struct PersistentTerminal {
+     pub terminal: Entity<Terminal>,
+     pub session: PersistentSession,
+@@ -736,6 +741,21 @@ impl Project {
+         context: Option<ShpoolSessionContext>,
+         restoring_existing: bool,
+         cx: &mut Context<Self>,
++    ) -> Task<Result<PersistentTerminal>> {
++        self.create_persistent_terminal_shell_with_reservation(
++            cwd, session_name, bounds, context, restoring_existing, None, cx,
++        )
++    }
++
++    pub fn create_persistent_terminal_shell_with_reservation(
++        &mut self,
++        cwd: Option<PathBuf>,
++        session_name: String,
++        bounds: Option<TerminalBounds>,
++        context: Option<ShpoolSessionContext>,
++        restoring_existing: bool,
++        mut reserve_context: Option<ShpoolContextReservation>,
++        cx: &mut Context<Self>,
+     ) -> Task<Result<PersistentTerminal>> {
+         let known = self.terminals.session_contexts.get(&session_name).cloned();
+         if context.as_ref().zip(known.as_ref()).is_some_and(|(left, right)| left != right) {
+@@ -804,6 +824,13 @@ impl Project {
+                 bounds,
+                 hold_resize_until_output: command.is_some(),
+             };
++            if let Some(context) = &context {
++                if let Some(reserve) = reserve_context.take() {
++                    // No Project/window entity is leased while the shared
++                    // metadata reservation publishes its notification.
++                    cx.update(|cx| reserve(context, cx))?;
++                }
++            }
+             let terminal = project
+                 .update(cx, |project, cx| {
+                     if let Some(context) = &context {
+diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
+index 4f15b16..67c7692 100644
+--- a/crates/sidebar/src/sidebar_tests.rs
++++ b/crates/sidebar/src/sidebar_tests.rs
+@@ -5314,6 +5314,81 @@ async fn test_saved_terminal_checks_every_root_and_allows_retry(cx: &mut TestApp
+     });
+ }
+ 
++#[gpui::test]
++async fn test_concurrent_legacy_restores_reserve_one_original_client_across_projects(
++    cx: &mut TestAppContext,
++) {
++    let first_project = init_test_project_with_agent_panel("/shared", cx).await;
++    let fs = first_project.read_with(cx, |project, _| project.fs().clone());
++    let second_project = project::Project::test(fs, [Path::new("/shared")], cx).await;
++    let terminal_id = TerminalId::new();
++    let session_name = terminal_id.session_name();
++    let first_fake = first_project.update(cx, |project, _| project.enable_fake_shpool(&[]));
++    let second_fake = second_project.update(cx, |project, _| project.enable_fake_shpool(&[]));
++    for fake in [&first_fake, &second_fake] { fake.add_session(&session_name); }
++    {
++        let mut state = first_fake.state.lock();
++        state.program = "/client-a/shpool".into();
++        state.probe_delay = Some(Duration::from_secs(1));
++    }
++    {
++        let mut state = second_fake.state.lock();
++        state.program = "/client-b/shpool".into();
++        state.probe_delay = Some(Duration::from_secs(2));
++    }
++    let first_window = cx.add_window(|window, cx| {
++        MultiWorkspace::test_new(first_project.clone(), window, cx)
++    });
++    let second_window = cx.add_window(|window, cx| {
++        MultiWorkspace::test_new(second_project.clone(), window, cx)
++    });
++    let first_multi_workspace = first_window.root(cx).unwrap();
++    let second_multi_workspace = second_window.root(cx).unwrap();
++    let mut first_context = VisualTestContext::from_window(first_window.into(), cx);
++    let mut second_context = VisualTestContext::from_window(second_window.into(), cx);
++    let (_, first_panel) = setup_sidebar_with_agent_panel(&first_multi_workspace, &mut first_context);
++    let (_, second_panel) = setup_sidebar_with_agent_panel(&second_multi_workspace, &mut second_context);
++    let metadata = TerminalThreadMetadata {
++        shpool_context: None,
++        terminal_id, title: "Legacy concurrent client".into(), custom_title: None,
++        created_at: chrono::Utc::now(),
++        worktree_paths: first_project.read_with(cx, |project, cx| project.worktree_paths(cx)),
++        remote_connection: None, working_directory: None,
++    };
++    cx.update(|cx| TerminalThreadMetadataStore::global(cx)
++        .update(cx, |store, cx| store.save(metadata.clone(), cx)));
++    first_panel.update_in(&mut first_context, |panel, window, cx| {
++        panel.restore_terminal(metadata.clone(), false, AgentThreadSource::AgentPanel, None, window, cx);
++    });
++    second_panel.update_in(&mut second_context, |panel, window, cx| {
++        panel.restore_terminal(metadata.clone(), false, AgentThreadSource::AgentPanel, None, window, cx);
++    });
++    cx.run_until_parked();
++    assert!(first_fake.attach_history().is_empty());
++    assert!(second_fake.attach_history().is_empty());
++    cx.executor().advance_clock(Duration::from_secs(1));
++    cx.run_until_parked();
++    let reserved = first_project.read_with(cx, |project, _| {
++        project.persistent_terminal_context(&session_name).cloned().unwrap()
++    });
++    assert_eq!(first_fake.attach_history(), vec![session_name.clone()]);
++    cx.update(|cx| assert_eq!(TerminalThreadMetadataStore::global(cx).read(cx)
++        .entry(terminal_id).unwrap().shpool_context.as_ref(), Some(&reserved)));
++    cx.executor().advance_clock(Duration::from_secs(1));
++    cx.run_until_parked();
++    assert!(second_fake.attach_history().is_empty(),
++        "a conflicting client must not attach even from a different Project/window");
++    assert!(second_project.read_with(cx, |project, _| {
++        project.persistent_terminal_context(&session_name).is_none()
++    }));
++    assert!(first_fake.kill_history().is_empty());
++    assert!(second_fake.kill_history().is_empty());
++    assert!(first_fake.has_session(&session_name));
++    assert!(second_fake.has_session(&session_name));
++    cx.update(|cx| assert_eq!(TerminalThreadMetadataStore::global(cx).read(cx)
++        .entry(terminal_id).unwrap().shpool_context.as_ref(), Some(&reserved)));
++}
++
+ #[gpui::test]
+ async fn test_terminal_close_preserves_conflicting_live_daemon_owners(cx: &mut TestAppContext) {
+     let first_project = init_test_project_with_agent_panel("/shared", cx).await;
