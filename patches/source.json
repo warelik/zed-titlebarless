@@ -489,6 +489,10 @@
     ],
     [
       "project",
+      "test_persistent_terminal_rejects_different_client_for_the_same_socket"
+    ],
+    [
+      "project",
       "test_shpool_command_preserves_shell_program_and_arguments"
     ],
     [
