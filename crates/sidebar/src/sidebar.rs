@@ -3826,7 +3826,7 @@ impl Sidebar {
         // The live Window may already be leased by the caller. The existing
         // workspace registry provides model handles without reading its root.
         let windows = cx.windows();
-        let mut seen = HashSet::default();
+        let mut seen = HashSet::<EntityId>::default();
         let mut workspaces = Vec::new();
         for store in stores {
             for (registered_window, weak_workspace) in store.read(cx).workspaces_with_windows() {
