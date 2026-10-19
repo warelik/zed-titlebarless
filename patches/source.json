@@ -693,6 +693,10 @@
     ],
     [
       "sidebar",
+      "test_terminal_close_coordinates_sole_same_window_owner"
+    ],
+    [
+      "sidebar",
       "test_terminal_close_waits_for_pending_owner_in_another_window"
     ],
     [
