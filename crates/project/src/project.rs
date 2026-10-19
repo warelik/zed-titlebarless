@@ -1408,6 +1408,7 @@ impl Project {
                 git_diff_debouncer: DebouncedDelay::new(),
                 terminals: Terminals {
                     local_handles: Vec::new(),
+                    session_contexts: HashMap::default(),
                 },
                 #[cfg(any(test, feature = "test-support"))]
                 fake_shpool: None,
@@ -1654,6 +1655,7 @@ impl Project {
                 git_diff_debouncer: DebouncedDelay::new(),
                 terminals: Terminals {
                     local_handles: Vec::new(),
+                    session_contexts: HashMap::default(),
                 },
                 #[cfg(any(test, feature = "test-support"))]
                 fake_shpool: None,
@@ -1951,6 +1953,7 @@ impl Project {
                 git_diff_debouncer: DebouncedDelay::new(),
                 terminals: Terminals {
                     local_handles: Vec::new(),
+                    session_contexts: HashMap::default(),
                 },
                 #[cfg(any(test, feature = "test-support"))]
                 fake_shpool: None,

@@ -5401,9 +5401,28 @@ impl Sidebar {
                     may_exist |= pending.await?;
                 }
                 if may_exist {
-                    project.update(cx, |project, cx| {
-                        project.kill_persistent_terminal_session(id.session_name(), cx)
-                    }).await?;
+                    cx.update(|cx| {
+                        let mut expected = TerminalThreadMetadataStore::try_global(cx)
+                            .and_then(|store| store.read(cx).entry(id)
+                                .and_then(|metadata| metadata.shpool_context.clone()))
+                            .or_else(|| metadata.shpool_context.clone());
+                        for (_, workspace, _) in Self::terminal_owners(&metadata, &stores, cx) {
+                            let owner_project = workspace.read(cx).project();
+                            if let Some(context) = owner_project.read(cx)
+                                .persistent_terminal_context(&id.session_name())
+                            {
+                                anyhow::ensure!(expected.as_ref()
+                                    .is_none_or(|expected| expected.same_daemon(context)),
+                                    "terminal owners refer to different shpool daemons");
+                                if expected.is_none() { expected = Some(context.clone()); }
+                            }
+                        }
+                        anyhow::Ok(())
+                    })?;
+                    let kill = cx.update(|cx| {
+                        AgentPanel::kill_terminal_session(project.clone(), id, cx)
+                    });
+                    kill.await?;
                 }
                 cx.update(|cx| {
                     // Re-read after waiting: a workspace may have moved to a
@@ -5593,8 +5612,8 @@ impl Sidebar {
                 }
 
                 if should_kill_persistent_session {
-                    let kill = project.update(cx, |project, cx| {
-                        project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
+                    let kill = gpui::AsyncApp::update(cx, |cx| {
+                        AgentPanel::kill_terminal_session(project.clone(), terminal_id, cx)
                     });
                     if let Err(error) = kill.await {
                         gpui::AsyncApp::update(cx, |cx| complete_terminal_close_metadata(terminal_id, false, cx));
@@ -5691,8 +5710,8 @@ impl Sidebar {
                     }
 
                     if should_kill_persistent_session {
-                        let kill = project.update(cx, |project, cx| {
-                            project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
+                        let kill = gpui::AsyncApp::update(cx, |cx| {
+                            AgentPanel::kill_terminal_session(project.clone(), terminal_id, cx)
                         });
                         if let Err(error) = kill.await {
                             gpui::AsyncApp::update(cx, |cx| complete_terminal_close_metadata(terminal_id, false, cx));
