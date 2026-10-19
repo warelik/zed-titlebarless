@@ -1,0 +1,86 @@
+From 56787c235bec649a03d2e6077181bfa6eb0cc5a0 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 07:24:33 +0000
+Subject: [PATCH] Preserve unmanaged fallback and account for failed
+ original-client attempts
+
+Repair the complete four-case runtime batch from final39211469726 (203of207 passed). Record failed fake commands against the matching original backend before availability failure while preserving wrong-socket rejection. An existing-only legacy probe with no client may return the original Unavailable plain shell; available daemons still require a positive UUID match and pinned-context absence still fails. Correct only the newly added locator field of the original unmanaged fixture to None; retain every prior fixture value, call and assertion. Extend the existing legacy-match regression with absent-client fallback, no attachment and no invented locator checks. No compiler recipe, policy or test-selector changes.
+---
+ crates/agent_ui/src/agent_panel.rs |  2 +-
+ crates/project/src/terminals.rs    | 27 +++++++++++++++++++++++++--
+ 2 files changed, 26 insertions(+), 3 deletions(-)
+
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index efd6b5d..d8a2903 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -17739,7 +17739,7 @@ mod tests {
+ 
+         let terminal_id = TerminalId::new();
+         let metadata = TerminalThreadMetadata {
+-            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
++            shpool_context: None,
+             terminal_id,
+             title: "Unmanaged".into(),
+             custom_title: None,
+diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
+index 7dd39ee..9638da4 100644
+--- a/crates/project/src/terminals.rs
++++ b/crates/project/src/terminals.rs
+@@ -778,8 +778,11 @@ impl Project {
+         cx.spawn(async move |project, cx| {
+             let probe_result = probe.await?;
+             if legacy_restore {
++                // An absent client keeps the ordinary unmanaged-shell fallback.
++                // The existing-only probe starts no daemon, and no persistent
++                // attachment is allowed without a positive session match.
+                 anyhow::ensure!(
+-                    probe_result.as_ref().is_some_and(|probe| probe.sessions.contains(&session_name)),
++                    probe_result.as_ref().is_none_or(|probe| probe.sessions.contains(&session_name)),
+                     "original shpool context is unknown and the saved session was not found; metadata retained",
+                 );
+             }
+@@ -1015,7 +1018,7 @@ impl Project {
+         if let Some(fake) = &self.fake_shpool {
+             if context.as_ref().is_some_and(|context| {
+                 let state = fake.state.lock();
+-                !state.available || state.socket.to_string_lossy().as_bytes() != context.socket.as_bytes()
++                state.socket.to_string_lossy().as_bytes() != context.socket.as_bytes()
+             }) {
+                 return Task::ready(Err(anyhow::anyhow!("original shpool daemon is unavailable")));
+             }
+@@ -1023,6 +1026,11 @@ impl Project {
+             let delay = {
+                 let mut state = state.lock();
+                 state.kill_history.push(session_name.clone());
++                // Like executing the pinned client in production, a failed
++                // command is still an attempt against this original backend.
++                if context.is_some() && !state.available {
++                    return Task::ready(Err(anyhow::anyhow!("original shpool daemon is unavailable")));
++                }
+                 state.kill_delay
+             };
+             if let Some(delay) = delay {
+@@ -2070,6 +2078,21 @@ mod tests {
+             )
+         }).await.is_err());
+         assert!(fake.attach_history().is_empty(), "unknown legacy sessions must not be duplicated");
++
++        fake.state.lock().available = false;
++        let unmanaged = project.update(cx, |project, cx| {
++            project.create_persistent_terminal_shell_in_context(
++                None, "zed-legacy".into(), None, None, true, cx,
++            )
++        }).await.unwrap();
++        assert_eq!(unmanaged.session, PersistentSession::Unavailable);
++        assert!(fake.attach_history().is_empty(), "an absent client must not attach a persistent session");
++        assert!(!fake.has_session("zed-legacy"));
++        assert!(project.read_with(cx, |project, _| {
++            project.persistent_terminal_context("zed-legacy").is_none()
++        }), "an unmanaged fallback must not invent an original daemon locator");
++        fake.state.lock().available = true;
++
+         fake.add_session("zed-legacy");
+         let restored = project.update(cx, |project, cx| {
+             project.create_persistent_terminal_shell_in_context(
