@@ -5416,6 +5416,81 @@ async fn test_saved_terminal_checks_every_root_and_allows_retry(cx: &mut TestApp
 }
 
 #[gpui::test]
+async fn test_concurrent_legacy_restores_reserve_one_original_client_across_projects(
+    cx: &mut TestAppContext,
+) {
+    let first_project = init_test_project_with_agent_panel("/shared", cx).await;
+    let fs = first_project.read_with(cx, |project, _| project.fs().clone());
+    let second_project = project::Project::test(fs, [Path::new("/shared")], cx).await;
+    let terminal_id = TerminalId::new();
+    let session_name = terminal_id.session_name();
+    let first_fake = first_project.update(cx, |project, _| project.enable_fake_shpool(&[]));
+    let second_fake = second_project.update(cx, |project, _| project.enable_fake_shpool(&[]));
+    for fake in [&first_fake, &second_fake] { fake.add_session(&session_name); }
+    {
+        let mut state = first_fake.state.lock();
+        state.program = "/client-a/shpool".into();
+        state.probe_delay = Some(Duration::from_secs(1));
+    }
+    {
+        let mut state = second_fake.state.lock();
+        state.program = "/client-b/shpool".into();
+        state.probe_delay = Some(Duration::from_secs(2));
+    }
+    let first_window = cx.add_window(|window, cx| {
+        MultiWorkspace::test_new(first_project.clone(), window, cx)
+    });
+    let second_window = cx.add_window(|window, cx| {
+        MultiWorkspace::test_new(second_project.clone(), window, cx)
+    });
+    let first_multi_workspace = first_window.root(cx).unwrap();
+    let second_multi_workspace = second_window.root(cx).unwrap();
+    let mut first_context = VisualTestContext::from_window(first_window.into(), cx);
+    let mut second_context = VisualTestContext::from_window(second_window.into(), cx);
+    let (_, first_panel) = setup_sidebar_with_agent_panel(&first_multi_workspace, &mut first_context);
+    let (_, second_panel) = setup_sidebar_with_agent_panel(&second_multi_workspace, &mut second_context);
+    let metadata = TerminalThreadMetadata {
+        shpool_context: None,
+        terminal_id, title: "Legacy concurrent client".into(), custom_title: None,
+        created_at: chrono::Utc::now(),
+        worktree_paths: first_project.read_with(cx, |project, cx| project.worktree_paths(cx)),
+        remote_connection: None, working_directory: None,
+    };
+    cx.update(|cx| TerminalThreadMetadataStore::global(cx)
+        .update(cx, |store, cx| store.save(metadata.clone(), cx)));
+    first_panel.update_in(&mut first_context, |panel, window, cx| {
+        panel.restore_terminal(metadata.clone(), false, AgentThreadSource::AgentPanel, None, window, cx);
+    });
+    second_panel.update_in(&mut second_context, |panel, window, cx| {
+        panel.restore_terminal(metadata.clone(), false, AgentThreadSource::AgentPanel, None, window, cx);
+    });
+    cx.run_until_parked();
+    assert!(first_fake.attach_history().is_empty());
+    assert!(second_fake.attach_history().is_empty());
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    let reserved = first_project.read_with(cx, |project, _| {
+        project.persistent_terminal_context(&session_name).cloned().unwrap()
+    });
+    assert_eq!(first_fake.attach_history(), vec![session_name.clone()]);
+    cx.update(|cx| assert_eq!(TerminalThreadMetadataStore::global(cx).read(cx)
+        .entry(terminal_id).unwrap().shpool_context.as_ref(), Some(&reserved)));
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(second_fake.attach_history().is_empty(),
+        "a conflicting client must not attach even from a different Project/window");
+    assert!(second_project.read_with(cx, |project, _| {
+        project.persistent_terminal_context(&session_name).is_none()
+    }));
+    assert!(first_fake.kill_history().is_empty());
+    assert!(second_fake.kill_history().is_empty());
+    assert!(first_fake.has_session(&session_name));
+    assert!(second_fake.has_session(&session_name));
+    cx.update(|cx| assert_eq!(TerminalThreadMetadataStore::global(cx).read(cx)
+        .entry(terminal_id).unwrap().shpool_context.as_ref(), Some(&reserved)));
+}
+
+#[gpui::test]
 async fn test_terminal_close_preserves_conflicting_live_daemon_owners(cx: &mut TestAppContext) {
     let first_project = init_test_project_with_agent_panel("/shared", cx).await;
     let fs = first_project.read_with(cx, |project, _| project.fs().clone());

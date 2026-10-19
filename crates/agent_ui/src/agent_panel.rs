@@ -2485,14 +2485,22 @@ impl AgentPanel {
         restoring_existing: bool,
         cx: &mut Context<Self>,
     ) -> Task<Result<PersistentTerminal>> {
-        let saved = TerminalThreadMetadataStore::try_global(cx)
-            .and_then(|store| store.read(cx).entry(terminal_id).cloned());
+        let store = TerminalThreadMetadataStore::try_global(cx);
+        let saved = store.as_ref().and_then(|store| store.read(cx).entry(terminal_id).cloned());
         let stored_context = saved.as_ref().and_then(|metadata| metadata.shpool_context.clone());
         if context.as_ref().zip(stored_context.as_ref()).is_some_and(|(left, right)| left != right) {
             return Task::ready(Err(anyhow::anyhow!("saved terminal daemon context changed")));
         }
         let context = stored_context.or(context);
         let restoring_existing = restoring_existing || saved.is_some();
+        let remote_connection = self.project.read(cx).remote_connection_options(cx);
+        let reserve_context = store.map(|store| -> project::terminals::ShpoolContextReservation {
+            Box::new(move |context, cx| {
+                store.update(cx, |store, cx| store.reserve_shpool_context(
+                    terminal_id, context.clone(), remote_connection, cx,
+                ))
+            })
+        });
         // A real shell ties the spawn's timing to the host, so a test that needs
         // to observe the panel mid-spawn installs a gate to pause before calling
         // project.create_persistent_terminal_shell.
@@ -2505,12 +2513,13 @@ impl AgentPanel {
                 gate.await.ok();
                 let shell_task = cx.update(|cx| {
                     project.update(cx, |project, cx| {
-                        project.create_persistent_terminal_shell_in_context(
+                        project.create_persistent_terminal_shell_with_reservation(
                             working_directory,
                             session_name,
                             bounds,
                             context,
                             restoring_existing,
+                            reserve_context,
                             cx,
                         )
                     })
@@ -2522,8 +2531,8 @@ impl AgentPanel {
         let session_name = terminal_id.session_name();
         let bounds = self.laid_out_terminal_bounds(Some(terminal_id), cx);
         self.project.update(cx, |project, cx| {
-            project.create_persistent_terminal_shell_in_context(
-                working_directory, session_name, bounds, context, restoring_existing, cx,
+            project.create_persistent_terminal_shell_with_reservation(
+                working_directory, session_name, bounds, context, restoring_existing, reserve_context, cx,
             )
         })
     }
