@@ -17739,7 +17739,7 @@ mod tests {
 
         let terminal_id = TerminalId::new();
         let metadata = TerminalThreadMetadata {
-            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
+            shpool_context: None,
             terminal_id,
             title: "Unmanaged".into(),
             custom_title: None,
