@@ -81,7 +81,9 @@ release maintenance.
   SHA, selected upstream, patch digest or review PR never erases the latest failed
   heavy attempt either: retain native receipts across source-review PRs and require
   the exact owner grant for the latest stopped run before another heavy attempt.
-  Missing or incomplete native history blocks the attempt.
+  Missing or incomplete native history blocks the attempt. An older trusted pin
+  without this guard must use the existing reviewed read-only bootstrap before
+  preparing any draft or final-attempt reservation.
 - Use the compiler parameters and Cargo configuration of the exact selected
   upstream snapshot for each stage: upstream CI test parameters for regressions,
   upstream macOS bundle parameters for the shipped application. Do not invent

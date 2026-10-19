@@ -250,7 +250,7 @@ jobs:
       - name: Require An Exact Previously Checked Policy Revision
         id: control
         env:
-          TRUSTED_POLICY: ${{ needs.bootstrap-policy.outputs.policy_ref || vars.ZED_TRUSTED_POLICY }}
+          TRUSTED_POLICY: ${{ (needs.bootstrap-policy.result == 'success' && needs.bootstrap-policy.outputs.policy_ref) || vars.ZED_TRUSTED_POLICY }}
         run: |
           [[ "$TRUSTED_POLICY" =~ ^[0-9a-f]{40}$ ]] || {
             echo "::error::The trusted policy pin is missing; use the reviewed read-only bootstrap."
@@ -287,6 +287,11 @@ jobs:
           import os, pathlib, sys
           sys.path.insert(0, str(pathlib.Path('trusted/scripts').resolve()))
           import release
+          if not callable(getattr(release, "check_final_history", None)):
+              release.output(final_failed=True)
+              raise SystemExit("The old policy pin has no heavy-attempt history guard; "
+                  "initialize it through the existing reviewed read-only bootstrap "
+                  "before preparing any candidate reservation.")
           release.ROOT = pathlib.Path('configuration').resolve()
           release.prepare(pathlib.Path(os.environ['RUNNER_TEMP']) / 'zed-source')
           PY

@@ -682,6 +682,18 @@ class CrossApplicationFinalHistoryTests(unittest.TestCase):
                 if consumed:
                     self.assertIn("<!-- zed-final-retry-used:100 -->", consumed[0]["body"])
 
+    def test_legacy_policy_cannot_reserve_before_the_checked_bootstrap_guard(self):
+        workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
+        preparation = workflow.split("\n  prepare:\n", 1)[1].split("\n  policy-check:\n", 1)[0]
+        guard = preparation.index('callable(getattr(release, "check_final_history", None))')
+        self.assertLess(guard, preparation.index("release.prepare("))
+        self.assertIn("release.output(final_failed=True)", preparation[:preparation.index("release.prepare(")])
+        self.assertIn("existing reviewed read-only bootstrap", preparation)
+        selection = next(line for line in preparation.splitlines() if "TRUSTED_POLICY:" in line)
+        self.assertIn("needs.bootstrap-policy.result == 'success'", selection)
+        self.assertLess(selection.index("needs.bootstrap-policy.outputs.policy_ref"),
+                        selection.index("vars.ZED_TRUSTED_POLICY"))
+
     def test_checked_linux_history_gate_blocks_macos_before_pin_or_adoption(self):
         workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
         activation = workflow.split("\n  activate-policy:\n", 1)[1].split("\n  repair:\n", 1)[0]
