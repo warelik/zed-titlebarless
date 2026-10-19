@@ -68,6 +68,7 @@ pub struct TerminalThreadMetadata {
     pub worktree_paths: WorktreePaths,
     pub remote_connection: Option<RemoteConnectionOptions>,
     pub working_directory: Option<PathBuf>,
+    pub shpool_context: Option<project::terminals::ShpoolSessionContext>,
 }
 
 impl TerminalThreadMetadata {
@@ -455,9 +456,37 @@ impl TerminalThreadMetadataStore {
         }
     }
 
+    /// Pin only an existing row. Pending closes may learn the locator, but
+    /// completed closes must never be resurrected by a late spawn result.
+    pub fn remember_shpool_context(
+        &mut self,
+        terminal_id: TerminalId,
+        context: project::terminals::ShpoolSessionContext,
+        remote_connection: Option<RemoteConnectionOptions>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.intentionally_closed_terminal_ids.contains(&terminal_id) { return; }
+        let Some(mut metadata) = self.entry(terminal_id).cloned() else { return };
+        if let Some(existing) = &metadata.shpool_context {
+            if !existing.same_daemon(&context) {
+                log::warn!("refusing to replace an original shpool context");
+            }
+            return;
+        }
+        if metadata.remote_connection.is_none() {
+            metadata.remote_connection = remote_connection;
+        }
+        metadata.shpool_context = Some(context);
+        self.save_internal(metadata);
+        cx.notify();
+    }
+
     fn save_internal(&mut self, mut metadata: TerminalThreadMetadata) {
         if let Some(existing) = self.terminals.get(&metadata.terminal_id) {
             metadata.created_at = existing.created_at;
+            if existing.shpool_context.is_some() {
+                metadata.shpool_context = existing.shpool_context.clone();
+            }
             if metadata.folder_paths().is_empty() && !existing.folder_paths().is_empty() {
                 metadata.worktree_paths = existing.worktree_paths.clone();
             }
@@ -652,7 +681,9 @@ impl Domain for TerminalThreadMetadataDb {
             THEN json_remove(remote_connection, '$.Ssh.password')
             ELSE remote_connection END
         WHERE remote_connection IS NOT NULL;
-    "#];
+    "#, sql!(
+        ALTER TABLE sidebar_terminal_threads ADD COLUMN shpool_context TEXT;
+    )];
 }
 
 db::static_connection!(TerminalThreadMetadataDb, []);
@@ -675,7 +706,7 @@ impl TerminalThreadMetadataDb {
             &self.0,
             "SELECT terminal_id, title, custom_title, created_at, \
             working_directory, folder_paths, folder_paths_order, main_worktree_paths, \
-            main_worktree_paths_order, remote_connection \
+            main_worktree_paths_order, remote_connection, shpool_context \
             FROM sidebar_terminal_threads \
             ORDER BY created_at DESC",
         )?;
@@ -720,9 +751,14 @@ impl TerminalThreadMetadataDb {
             .transpose()
             .context("serialize terminal thread remote connection")?;
 
+        let shpool_context = row.shpool_context.as_ref().map(|context| {
+            context.validate()?;
+            serde_json::to_string(context).context("serialize original shpool context")
+        }).transpose()?;
+
         self.write(move |conn| {
-            let sql = "INSERT INTO sidebar_terminal_threads(terminal_id, title, custom_title, created_at, working_directory, folder_paths, folder_paths_order, main_worktree_paths, main_worktree_paths_order, remote_connection) \
-                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+            let sql = "INSERT INTO sidebar_terminal_threads(terminal_id, title, custom_title, created_at, working_directory, folder_paths, folder_paths_order, main_worktree_paths, main_worktree_paths_order, remote_connection, shpool_context) \
+                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
                        ON CONFLICT(terminal_id) DO UPDATE SET \
                            title = excluded.title, \
                            custom_title = excluded.custom_title, \
@@ -732,7 +768,8 @@ impl TerminalThreadMetadataDb {
                            folder_paths_order = COALESCE(excluded.folder_paths_order, sidebar_terminal_threads.folder_paths_order), \
                            main_worktree_paths = COALESCE(excluded.main_worktree_paths, sidebar_terminal_threads.main_worktree_paths), \
                            main_worktree_paths_order = COALESCE(excluded.main_worktree_paths_order, sidebar_terminal_threads.main_worktree_paths_order), \
-                           remote_connection = COALESCE(excluded.remote_connection, sidebar_terminal_threads.remote_connection)";
+                           remote_connection = COALESCE(excluded.remote_connection, sidebar_terminal_threads.remote_connection), \
+                           shpool_context = COALESCE(sidebar_terminal_threads.shpool_context, excluded.shpool_context)";
             let mut stmt = Statement::prepare(conn, sql)?;
             let mut i = stmt.bind(&terminal_id, 1)?;
             i = stmt.bind(&title, i)?;
@@ -743,7 +780,8 @@ impl TerminalThreadMetadataDb {
             i = stmt.bind(&folder_paths_order, i)?;
             i = stmt.bind(&main_worktree_paths, i)?;
             i = stmt.bind(&main_worktree_paths_order, i)?;
-            stmt.bind(&remote_connection, i)?;
+            i = stmt.bind(&remote_connection, i)?;
+            stmt.bind(&shpool_context, i)?;
             stmt.exec()
         })
         .await
@@ -779,6 +817,12 @@ impl Column for TerminalThreadMetadata {
             Column::column(statement, next)?;
         let (remote_connection_json, next): (Option<String>, i32) =
             Column::column(statement, next)?;
+        let (shpool_context_json, next): (Option<String>, i32) =
+            Column::column(statement, next)?;
+        let shpool_context = shpool_context_json.as_deref()
+            .map(serde_json::from_str::<project::terminals::ShpoolSessionContext>)
+            .transpose().context("deserialize original shpool context")?;
+        if let Some(context) = &shpool_context { context.validate()?; }
 
         let folder_paths = folder_paths_str
             .map(|paths| {
@@ -811,6 +855,7 @@ impl Column for TerminalThreadMetadata {
 
         Ok((
             TerminalThreadMetadata {
+                shpool_context,
                 terminal_id: TerminalId::from_key_string(&terminal_id)?,
                 title: SharedString::from(title),
                 custom_title: custom_title
@@ -842,6 +887,7 @@ mod tests {
     fn metadata(title: &str, worktree_paths: WorktreePaths) -> TerminalThreadMetadata {
         let now = Utc::now();
         TerminalThreadMetadata {
+            shpool_context: None,
             terminal_id: TerminalId::new(),
             title: SharedString::from(title.to_string()),
             custom_title: None,
@@ -878,6 +924,107 @@ mod tests {
                 );
             });
         });
+    }
+
+    #[gpui::test]
+    async fn test_terminal_daemon_locator_remains_immutable_in_cache_and_database(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let store = cx.update(|cx| TerminalThreadMetadataStore::global(cx));
+        let paths = PathList::new(&[PathBuf::from("/original")]);
+        let mut original = metadata("Original", WorktreePaths::from_folder_paths(&paths));
+        let context = project::terminals::ShpoolSessionContext::for_test();
+        original.shpool_context = Some(context.clone());
+        let mut changed = original.clone();
+        changed.title = "Retitled".into();
+        changed.remote_connection = Some(RemoteConnectionOptions::Mock(remote::MockConnectionOptions { id: 77 }));
+        changed.shpool_context = Some(project::terminals::ShpoolSessionContext::new(
+            "/different/shpool".into(), "/tmp/different.socket".into(),
+        ).unwrap());
+        let changed_paths = PathList::new(&[PathBuf::from("/reordered")]);
+        changed.worktree_paths = WorktreePaths::from_folder_paths(&changed_paths);
+        store.update(cx, |store, cx| {
+            store.save(original.clone(), cx);
+            store.save(changed.clone(), cx);
+        });
+        store.read_with(cx, |store, _| {
+            let saved = store.entry(original.terminal_id).unwrap();
+            assert_eq!(saved.shpool_context.as_ref(), Some(&context));
+            assert_eq!(saved.remote_connection,
+                Some(RemoteConnectionOptions::Mock(remote::MockConnectionOptions { id: 77 })),
+                "connection routing keeps its existing update contract");
+            assert_eq!(saved.folder_paths(), &changed_paths);
+            assert_eq!(saved.title.as_ref(), "Retitled");
+        });
+        let db = TerminalThreadMetadataDb(
+            db::open_test_db::<TerminalThreadMetadataDb>("TERMINAL_DAEMON_LOCATOR_ROUNDTRIP").await,
+        );
+        db.save(original.clone()).await.unwrap();
+        db.save(changed).await.unwrap();
+        let loaded = db.list().unwrap();
+        assert_eq!(loaded.failed_rows, 0);
+        assert_eq!(loaded.rows.len(), 1);
+        assert_eq!(loaded.rows[0].shpool_context.as_ref(), Some(&context));
+        assert_eq!(loaded.rows[0].remote_connection,
+            Some(RemoteConnectionOptions::Mock(remote::MockConnectionOptions { id: 77 })));
+        assert_eq!(loaded.rows[0].folder_paths(), &changed_paths);
+        let legacy = metadata("Legacy", WorktreePaths::from_folder_paths(&paths));
+        db.save(legacy.clone()).await.unwrap();
+        assert!(db.list().unwrap().rows.iter()
+            .find(|row| row.terminal_id == legacy.terminal_id).unwrap().shpool_context.is_none());
+    }
+
+    #[gpui::test]
+    async fn test_corrupt_daemon_locator_is_isolated_without_rewriting_legacy_rows(
+        _cx: &mut TestAppContext,
+    ) {
+        let db = TerminalThreadMetadataDb(
+            db::open_test_db::<TerminalThreadMetadataDb>("TERMINAL_DAEMON_LOCATOR_CORRUPTION").await,
+        );
+        let paths = PathList::new(&[PathBuf::from("/saved")]);
+        let valid = metadata("Valid legacy", WorktreePaths::from_folder_paths(&paths));
+        let mut invalid = metadata("Invalid locator", WorktreePaths::from_folder_paths(&paths));
+        let context = project::terminals::ShpoolSessionContext::for_test();
+        invalid.shpool_context = Some(context.clone());
+        db.save(valid.clone()).await.unwrap();
+        db.save(invalid.clone()).await.unwrap();
+        for raw in [
+            "not-json",
+            r#"{"program":"relative","socket":"/tmp/original.socket"}"#,
+            r#"{"program":"/shpool","socket":"relative"}"#,
+            r#"{"program":"/shpool","socket":"/tmp/original.socket","env":{"TOKEN":"synthetic"}}"#,
+        ] {
+            let key = invalid.terminal_id.to_key_string();
+            let raw_value = raw.to_string();
+            db.write(move |conn| {
+                let mut statement = Statement::prepare(conn,
+                    "UPDATE sidebar_terminal_threads SET shpool_context = ?1 WHERE terminal_id = ?2")?;
+                let next = statement.bind(&raw_value, 1)?;
+                statement.bind(&key, next)?;
+                statement.exec()
+            }).await.unwrap();
+            let loaded = db.list().unwrap();
+            assert_eq!(loaded.failed_rows, 1);
+            assert_eq!(loaded.rows, vec![valid.clone()]);
+            let raw_values = db.select::<String>(
+                "SELECT shpool_context FROM sidebar_terminal_threads WHERE shpool_context IS NOT NULL",
+            ).unwrap()().unwrap();
+            assert_eq!(raw_values, vec![raw.to_string()]);
+        }
+        let key = invalid.terminal_id.to_key_string();
+        let repaired = serde_json::to_string(&context).unwrap();
+        db.write(move |conn| {
+            let mut statement = Statement::prepare(conn,
+                "UPDATE sidebar_terminal_threads SET shpool_context = ?1 WHERE terminal_id = ?2")?;
+            let next = statement.bind(&repaired, 1)?;
+            statement.bind(&key, next)?;
+            statement.exec()
+        }).await.unwrap();
+        let loaded = db.list().unwrap();
+        assert_eq!(loaded.failed_rows, 0);
+        assert!(loaded.rows.contains(&valid));
+        assert!(loaded.rows.contains(&invalid));
     }
 
     #[test]

@@ -165,9 +165,7 @@ fn kill_persistent_terminal_session_and_delete_metadata(
     }) {
         return;
     }
-    let kill = project.update(cx, |project, cx| {
-        project.kill_persistent_terminal_session(terminal_id.session_name(), cx)
-    });
+    let kill = AgentPanel::kill_terminal_session(project, terminal_id, cx);
     cx.spawn(async move |cx| {
         let result = kill.await;
         cx.update(|cx| {
@@ -2117,6 +2115,44 @@ impl AgentPanel {
         }
     }
 
+    /// Use the immutable metadata locator; keep the project alive until the
+    /// owned client finishes, including a close after its window disappeared.
+    pub fn kill_terminal_session(
+        project: Entity<Project>,
+        terminal_id: TerminalId,
+        cx: &mut App,
+    ) -> Task<Result<()>> {
+        let store = TerminalThreadMetadataStore::try_global(cx);
+        let metadata = store.as_ref().and_then(|store| store.read(cx).entry(terminal_id).cloned());
+        let context = metadata.and_then(|metadata| metadata.shpool_context);
+        let session_name = terminal_id.session_name();
+        let kill = project.update(cx, |project, cx| {
+            project.kill_persistent_terminal_session_in_context(session_name.clone(), context, cx)
+        });
+        cx.spawn(async move |cx| {
+            let result = kill.await;
+            cx.update(|cx| {
+                if result.is_err() {
+                    if let Some((store, context)) = store.as_ref().zip(
+                        project.read(cx).persistent_terminal_context(&session_name).cloned(),
+                    ) {
+                        store.update(cx, |store, cx| {
+                            store.remember_shpool_context(terminal_id, context,
+                                project.read(cx).remote_connection_options(cx), cx);
+                        });
+                    }
+                } else {
+                    project.update(cx, |project, _| {
+                        project.forget_persistent_terminal_context(&session_name);
+                    });
+                }
+            });
+            // The owned project deliberately lives through the client result.
+            drop(project);
+            result
+        })
+    }
+
     pub fn new_terminal(
         &mut self,
         workspace: Option<&Workspace>,
@@ -2132,6 +2168,7 @@ impl AgentPanel {
         self.spawn_terminal(
             TerminalId::new(),
             working_directory,
+            None,
             None,
             None,
             None,
@@ -2213,6 +2250,7 @@ impl AgentPanel {
         custom_title: Option<SharedString>,
         initial_title: Option<SharedString>,
         created_at: Option<DateTime<Utc>>,
+        shpool_context: Option<project::terminals::ShpoolSessionContext>,
         select_mode: TerminalSelectMode,
         focus: bool,
         run_init_command: bool,
@@ -2228,14 +2266,17 @@ impl AgentPanel {
         self.closed_terminal_spawns.remove(&terminal_id);
         let terminal_working_directory = working_directory.clone();
         let init_command = Self::terminal_init_command(run_init_command, cx);
-        let terminal_task = self.create_terminal_shell(terminal_id, working_directory, cx);
+        let terminal_task = self.create_terminal_shell(
+            terminal_id, working_directory, shpool_context.clone(), created_at.is_some(), cx,
+        );
         let workspace = self.workspace.clone();
         let workspace_id = self.workspace_id;
         let project = self.project.downgrade();
 
         let spawn_project = self.project.clone();
         let spawn_workspace = workspace.clone();
-        let recovery_metadata = TerminalThreadMetadata {
+        let mut recovery_metadata = TerminalThreadMetadata {
+            shpool_context,
             terminal_id,
             title: initial_title.clone().unwrap_or_else(|| "Terminal".into()),
             custom_title: custom_title.clone(),
@@ -2250,9 +2291,22 @@ impl AgentPanel {
             let result = terminal_task.await;
             let closed = cx.update(|cx| {
                 let store = TerminalThreadMetadataStore::try_global(cx);
-                if result.as_ref().is_ok_and(|terminal| terminal.session == PersistentSession::Created) {
+                if result.is_ok() {
+                    recovery_metadata.shpool_context = spawn_project.read(cx)
+                        .persistent_terminal_context(&terminal_id.session_name()).cloned();
+                }
+                let context = recovery_metadata.shpool_context.clone();
+                if result.as_ref().is_ok_and(|terminal| terminal.session != PersistentSession::Unavailable) {
                     if let Some(store) = &store {
                         store.update(cx, |store, cx| store.retain_created_session(recovery_metadata, cx));
+                    }
+                }
+                if result.is_ok() {
+                    if let Some((store, context)) = store.as_ref().zip(context) {
+                        store.update(cx, |store, cx| {
+                            store.remember_shpool_context(terminal_id, context,
+                                spawn_project.read(cx).remote_connection_options(cx), cx);
+                        });
                     }
                 }
                 let closed = this.update(cx, |this, cx| {
@@ -2428,8 +2482,18 @@ impl AgentPanel {
         &mut self,
         terminal_id: TerminalId,
         working_directory: Option<PathBuf>,
+        context: Option<project::terminals::ShpoolSessionContext>,
+        restoring_existing: bool,
         cx: &mut Context<Self>,
     ) -> Task<Result<PersistentTerminal>> {
+        let saved = TerminalThreadMetadataStore::try_global(cx)
+            .and_then(|store| store.read(cx).entry(terminal_id).cloned());
+        let stored_context = saved.as_ref().and_then(|metadata| metadata.shpool_context.clone());
+        if context.as_ref().zip(stored_context.as_ref()).is_some_and(|(left, right)| !left.same_daemon(right)) {
+            return Task::ready(Err(anyhow::anyhow!("saved terminal daemon context changed")));
+        }
+        let context = stored_context.or(context);
+        let restoring_existing = restoring_existing || saved.is_some();
         // A real shell ties the spawn's timing to the host, so a test that needs
         // to observe the panel mid-spawn installs a gate to pause before calling
         // project.create_persistent_terminal_shell.
@@ -2442,10 +2506,12 @@ impl AgentPanel {
                 gate.await.ok();
                 let shell_task = cx.update(|cx| {
                     project.update(cx, |project, cx| {
-                        project.create_persistent_terminal_shell(
+                        project.create_persistent_terminal_shell_in_context(
                             working_directory,
                             session_name,
                             bounds,
+                            context,
+                            restoring_existing,
                             cx,
                         )
                     })
@@ -2457,7 +2523,9 @@ impl AgentPanel {
         let session_name = terminal_id.session_name();
         let bounds = self.laid_out_terminal_bounds(Some(terminal_id), cx);
         self.project.update(cx, |project, cx| {
-            project.create_persistent_terminal_shell(working_directory, session_name, bounds, cx)
+            project.create_persistent_terminal_shell_in_context(
+                working_directory, session_name, bounds, context, restoring_existing, cx,
+            )
         })
     }
 
@@ -2720,6 +2788,9 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.project.update(cx, |project, _| {
+            project.forget_persistent_terminal_context(&terminal_id.session_name());
+        });
         self.close_terminal_internal(terminal_id, activate_draft_after_close, false, window, cx);
     }
 
@@ -3071,6 +3142,10 @@ impl AgentPanel {
             }
         }
         Some(TerminalThreadMetadata {
+            shpool_context: project.persistent_terminal_context(&terminal_id.session_name()).cloned()
+                .or_else(|| TerminalThreadMetadataStore::try_global(cx)
+                    .and_then(|store| store.read(cx).entry(terminal_id)
+                        .and_then(|metadata| metadata.shpool_context.clone()))),
             terminal_id,
             title: terminal.terminal_title(cx),
             custom_title: terminal.custom_title(cx),
@@ -3176,6 +3251,7 @@ impl AgentPanel {
             metadata.custom_title.clone(),
             initial_title,
             Some(metadata.created_at),
+            metadata.shpool_context.clone(),
             select_mode,
             focus,
             true,
@@ -5955,6 +6031,7 @@ impl AgentPanel {
             None,
             None,
             None,
+            None,
             TerminalSelectMode::Always,
             false,
             true,
@@ -7802,6 +7879,11 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) -> Result<()> {
         let init_command = Self::terminal_init_command(run_init_command, cx);
+        // This fixture represents an already-created managed terminal, just
+        // like the production creator that captures the daemon before insertion.
+        let context = self.project.update(cx, |project, _| {
+            project.ensure_test_persistent_terminal_context(terminal_id.session_name())
+        })?;
         let terminal = self.build_display_only_terminal(cx);
         let terminal_for_init_command = terminal.clone();
         let terminal_view = cx.new(|cx| {
@@ -7834,6 +7916,11 @@ impl AgentPanel {
             window,
             cx,
         );
+        if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+            store.update(cx, |store, cx| store.remember_shpool_context(
+                terminal_id, context, self.project.read(cx).remote_connection_options(cx), cx,
+            ));
+        }
         Self::write_terminal_init_command(&terminal_for_init_command, init_command, cx);
         Ok(())
     }
@@ -8599,6 +8686,7 @@ mod tests {
         );
 
         let metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id: TerminalId::new(),
             title: "Dev Server".into(),
             custom_title: None,
@@ -8764,6 +8852,7 @@ mod tests {
         });
 
         let metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id: TerminalId::new(),
             title: "Restored Terminal".into(),
             custom_title: None,
@@ -8860,6 +8949,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 TerminalSelectMode::Always,
                 true,
                 true,
@@ -8937,6 +9027,7 @@ mod tests {
         });
 
         let metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id: TerminalId::new(),
             title: "Restored Terminal".into(),
             custom_title: None,
@@ -11729,6 +11820,7 @@ mod tests {
         let terminal_id = TerminalId::new();
         let now = Utc::now();
         let metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id,
             title: "Persisted Shell Title".into(),
             custom_title: None,
@@ -11780,6 +11872,7 @@ mod tests {
         let terminal_id = TerminalId::new();
         let now = Utc::now();
         let metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id,
             title: "Persisted Shell Title".into(),
             custom_title: None,
@@ -16108,6 +16201,7 @@ mod tests {
 
         let terminal_id = TerminalId::new();
         let metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id,
             title: "Dev Terminal".into(),
             custom_title: None,
@@ -16249,6 +16343,7 @@ mod tests {
 
         let terminal_id = TerminalId::new();
         let metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id,
             title: "Remote Terminal".into(),
             custom_title: None,
@@ -16390,6 +16485,7 @@ mod tests {
         });
 
         let metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id,
             title: "Remote agent thread".into(),
             custom_title: None,
@@ -16626,6 +16722,7 @@ mod tests {
 
         let terminal_id = TerminalId::new();
         let metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id,
             title: "Unloaded".into(),
             custom_title: None,
@@ -16691,6 +16788,7 @@ mod tests {
 
         let terminal_id = TerminalId::new();
         let metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id,
             title: "Unloaded".into(),
             custom_title: None,
@@ -16794,6 +16892,7 @@ mod tests {
 
         let terminal_id = TerminalId::new();
         let metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id,
             title: "Process Test".into(),
             custom_title: None,
@@ -16930,6 +17029,7 @@ mod tests {
         let t2 = TerminalId::new();
         for &id in &[t1, t2] {
             let metadata = TerminalThreadMetadata {
+                shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
                 terminal_id: id,
                 title: "Remote Terminal".into(),
                 custom_title: None,
@@ -17022,6 +17122,7 @@ mod tests {
         let t1 = TerminalId::new();
         let t2 = TerminalId::new();
         let m1 = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id: t1,
             title: "Terminal 1".into(),
             custom_title: None,
@@ -17033,6 +17134,7 @@ mod tests {
             working_directory: None,
         };
         let m2 = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id: t2,
             title: "Terminal 2".into(),
             custom_title: None,
@@ -17252,6 +17354,7 @@ mod tests {
         let t1 = TerminalId::new();
         let t2 = TerminalId::new();
         let m1 = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id: t1,
             title: "Terminal 1".into(),
             custom_title: None,
@@ -17263,6 +17366,7 @@ mod tests {
             working_directory: None,
         };
         let m2 = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id: t2,
             title: "Terminal 2".into(),
             custom_title: None,
@@ -17410,6 +17514,7 @@ mod tests {
         // Create active terminal t1
         let t1 = TerminalId::new();
         let metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id: t1,
             title: "T1".into(),
             custom_title: None,
@@ -17488,6 +17593,7 @@ mod tests {
         let (release_tx, spawn_gate) = futures::channel::oneshot::channel::<()>();
         let terminal_id = TerminalId::new();
         let metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id,
             title: "Terminal".into(),
             custom_title: None,
@@ -17589,6 +17695,7 @@ mod tests {
 
         let terminal_id = TerminalId::new();
         let metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id,
             title: "Managed".into(),
             custom_title: None,
@@ -17670,6 +17777,7 @@ mod tests {
 
         let terminal_id = TerminalId::new();
         let metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id,
             title: "Unmanaged".into(),
             custom_title: None,
@@ -17716,6 +17824,7 @@ mod tests {
         let fake = project.update(&mut cx, |project, _| project.enable_fake_shpool(&[]));
         let terminal_id = TerminalId::new();
         let metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id,
             title: "Pending managed terminal".into(),
             custom_title: None,
@@ -17801,6 +17910,7 @@ mod tests {
 
         let terminal_id = TerminalId::new();
         let metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id,
             title: "Pending terminal".into(),
             custom_title: None,
@@ -17898,6 +18008,7 @@ mod tests {
         fake_shpool.state.lock().probe_error = Some("injected shpool probe failure".to_string());
         let open_terminal_id = TerminalId::new();
         let open_terminal_metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id: open_terminal_id,
             title: "Open terminal".into(),
             custom_title: None,
@@ -17943,6 +18054,7 @@ mod tests {
 
         let t1 = TerminalId::new();
         let m1 = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id: t1,
             title: "T1".into(),
             custom_title: None,
@@ -17972,6 +18084,7 @@ mod tests {
         // User navigates to a new terminal T2 while T1 is in flight
         let t2 = TerminalId::new();
         let m2 = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id: t2,
             title: "T2".into(),
             custom_title: None,
@@ -18029,6 +18142,7 @@ mod tests {
 
         let t1 = TerminalId::new();
         let m1 = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id: t1,
             title: "T1".into(),
             custom_title: None,
@@ -18059,6 +18173,7 @@ mod tests {
         // Start background spawn of T2 (takes no gate, completes immediately)
         let t2 = TerminalId::new();
         let m2 = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id: t2,
             title: "T2".into(),
             custom_title: None,
@@ -18141,6 +18256,7 @@ mod tests {
 
         let t1 = TerminalId::new();
         let metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id: t1,
             title: "Terminal 1".into(),
             custom_title: None,
@@ -18261,6 +18377,7 @@ mod tests {
 
         let terminal_id = TerminalId::new();
         let metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id,
             title: "Remote Shpool Thread".into(),
             custom_title: None,
@@ -18354,6 +18471,7 @@ mod tests {
         });
         let disconnected_terminal_id = TerminalId::new();
         let disconnected_metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id: disconnected_terminal_id,
             title: "Disconnected remote thread".into(),
             custom_title: None,
@@ -18489,6 +18607,7 @@ mod tests {
 
         let t1 = TerminalId::new();
         let metadata = TerminalThreadMetadata {
+            shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
             terminal_id: t1,
             title: "Build".into(),
             custom_title: None,
@@ -18728,6 +18847,39 @@ mod tests {
             );
         });
     }
+    #[gpui::test]
+    async fn test_terminal_metadata_keeps_original_daemon_when_current_settings_move(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        cx.update(|_, cx| TerminalThreadMetadataStore::init_global(cx));
+        let project = panel.read_with(&cx, |panel, _| panel.project.clone());
+        let fake = project.update(&mut cx, |project, _| project.enable_fake_shpool(&[]));
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.new_terminal(None, AgentThreadSource::AgentPanel, window, cx);
+        });
+        cx.run_until_parked();
+        let terminal_id = panel.read_with(&cx, |panel, _| *panel.terminals.keys().next().unwrap());
+        let context = project.read_with(&cx, |project, _| {
+            project.persistent_terminal_context(&terminal_id.session_name()).cloned().unwrap()
+        });
+        cx.update(|_, cx| {
+            let store = TerminalThreadMetadataStore::global(cx);
+            assert_eq!(store.read(cx).entry(terminal_id).unwrap().shpool_context.as_ref(), Some(&context));
+        });
+        fake.state.lock().socket = "/tmp/new-current-daemon.socket".into();
+        panel.update(&mut cx, |panel, cx| panel.persist_all_terminal_metadata(cx));
+        panel.update_in(&mut cx, |panel, window, cx| panel.close_terminal(terminal_id, window, cx));
+        cx.run_until_parked();
+        assert!(fake.kill_history().is_empty(), "a new current daemon must not receive the original session kill");
+        assert!(fake.has_session(&terminal_id.session_name()));
+        cx.update(|_, cx| {
+            let store = TerminalThreadMetadataStore::global(cx);
+            assert_eq!(store.read(cx).entry(terminal_id).unwrap().shpool_context.as_ref(), Some(&context));
+            assert!(!store.read(cx).is_intentionally_closing(terminal_id));
+        });
+    }
+
     #[gpui::test]
     async fn test_terminal_exit_before_insertion_uses_the_normal_lifecycle(cx: &mut TestAppContext) {
         let (panel, mut cx) = setup_panel(cx).await;
