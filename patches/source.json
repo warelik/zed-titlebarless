@@ -357,6 +357,10 @@
     ],
     [
       "agent_ui",
+      "test_corrupt_daemon_locator_is_isolated_without_rewriting_legacy_rows"
+    ],
+    [
+      "agent_ui",
       "test_corrupt_terminal_metadata_rows_are_isolated_and_recoverable"
     ],
     [
@@ -405,7 +409,15 @@
     ],
     [
       "agent_ui",
+      "test_terminal_daemon_locator_remains_immutable_in_cache_and_database"
+    ],
+    [
+      "agent_ui",
       "test_terminal_exit_before_insertion_uses_the_normal_lifecycle"
+    ],
+    [
+      "agent_ui",
+      "test_terminal_metadata_keeps_original_daemon_when_current_settings_move"
     ],
     [
       "agent_ui",
@@ -473,6 +485,10 @@
     ],
     [
       "project",
+      "test_persistent_terminal_keeps_original_daemon_after_root_and_client_changes"
+    ],
+    [
+      "project",
       "test_shpool_command_preserves_shell_program_and_arguments"
     ],
     [
@@ -490,6 +506,14 @@
     [
       "project",
       "test_shpool_kill_timeout_is_retryable_and_cancels_delayed_kill"
+    ],
+    [
+      "project",
+      "test_unavailable_pinned_daemon_never_falls_back_to_another_socket"
+    ],
+    [
+      "project",
+      "test_unknown_legacy_daemon_requires_a_positive_session_match"
     ],
     [
       "recent_projects",
@@ -698,6 +722,10 @@
     [
       "sidebar",
       "test_terminal_close_coordinates_sole_same_window_owner"
+    ],
+    [
+      "sidebar",
+      "test_terminal_close_preserves_conflicting_live_daemon_owners"
     ],
     [
       "sidebar",
