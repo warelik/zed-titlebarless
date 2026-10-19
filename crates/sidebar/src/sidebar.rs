@@ -5320,20 +5320,22 @@ impl Sidebar {
             // Load the saved roots so per-project terminal settings/environment
             // select the same daemon as terminal activation would.
             for path in paths {
-                // Worktree creation accepts nonexistent roots. Resolve the
-                // actual local/remote path before selecting its daemon context.
-                let resolve = project.update(cx, |project, cx| {
-                    project.resolve_abs_path(&path.to_string_lossy(), cx)
-                });
-                anyhow::ensure!(
-                    resolve.await.is_some(),
-                    "saved terminal root is unavailable: {}",
-                    path.display(),
-                );
                 let load = project.update(cx, |project, cx| {
                     project.find_or_create_worktree(path.as_path(), true, cx)
                 });
-                load.await?;
+                let (worktree, _) = load.await?;
+                // Remote AddWorktree returns before its initial snapshot is
+                // delivered. Use the existing scan barrier before inspecting it.
+                if worktree.read_with(cx, |worktree, _| worktree.is_remote()) {
+                    worktree.update(cx, |worktree, _| worktree.wait_for_snapshot(1)).await?;
+                }
+                // The loaded model, rather than a pre-load existence query,
+                // must provide a directory for root-scoped terminal settings.
+                anyhow::ensure!(
+                    worktree.read_with(cx, |worktree, _| worktree.root_dir().is_some()),
+                    "saved terminal root is unavailable or not a directory: {}",
+                    path.display(),
+                );
             }
             anyhow::Ok(project)
         })
