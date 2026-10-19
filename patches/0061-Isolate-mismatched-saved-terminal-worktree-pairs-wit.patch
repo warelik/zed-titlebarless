@@ -1,0 +1,119 @@
+From 8394cb7fa09d13d5676d394f305d62db2882d262 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 00:10:55 +0000
+Subject: [PATCH] Isolate mismatched saved terminal worktree pairs without
+ adopting their context
+
+Propagate the existing WorktreePaths corruption error instead of turning it into a rootless terminal. Add a separate regression for both mismatch directions and empty/nonempty variants, preservation of all raw path fields despite an unrelated matching cwd, and recovery after repair. Keep valid rooted, rootless and duplicate-main linked contexts usable. Every earlier fixture and assertion remains unchanged; compiler and test execution stay final-only.
+---
+ .../src/terminal_thread_metadata_store.rs     | 89 ++++++++++++++++++-
+ 1 file changed, 88 insertions(+), 1 deletion(-)
+
+diff --git a/crates/agent_ui/src/terminal_thread_metadata_store.rs b/crates/agent_ui/src/terminal_thread_metadata_store.rs
+index 4b003c8..73bc8bb 100644
+--- a/crates/agent_ui/src/terminal_thread_metadata_store.rs
++++ b/crates/agent_ui/src/terminal_thread_metadata_store.rs
+@@ -807,7 +807,7 @@ impl Column for TerminalThreadMetadata {
+         let remote_connection = remote_connection_for_persistence(remote_connection);
+ 
+         let worktree_paths = WorktreePaths::from_path_lists(main_worktree_paths, folder_paths)
+-            .unwrap_or_else(|_| WorktreePaths::default());
++            .context("deserialize terminal thread worktree paths")?;
+ 
+         Ok((
+             TerminalThreadMetadata {
+@@ -1036,6 +1036,93 @@ mod tests {
+         });
+     }
+ 
++    #[gpui::test]
++    async fn test_invalid_terminal_worktree_pairs_do_not_adopt_other_project_context(
++        cx: &mut TestAppContext,
++    ) {
++        init_test(cx);
++        let store = cx.update(|cx| TerminalThreadMetadataStore::global(cx));
++        let db = store.read_with(cx, |store, _| store.db.clone());
++        let saved_paths = PathList::new(&[Path::new("/saved-project")]);
++        let multiple_paths = PathList::new(&[
++            Path::new("/saved-project"),
++            Path::new("/another-saved-project"),
++        ]);
++        let empty_paths = PathList::default();
++        let valid = metadata("Valid saved roots", WorktreePaths::from_folder_paths(&saved_paths));
++        let rootless = metadata("Valid rootless terminal", WorktreePaths::default());
++        let linked_main_paths = PathList::new(&[Path::new("/main-project"), Path::new("/main-project")]);
++        let linked_folder_paths = PathList::new(&[Path::new("/z-linked"), Path::new("/a-linked")]);
++        let linked = metadata("Valid linked roots",
++            WorktreePaths::from_path_lists(linked_main_paths, linked_folder_paths).unwrap());
++        let mut invalid = metadata("Invalid path pairs", WorktreePaths::from_folder_paths(&saved_paths));
++        invalid.working_directory = Some(PathBuf::from("/adopting-project/subdir"));
++        for row in [&valid, &rootless, &linked, &invalid] {
++            db.save(row.clone()).await.unwrap();
++        }
++        let terminal_key = invalid.terminal_id.to_key_string();
++        let adopting_paths = PathList::new(&[Path::new("/adopting-project")]);
++        let adopting_context = WorktreePaths::from_folder_paths(&adopting_paths);
++        for (main_paths, folder_paths) in [
++            (&multiple_paths, &saved_paths),
++            (&saved_paths, &multiple_paths),
++            (&empty_paths, &saved_paths),
++            (&saved_paths, &empty_paths),
++        ] {
++            let main = main_paths.serialize();
++            let folders = folder_paths.serialize();
++            let raw_paths = (main.paths, main.order, folders.paths, folders.order);
++            let update_paths = raw_paths.clone();
++            let update_key = terminal_key.clone();
++            db.write(move |connection| {
++                let mut statement = Statement::prepare(connection,
++                    "UPDATE sidebar_terminal_threads SET main_worktree_paths = ?1, main_worktree_paths_order = ?2, folder_paths = ?3, folder_paths_order = ?4 WHERE terminal_id = ?5")?;
++                let next = statement.bind(&update_paths, 1)?;
++                statement.bind(&update_key, next)?;
++                statement.exec()
++            }).await.unwrap();
++            store.update(cx, |store, cx| store.reload(cx));
++            store.read_with(cx, |store, _| store.reload_task()).await;
++            // A corrupted pair must not become a rootless cached terminal that
++            // can be adopted by this unrelated project's matching cwd.
++            store.update(cx, |store, cx| {
++                store.update_worktree_paths_for_project(&adopting_context, None, cx);
++            });
++            cx.run_until_parked();
++            let stored = db.select_bound::<String, (String, String, String, String)>(
++                "SELECT main_worktree_paths, main_worktree_paths_order, folder_paths, folder_paths_order FROM sidebar_terminal_threads WHERE terminal_id = ?1",
++            ).unwrap()(terminal_key.clone()).unwrap();
++            assert_eq!(stored, vec![raw_paths], "failed restoration must preserve every raw path field");
++            store.read_with(cx, |store, _| {
++                assert_eq!(store.entry(valid.terminal_id), Some(&valid));
++                assert_eq!(store.entry(rootless.terminal_id), Some(&rootless));
++                assert_eq!(store.entry(linked.terminal_id), Some(&linked));
++                assert!(store.entry(invalid.terminal_id).is_none());
++                assert_eq!(store.entries().count(), 3);
++                assert!(store.load_error().unwrap().contains("(1)"));
++            });
++        }
++        let main = saved_paths.serialize();
++        let folders = saved_paths.serialize();
++        let restored_paths = (main.paths, main.order, folders.paths, folders.order);
++        db.write(move |connection| {
++            let mut statement = Statement::prepare(connection,
++                "UPDATE sidebar_terminal_threads SET main_worktree_paths = ?1, main_worktree_paths_order = ?2, folder_paths = ?3, folder_paths_order = ?4 WHERE terminal_id = ?5")?;
++            let next = statement.bind(&restored_paths, 1)?;
++            statement.bind(&terminal_key, next)?;
++            statement.exec()
++        }).await.unwrap();
++        store.update(cx, |store, cx| store.reload(cx));
++        store.read_with(cx, |store, _| store.reload_task()).await;
++        store.read_with(cx, |store, _| {
++            assert!(store.load_error().is_none());
++            assert_eq!(store.entries().count(), 4);
++            for row in [&valid, &rootless, &linked, &invalid] {
++                assert_eq!(store.entry(row.terminal_id), Some(row));
++            }
++        });
++    }
++
+     #[test]
+     fn test_terminal_title_prefix_preserves_non_alphanumeric_prefixes() {
+         assert_eq!(terminal_title_prefix("✳ Thinking"), Some("✳ "));

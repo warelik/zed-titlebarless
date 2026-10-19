@@ -389,6 +389,10 @@
     ],
     [
       "agent_ui",
+      "test_invalid_terminal_worktree_pairs_do_not_adopt_other_project_context"
+    ],
+    [
+      "agent_ui",
       "test_legacy_terminal_password_migration_scrubs_rows_and_loaded_values"
     ],
     [
