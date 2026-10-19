@@ -6726,6 +6726,9 @@ impl AgentPanel {
     }
 
     fn sidebar_tab_rows(window: &Window, cx: &mut App) -> Option<workspace::AgentPanelTabRows> {
+        if !Self::shows_sidebar_tab_rows(window, cx) {
+            return None;
+        }
         window
             .root::<MultiWorkspace>()
             .flatten()?
@@ -10830,13 +10833,19 @@ mod tests {
         let multi_workspace =
             cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
         let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
-        register_test_sidebar(true, &mut cx);
+        let sidebar = register_test_sidebar(true, &mut cx);
 
         cx.update(|window, cx| {
+            assert!(workspace::threads_sidebar_in_agent_panel(cx));
+            assert!(sidebar.update(cx, |sidebar, cx| {
+                workspace::Sidebar::agent_panel_tab_rows(sidebar, cx)
+            }).is_some(), "the provider must offer rows just as the production sidebar does");
             assert!(
                 !AgentPanel::shows_sidebar_tab_rows(window, cx),
                 "empty tab rows must not replace the active entry toolbar"
             );
+            assert!(AgentPanel::sidebar_tab_rows(window, cx).is_none(),
+                "the rendering path must reject replacement rows without an active project group");
         });
     }
 
