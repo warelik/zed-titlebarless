@@ -109,6 +109,11 @@ impl ShpoolSessionContext {
     }
 }
 
+/// Optional application-level reservation, made after discovery and before
+/// attachment. The editor's metadata store owns the process-wide decision.
+pub type ShpoolContextReservation =
+    Box<dyn FnOnce(&ShpoolSessionContext, &mut App) -> Result<()> + 'static>;
+
 pub struct PersistentTerminal {
     pub terminal: Entity<Terminal>,
     pub session: PersistentSession,
@@ -737,6 +742,21 @@ impl Project {
         restoring_existing: bool,
         cx: &mut Context<Self>,
     ) -> Task<Result<PersistentTerminal>> {
+        self.create_persistent_terminal_shell_with_reservation(
+            cwd, session_name, bounds, context, restoring_existing, None, cx,
+        )
+    }
+
+    pub fn create_persistent_terminal_shell_with_reservation(
+        &mut self,
+        cwd: Option<PathBuf>,
+        session_name: String,
+        bounds: Option<TerminalBounds>,
+        context: Option<ShpoolSessionContext>,
+        restoring_existing: bool,
+        mut reserve_context: Option<ShpoolContextReservation>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<PersistentTerminal>> {
         let known = self.terminals.session_contexts.get(&session_name).cloned();
         if context.as_ref().zip(known.as_ref()).is_some_and(|(left, right)| left != right) {
             return Task::ready(Err(anyhow::anyhow!("persistent session daemon context changed")));
@@ -804,6 +824,13 @@ impl Project {
                 bounds,
                 hold_resize_until_output: command.is_some(),
             };
+            if let Some(context) = &context {
+                if let Some(reserve) = reserve_context.take() {
+                    // No Project/window entity is leased while the shared
+                    // metadata reservation publishes its notification.
+                    cx.update(|cx| reserve(context, cx))?;
+                }
+            }
             let terminal = project
                 .update(cx, |project, cx| {
                     if let Some(context) = &context {

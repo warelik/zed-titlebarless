@@ -456,6 +456,29 @@ impl TerminalThreadMetadataStore {
         }
     }
 
+    /// Shared legacy records must claim the complete locator atomically,
+    /// before any project starts its attachment. Fresh IDs are unique until
+    /// their creator publishes metadata and therefore have no shared row yet.
+    pub fn reserve_shpool_context(
+        &mut self,
+        terminal_id: TerminalId,
+        context: project::terminals::ShpoolSessionContext,
+        remote_connection: Option<RemoteConnectionOptions>,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        context.validate()?;
+        anyhow::ensure!(!self.intentionally_closed_terminal_ids.contains(&terminal_id),
+            "terminal was already closed before its daemon reservation");
+        if let Some(existing) = self.entry(terminal_id).and_then(|row| row.shpool_context.as_ref()) {
+            anyhow::ensure!(existing == &context,
+                "another project reserved a different original shpool locator");
+            return Ok(());
+        }
+        // No provisional row is created for a failed NEW spawn.
+        self.remember_shpool_context(terminal_id, context, remote_connection, cx);
+        Ok(())
+    }
+
     /// Pin only an existing row. Pending closes may learn the locator, but
     /// completed closes must never be resurrected by a late spawn result.
     pub fn remember_shpool_context(
