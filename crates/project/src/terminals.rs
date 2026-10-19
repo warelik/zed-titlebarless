@@ -27,6 +27,86 @@ use crate::{Project, ProjectPath};
 
 pub struct Terminals {
     pub(crate) local_handles: Vec<WeakEntity<terminal::Terminal>>,
+    pub(crate) session_contexts: HashMap<String, ShpoolSessionContext>,
+}
+
+/// The locator of the daemon that actually owns a persistent session.
+/// Never persist the shell environment: it may contain credentials.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShpoolSessionContext {
+    program: String,
+    // This is a POSIX path on the daemon's host, even on a Windows client.
+    socket: String,
+}
+
+impl ShpoolSessionContext {
+    pub fn new(program: String, socket: PathBuf) -> Result<Self> {
+        let context = Self { program, socket: socket.to_string_lossy().into_owned() };
+        context.validate()?;
+        Ok(context)
+    }
+
+    pub fn same_daemon(&self, other: &Self) -> bool {
+        self.socket == other.socket
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.program.starts_with('/') && self.socket.starts_with('/'),
+            "shpool context must contain absolute client and socket paths",
+        );
+        anyhow::ensure!(
+            !self.program.contains('\0') && !self.socket.contains('\0'),
+            "shpool context contains a NUL byte",
+        );
+        Ok(())
+    }
+
+    fn runtime_prefix(&self) -> Result<String> {
+        // Keep the namespace of the native discovery recipe, independently of
+        // the current project's XDG setting and the client's path conventions.
+        match self.socket.strip_suffix("/shpool/shpool.socket") {
+            Some(runtime) => {
+                let runtime = if runtime.is_empty() { "/" } else { runtime };
+                Ok(format!("export XDG_RUNTIME_DIR={}\n",
+                    ShellKind::Posix.try_quote(runtime)
+                        .context("cannot quote original shpool runtime directory")?))
+            }
+            None => Ok(String::new()),
+        }
+    }
+
+    fn command(&self, operation: &str) -> Result<String> {
+        self.validate()?;
+        let program = ShellKind::Posix.try_quote(&self.program)
+            .context("cannot quote original shpool client")?;
+        let socket = ShellKind::Posix.try_quote(&self.socket)
+            .context("cannot quote original shpool socket")?.into_owned();
+        // -D forbids creating an empty replacement daemon and mistaking its
+        // missing session for proof that the original process was terminated.
+        Ok(format!("{}exec {program} -D -s {socket} {operation}\n", self.runtime_prefix()?))
+    }
+
+    fn probe_script(&self, allow_daemon_start: bool) -> Result<String> {
+        self.validate()?;
+        let program = ShellKind::Posix.try_quote(&self.program)
+            .context("cannot quote original shpool client")?;
+        let socket = ShellKind::Posix.try_quote(&self.socket)
+            .context("cannot quote original shpool socket")?.into_owned();
+        // Restore keeps upstream's daemon startup behavior, at the captured
+        // address. Destructive operations alone forbid starting a replacement.
+        Ok(format!(
+            "{}printf '%s\n' '{SHPOOL_PROBE_MARKER}' {program} {socket}\nexec {program} {no_daemon}-s {socket} list --json\n",
+            self.runtime_prefix()?,
+            no_daemon = if allow_daemon_start { "" } else { "-D " },
+        ))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test() -> Self {
+        Self::new("/shpool".into(), "/tmp/fake-shpool.socket".into()).unwrap()
+    }
 }
 
 pub struct PersistentTerminal {
@@ -137,6 +217,10 @@ for b in shpool "$HOME/.local/bin/shpool" "$HOME/.cargo/bin/shpool" /opt/homebre
     fi
 done
 [ -n "$SHPOOL_BIN" ] || exit "#, $missing_client_status, r#"
+case "$SHPOOL_BIN" in
+    /*) ;;
+    *) SHPOOL_BIN="$PWD/$SHPOOL_BIN" ;;
+esac
 
 USER_ID="$(id -u 2>/dev/null || true)"
 
@@ -173,6 +257,18 @@ echo "=== ZED_SHPOOL_PROBE_START ==="
 echo "$SHPOOL_BIN"
 echo "$SHPOOL_SOCK"
 exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" list --json
+"#
+);
+
+/// Legacy destructive operations may discover an existing daemon, never start
+/// an unrelated empty one and infer that its absent session has ended.
+const SHPOOL_EXISTING_PROBE_SCRIPT: &str = concat!(
+    shpool_script_prelude!("127"),
+    r#"
+echo "=== ZED_SHPOOL_PROBE_START ==="
+echo "$SHPOOL_BIN"
+echo "$SHPOOL_SOCK"
+exec "$SHPOOL_BIN" -D -s "$SHPOOL_SOCK" list --json
 "#
 );
 
@@ -220,10 +316,10 @@ pub fn parse_shpool_probe(stdout: &str) -> Result<Option<ShpoolProbe>> {
         .filter(|line| !line.is_empty())
         .ok_or_else(|| anyhow::anyhow!("shpool probe output missing session JSON"))?;
 
-    let socket = PathBuf::from(socket);
-    if !socket.is_absolute() {
+    if !socket.starts_with('/') {
         anyhow::bail!("shpool probe returned relative socket {socket:?}, rejecting");
     }
+    let socket = PathBuf::from(socket);
 
     let sessions = serde_json::from_str::<SessionList>(sessions_json)
         .context("parsing `shpool list --json`")?;
@@ -612,10 +708,61 @@ impl Project {
         bounds: Option<TerminalBounds>,
         cx: &mut Context<Self>,
     ) -> Task<Result<PersistentTerminal>> {
-        let probe = self.probe_shpool(cx);
+        self.create_persistent_terminal_shell_in_context(
+            cwd, session_name, bounds, None, false, cx,
+        )
+    }
+
+    pub fn persistent_terminal_context(&self, session_name: &str) -> Option<&ShpoolSessionContext> {
+        self.terminals.session_contexts.get(session_name)
+    }
+
+    fn context_for_probe(&self, probe: &ShpoolProbe) -> Result<ShpoolSessionContext> {
+        let program = probe.program.clone();
+        #[cfg(any(test, feature = "test-support"))]
+        let program = if self.fake_shpool.is_some() && !program.starts_with('/') {
+            // Keep the existing fake probe protocol (including its bare client
+            // name), but model the absolute locator captured by a real probe.
+            format!("/{program}")
+        } else { program };
+        ShpoolSessionContext::new(program, probe.socket.clone())
+    }
+
+    pub fn create_persistent_terminal_shell_in_context(
+        &mut self,
+        cwd: Option<PathBuf>,
+        session_name: String,
+        bounds: Option<TerminalBounds>,
+        context: Option<ShpoolSessionContext>,
+        restoring_existing: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<PersistentTerminal>> {
+        let known = self.terminals.session_contexts.get(&session_name).cloned();
+        if context.as_ref().zip(known.as_ref()).is_some_and(|(left, right)| !left.same_daemon(right)) {
+            return Task::ready(Err(anyhow::anyhow!("persistent session daemon context changed")));
+        }
+        let context = context.or(known);
+        let legacy_restore = restoring_existing && context.is_none();
+        let pinned = context.is_some();
+        let probe = match context {
+            Some(context) => self.probe_shpool_in_context(Some(context), true, cx),
+            None if legacy_restore => self.probe_shpool_in_context(None, false, cx),
+            None => self.probe_shpool(cx),
+        };
         let is_local = self.remote_client.is_none();
         cx.spawn(async move |project, cx| {
             let probe_result = probe.await?;
+            if legacy_restore {
+                anyhow::ensure!(
+                    probe_result.as_ref().is_some_and(|probe| probe.sessions.contains(&session_name)),
+                    "original shpool context is unknown and the saved session was not found; metadata retained",
+                );
+            }
+            anyhow::ensure!(!pinned || probe_result.is_some(), "original shpool daemon is unavailable");
+            let context = match &probe_result {
+                Some(probe) => Some(project.update(cx, |project, _| project.context_for_probe(probe))??),
+                None => None,
+            };
             let (command, session) = match probe_result {
                 Some(shpool) => {
                     let session = if shpool.sessions.contains(&session_name) {
@@ -694,6 +841,17 @@ impl Project {
                     project.create_terminal_shell_internal(cwd, false, command, pty_startup, cx)
                 })?
                 .await?;
+            if let Some(context) = context {
+                project.update(cx, |project, _| {
+                    anyhow::ensure!(
+                        project.terminals.session_contexts.get(&session_name)
+                            .is_none_or(|known| known.same_daemon(&context)),
+                        "persistent session daemon context changed during startup",
+                    );
+                    project.terminals.session_contexts.entry(session_name).or_insert(context);
+                    anyhow::Ok(())
+                })??;
+            }
             Ok(PersistentTerminal { terminal, session })
         })
     }
@@ -711,6 +869,27 @@ impl Project {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn ensure_test_persistent_terminal_context(
+        &mut self,
+        session_name: String,
+    ) -> Result<ShpoolSessionContext> {
+        if let Some(context) = self.terminals.session_contexts.get(&session_name) {
+            return Ok(context.clone());
+        }
+        let context = match &self.fake_shpool {
+            Some(fake) => {
+                let state = fake.state.lock();
+                self.context_for_probe(&ShpoolProbe {
+                    program: state.program.clone(), socket: state.socket.clone(), sessions: Vec::new(),
+                })?
+            }
+            None => ShpoolSessionContext::for_test(),
+        };
+        self.terminals.session_contexts.insert(session_name, context.clone());
+        Ok(context)
+    }
+
     /// Ends the shpool session `session_name` and everything running in it.
     /// Unavailable or timed-out kills return an error so the close can be retried.
     pub fn kill_persistent_terminal_session(
@@ -718,7 +897,59 @@ impl Project {
         session_name: String,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
-        let kill = self.kill_persistent_terminal_session_unbounded(session_name.clone(), cx);
+        self.kill_persistent_terminal_session_in_context_inner(session_name, None, false, cx)
+    }
+
+    /// UI metadata without a locator may only be adopted after a positive
+    /// session-list match. Absence in a newly selected daemon proves nothing.
+    pub fn kill_persistent_terminal_session_in_context(
+        &mut self,
+        session_name: String,
+        context: Option<ShpoolSessionContext>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        self.kill_persistent_terminal_session_in_context_inner(session_name, context, true, cx)
+    }
+
+    fn kill_persistent_terminal_session_in_context_inner(
+        &mut self,
+        session_name: String,
+        context: Option<ShpoolSessionContext>,
+        require_legacy_match: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let known = self.terminals.session_contexts.get(&session_name).cloned();
+        if context.as_ref().zip(known.as_ref()).is_some_and(|(left, right)| !left.same_daemon(right)) {
+            return Task::ready(Err(anyhow::anyhow!("persistent session daemon context changed")));
+        }
+        let context = context.or(known);
+        if let Some(context) = &context {
+            if let Err(error) = context.validate() { return Task::ready(Err(error)); }
+            self.terminals.session_contexts.entry(session_name.clone())
+                .or_insert_with(|| context.clone());
+        }
+        let kill = if context.is_none() && require_legacy_match {
+            let probe = self.probe_shpool_in_context(None, false, cx);
+            let name = session_name.clone();
+            cx.spawn(async move |project, cx| {
+                let probe = probe.await?.context("original shpool daemon is unavailable")?;
+                anyhow::ensure!(probe.sessions.contains(&name),
+                    "saved session was not found in the current daemon; original context is unknown");
+                let context = project.update(cx, |project, _| project.context_for_probe(&probe))??;
+                let kill = project.update(cx, |project, cx| {
+                    anyhow::ensure!(
+                        project.terminals.session_contexts.get(&name)
+                            .is_none_or(|known| known.same_daemon(&context)),
+                        "original daemon changed while locating the legacy session",
+                    );
+                    project.terminals.session_contexts.entry(name.clone()).or_insert_with(|| context.clone());
+                    anyhow::Ok(project.kill_persistent_terminal_session_unbounded(name, Some(context), cx))
+                })??;
+                kill.await
+            })
+        } else {
+            self.kill_persistent_terminal_session_unbounded(session_name.clone(), context, cx)
+        };
         let executor = cx.background_executor().clone();
         cx.background_spawn(async move {
             let timeout = executor.timer(SHPOOL_KILL_TIMEOUT);
@@ -733,13 +964,29 @@ impl Project {
         })
     }
 
+    /// The UI releases this cache after its intentional close succeeds. The
+    /// low-level API retains it so repeated kills remain on the same daemon.
+    pub fn forget_persistent_terminal_context(&mut self, session_name: &str) {
+        self.terminals.session_contexts.remove(session_name);
+    }
+
     fn kill_persistent_terminal_session_unbounded(
         &mut self,
         session_name: String,
+        context: Option<ShpoolSessionContext>,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
+        if let Some(context) = &context {
+            if let Err(error) = context.validate() { return Task::ready(Err(error)); }
+        }
         #[cfg(any(test, feature = "test-support"))]
         if let Some(fake) = &self.fake_shpool {
+            if context.as_ref().is_some_and(|context| {
+                let state = fake.state.lock();
+                !state.available || state.socket.to_string_lossy().as_bytes() != context.socket.as_bytes()
+            }) {
+                return Task::ready(Err(anyhow::anyhow!("original shpool daemon is unavailable")));
+            }
             let state = fake.state.clone();
             let delay = {
                 let mut state = state.lock();
@@ -766,7 +1013,12 @@ impl Project {
             return Task::ready(Ok(()));
         }
 
-        if self.path_style(cx).is_windows() || self.fs.is_fake() {
+        if self.path_style(cx).is_windows() {
+            return Task::ready(if context.is_some() {
+                Err(anyhow::anyhow!("original shpool daemon is unavailable on this platform"))
+            } else { Ok(()) });
+        }
+        if self.fs.is_fake() {
             return Task::ready(Ok(()));
         }
         let Some(quoted_name) = ShellKind::Posix.try_quote(&session_name) else {
@@ -774,12 +1026,23 @@ impl Project {
                 "cannot quote shpool session name {session_name:?}"
             )));
         };
-        let script = format!(
-            r#"{SHPOOL_KILL_SCRIPT_PRELUDE}
+        let command = match context {
+            Some(context) => {
+                let script = match context.command(&format!("kill {quoted_name}")) {
+                    Ok(script) => script,
+                    Err(error) => return Task::ready(Err(error)),
+                };
+                self.exec_shpool_context_script(script, cx)
+            }
+            None => {
+                let script = format!(
+                    r#"{SHPOOL_KILL_SCRIPT_PRELUDE}
 exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
 "#
-        );
-        let command = self.exec_script_in_sh(script, cx);
+                );
+                self.exec_script_in_sh(script, cx)
+            }
+        };
         cx.background_spawn(async move {
             let mut command = command.await?;
             // Cancel only this client; the shared daemon and SSH master must survive.
@@ -803,7 +1066,16 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
     /// `shpool list` starts the daemon when none runs, so a reachable daemon is
     /// what makes shpool available, not only the binary.
     fn probe_shpool(&mut self, cx: &mut Context<Self>) -> Task<Result<Option<ShpoolProbe>>> {
-        let probe = self.probe_shpool_unbounded(cx);
+        self.probe_shpool_in_context(None, true, cx)
+    }
+
+    fn probe_shpool_in_context(
+        &mut self,
+        context: Option<ShpoolSessionContext>,
+        allow_daemon_start: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Option<ShpoolProbe>>> {
+        let probe = self.probe_shpool_unbounded(context, allow_daemon_start, cx);
         let executor = cx.background_executor().clone();
         cx.background_spawn(async move {
             let timeout = executor.timer(SHPOOL_PROBE_TIMEOUT);
@@ -826,17 +1098,26 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
 
     fn probe_shpool_unbounded(
         &mut self,
+        context: Option<ShpoolSessionContext>,
+        allow_daemon_start: bool,
         cx: &mut Context<Self>,
     ) -> Task<Result<Option<ShpoolProbe>>> {
+        if let Some(context) = &context {
+            if let Err(error) = context.validate() { return Task::ready(Err(error)); }
+        }
         #[cfg(any(test, feature = "test-support"))]
         if let Some(fake) = &self.fake_shpool {
+            if context.as_ref().is_some_and(|context| fake.state.lock().socket.to_string_lossy().as_bytes() != context.socket.as_bytes()) {
+                return Task::ready(Err(anyhow::anyhow!("original shpool daemon is unavailable")));
+            }
             let (result, delay) = {
                 let state = fake.state.lock();
                 let result = match (&state.probe_error, state.available) {
                     (Some(error), _) => Err(anyhow::anyhow!("{error}")),
                     (None, false) => Ok(None),
                     (None, true) => Ok(Some(ShpoolProbe {
-                        program: state.program.clone(),
+                        program: context.as_ref().map(|context| context.program.clone())
+                            .unwrap_or_else(|| state.program.clone()),
                         socket: state.socket.clone(),
                         sessions: state.sessions.iter().cloned().collect(),
                     })),
@@ -858,7 +1139,16 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
         if self.path_style(cx).is_windows() || self.fs.is_fake() {
             return Task::ready(Ok(None));
         }
-        let command = self.exec_script_in_sh(SHPOOL_PROBE_SCRIPT.to_string(), cx);
+        let command = match context {
+            Some(context) => match context.probe_script(allow_daemon_start) {
+                Ok(script) => self.exec_shpool_context_script(script, cx),
+                Err(error) => return Task::ready(Err(error)),
+            },
+            None => self.exec_script_in_sh(
+                if allow_daemon_start { SHPOOL_PROBE_SCRIPT } else { SHPOOL_EXISTING_PROBE_SCRIPT }
+                    .to_string(), cx,
+            ),
+        };
         cx.background_spawn(async move {
             let mut command = command.await?;
             // Cancel only this client; the shared daemon and SSH master must survive.
@@ -1171,6 +1461,37 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
             });
         }
         TerminalSettings::get(settings_location, cx)
+    }
+
+    /// A captured daemon locator must not be reinterpreted through current
+    /// project roots, shell settings, PATH, HOME or XDG_RUNTIME_DIR.
+    fn exec_shpool_context_script(
+        &self,
+        script: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<smol::process::Command>> {
+        if self.path_style(cx).is_windows() {
+            return Task::ready(Err(anyhow::anyhow!("POSIX sh is not supported on Windows")));
+        }
+        let args = vec!["-c".to_string(), script];
+        let result = (|| {
+            let mut command = if let Some(remote_client) = &self.remote_client {
+                let template = remote_client.read(cx).build_command(
+                    Some("/bin/sh".into()), &args, &HashMap::<String, String>::default(),
+                    None, None, Interactive::No,
+                )?;
+                let mut command = new_std_command(template.program);
+                command.args(template.args).envs(template.env);
+                command
+            } else {
+                let mut command = new_std_command("/bin/sh");
+                command.args(args);
+                command
+            };
+            util::set_pre_exec_to_start_new_session(&mut command);
+            anyhow::Ok(smol::process::Command::from(command))
+        })();
+        Task::ready(result)
     }
 
     pub fn exec_script_in_sh(
@@ -1604,6 +1925,126 @@ mod tests {
             .expect("fake shpool exists");
         assert!(!fake.has_session("zed-existing"));
         assert!(fake.has_session("zed-new"));
+    }
+
+    #[gpui::test]
+    async fn test_persistent_terminal_keeps_original_daemon_after_root_and_client_changes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = settings::SettingsStore::test(cx);
+            cx.set_global(store);
+            TerminalSettings::register(cx);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/first", serde_json::json!({})).await;
+        fs.insert_tree("/second", serde_json::json!({})).await;
+        let project = Project::test(fs, [Path::new("/first"), Path::new("/second")], cx).await;
+        let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
+        let original = project.update(cx, |project, cx| {
+            project.create_persistent_terminal_shell(None, "zed-context".into(), None, cx)
+        }).await.unwrap();
+        assert_eq!(original.session, PersistentSession::Created);
+        let context = project.read_with(cx, |project, _| {
+            project.persistent_terminal_context("zed-context").cloned().unwrap()
+        });
+        assert_eq!(context, ShpoolSessionContext::for_test());
+        project.update(cx, |project, cx| {
+            let first = project.worktrees(cx).next().unwrap().read(cx).id();
+            project.remove_worktree(first, cx);
+        });
+        fake.state.lock().program = "/different/shpool".into();
+        let restored = project.update(cx, |project, cx| {
+            project.create_persistent_terminal_shell_in_context(
+                None, "zed-context".into(), None, Some(context.clone()), true, cx,
+            )
+        }).await.unwrap();
+        assert_eq!(restored.session, PersistentSession::Reattached);
+        assert_eq!(project.read_with(cx, |project, _| {
+            project.persistent_terminal_context("zed-context").cloned()
+        }), Some(context.clone()));
+        project.update(cx, |project, cx| {
+            project.kill_persistent_terminal_session("zed-context".into(), cx)
+        }).await.unwrap();
+        assert!(!fake.has_session("zed-context"));
+        assert_eq!(fake.kill_history(), vec!["zed-context".to_string()]);
+        let command = context.command("kill zed-context").unwrap();
+        assert!(command.contains("/shpool"));
+        assert!(!command.contains("/different/shpool"));
+        assert!(command.contains(" -D -s "));
+    }
+
+    #[gpui::test]
+    async fn test_unknown_legacy_daemon_requires_a_positive_session_match(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = settings::SettingsStore::test(cx);
+            cx.set_global(store);
+            TerminalSettings::register(cx);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
+        assert!(project.update(cx, |project, cx| {
+            project.kill_persistent_terminal_session_in_context("zed-legacy".into(), None, cx)
+        }).await.is_err());
+        assert!(fake.kill_history().is_empty());
+        assert!(project.update(cx, |project, cx| {
+            project.create_persistent_terminal_shell_in_context(
+                None, "zed-legacy".into(), None, None, true, cx,
+            )
+        }).await.is_err());
+        assert!(fake.attach_history().is_empty(), "unknown legacy sessions must not be duplicated");
+        fake.add_session("zed-legacy");
+        let restored = project.update(cx, |project, cx| {
+            project.create_persistent_terminal_shell_in_context(
+                None, "zed-legacy".into(), None, None, true, cx,
+            )
+        }).await.unwrap();
+        assert_eq!(restored.session, PersistentSession::Reattached);
+        assert_eq!(project.read_with(cx, |project, _| {
+            project.persistent_terminal_context("zed-legacy").cloned()
+        }), Some(ShpoolSessionContext::for_test()));
+    }
+
+    #[gpui::test]
+    async fn test_unavailable_pinned_daemon_never_falls_back_to_another_socket(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = settings::SettingsStore::test(cx);
+            cx.set_global(store);
+            TerminalSettings::register(cx);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
+        let _terminal = project.update(cx, |project, cx| {
+            project.create_persistent_terminal_shell(None, "zed-original".into(), None, cx)
+        }).await.unwrap();
+        let context = project.read_with(cx, |project, _| {
+            project.persistent_terminal_context("zed-original").cloned().unwrap()
+        });
+        fake.state.lock().socket = "/tmp/other-daemon.socket".into();
+        fake.add_session("unrelated");
+        assert!(project.update(cx, |project, cx| {
+            project.kill_persistent_terminal_session_in_context(
+                "zed-original".into(), Some(context.clone()), cx,
+            )
+        }).await.is_err());
+        assert!(project.update(cx, |project, cx| {
+            project.create_persistent_terminal_shell_in_context(
+                None, "zed-original".into(), None, Some(context.clone()), true, cx,
+            )
+        }).await.is_err());
+        assert!(fake.kill_history().is_empty());
+        assert_eq!(fake.attach_history(), vec!["zed-original".to_string()]);
+        assert!(fake.has_session("zed-original"));
+        assert!(fake.has_session("unrelated"));
+        assert_eq!(project.read_with(cx, |project, _| {
+            project.persistent_terminal_context("zed-original").cloned()
+        }), Some(context));
     }
 
     #[test]
@@ -2265,6 +2706,65 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
             "isolated daemon must list attached session before kill"
         );
 
+        // Preserve the locator exactly as successful terminal creation does.
+        // Then move the current settings to another daemon that owns the SAME
+        // session name: a rediscovered kill would terminate the wrong session.
+        let original_context = ShpoolSessionContext::new(
+            probe.program.clone(), probe.socket.clone(),
+        ).unwrap();
+        project.update(cx, |project, _| {
+            project.terminals.session_contexts.insert("zed-test-isolated".into(), original_context);
+        });
+        let other_runtime = temp_dir.path().join("other-runtime");
+        std::fs::create_dir_all(&other_runtime).unwrap();
+        let _other_daemon_guard = IsolatedDaemonGuard { runtime_dir: other_runtime.clone() };
+        let other_runtime_str = other_runtime.to_string_lossy().into_owned();
+        cx.update(|cx| cx.update_global::<settings::SettingsStore, _>(|store, cx| {
+            let config = serde_json::json!({"terminal": {"env": {
+                "HOME": home_str.clone(), "XDG_RUNTIME_DIR": other_runtime_str.clone(),
+            }}});
+            store.set_user_settings(&config.to_string(), cx).unwrap();
+        }));
+        project.read_with(cx, |project, cx| {
+            let path = project.first_project_directory(cx);
+            assert_eq!(project.terminal_settings(&path, cx).env.get("XDG_RUNTIME_DIR"),
+                Some(&other_runtime_str), "the current settings must actually select daemon B");
+        });
+        let other_probe_script = format!(
+            "export HOME={home_str:?} XDG_RUNTIME_DIR={other_runtime_str:?}\n{SHPOOL_PROBE_SCRIPT}"
+        );
+        let mut other_command = project.update(cx, |project, cx| {
+            project.exec_script_in_sh(other_probe_script, cx)
+        }).await.unwrap();
+        other_command.kill_on_drop(true);
+        let other_output = other_command.output().await.unwrap();
+        assert!(other_output.status.success(), "second isolated daemon must start: {}",
+            String::from_utf8_lossy(&other_output.stderr));
+        let other_probe = parse_shpool_probe(&String::from_utf8_lossy(&other_output.stdout))
+            .unwrap().unwrap();
+        assert_ne!(other_probe.socket, probe.socket);
+        let other_context = ShpoolSessionContext::new(
+            other_probe.program.clone(), other_probe.socket.clone(),
+        ).unwrap();
+        let mut other_attach_args = build_shpool_attach_args(
+            &other_probe.socket, None, "zed-test-isolated",
+            &Shell::WithArguments { program: "/bin/sh".into(), args: vec!["-i".into()], title_override: None },
+        ).unwrap();
+        other_attach_args.insert(4, "-b".into());
+        let other_arguments = other_attach_args.iter()
+            .map(|argument| ShellKind::Posix.try_quote(argument).unwrap())
+            .collect::<Vec<_>>().join(" ");
+        let other_attach_script = format!(
+            "export HOME={home_str:?} XDG_RUNTIME_DIR={other_runtime_str:?}\n{SHPOOL_SCRIPT_PRELUDE}\n\"$SHPOOL_BIN\" {other_arguments}\n"
+        );
+        let mut other_command = project.update(cx, |project, cx| {
+            project.exec_script_in_sh(other_attach_script, cx)
+        }).await.unwrap();
+        other_command.kill_on_drop(true);
+        let other_output = other_command.output().await.unwrap();
+        assert!(other_output.status.success(), "same-name session in the second daemon must start: {}",
+            String::from_utf8_lossy(&other_output.stderr));
+
         // 2c. Exercise production kill: kill_persistent_terminal_session
         let kill_res = project
             .update(cx, |p, cx| {
@@ -2292,6 +2792,47 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
             kill_nonexistent.is_ok(),
             "production kill on non-existent session must succeed idempotently"
         );
+
+        let mut other_command = project.update(cx, |project, cx| {
+            project.exec_shpool_context_script(other_context.probe_script(false).unwrap(), cx)
+        }).await.unwrap();
+        other_command.kill_on_drop(true);
+        let other_output = other_command.output().await.unwrap();
+        assert!(other_output.status.success());
+        let surviving = parse_shpool_probe(&String::from_utf8_lossy(&other_output.stdout))
+            .unwrap().unwrap();
+        assert!(surviving.sessions.iter().any(|name| name == "zed-test-isolated"),
+            "both the initial and idempotent kill must leave the new current daemon untouched");
+        let mut other_command = project.update(cx, |project, cx| {
+            project.exec_shpool_context_script(
+                other_context.command("kill zed-test-isolated").unwrap(), cx,
+            )
+        }).await.unwrap();
+        other_command.kill_on_drop(true);
+        assert!(other_command.output().await.unwrap().status.success());
+
+        let unknown_runtime = temp_dir.path().join("unknown-runtime");
+        std::fs::create_dir_all(&unknown_runtime).unwrap();
+        let _unknown_daemon_guard = IsolatedDaemonGuard { runtime_dir: unknown_runtime.clone() };
+        let unknown_runtime_str = unknown_runtime.to_string_lossy().into_owned();
+        cx.update(|cx| cx.update_global::<settings::SettingsStore, _>(|store, cx| {
+            let config = serde_json::json!({"terminal": {"env": {
+                "HOME": home_str.clone(), "XDG_RUNTIME_DIR": unknown_runtime_str.clone(),
+            }}});
+            store.set_user_settings(&config.to_string(), cx).unwrap();
+        }));
+        project.read_with(cx, |project, cx| {
+            let path = project.first_project_directory(cx);
+            assert_eq!(project.terminal_settings(&path, cx).env.get("XDG_RUNTIME_DIR"),
+                Some(&unknown_runtime_str));
+        });
+        let unknown_kill = project.update(cx, |project, cx| {
+            project.kill_persistent_terminal_session_in_context("untracked-legacy".into(), None, cx)
+        }).await;
+        assert!(unknown_kill.is_err(), "a missing unknown legacy session is not proof of termination");
+        assert!(!unknown_runtime.join("shpool/shpool.socket").exists(),
+            "a destructive legacy probe must not start an unrelated daemon");
+        assert!(!unknown_runtime.join("shpool/daemonized-shpool.pid").exists());
 
         // 3. Strict raw kill verification: rc=1 and exact stderr message
         let raw_kill_script = format!(

@@ -2563,6 +2563,7 @@ async fn test_sidebar_close_restored_unavailable_terminal_preserves_session_meta
     let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
     let terminal_id = TerminalId::new();
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id,
         title: "Managed terminal".into(),
         custom_title: None,
@@ -2766,6 +2767,7 @@ async fn test_terminal_metadata_is_deduped_across_project_groups(cx: &mut TestAp
     });
     let now = Utc::now();
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id,
         title: "Dev Server".into(),
         custom_title: None,
@@ -4024,6 +4026,7 @@ async fn test_thread_switcher_includes_terminal_metadata_for_open_project_group(
 
     let created_at = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap();
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id,
         title: "Feature Terminal".into(),
         custom_title: None,
@@ -4131,6 +4134,7 @@ async fn test_thread_switcher_preserves_closed_terminal_linked_worktree_workspac
     let worktree_folder_paths =
         PathList::new(&[PathBuf::from("/worktrees/project/feature-a/project")]);
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id,
         title: "Feature Terminal".into(),
         custom_title: None,
@@ -4279,6 +4283,7 @@ async fn test_archive_selected_terminal_archives_closed_linked_worktree(cx: &mut
     let worktree_folder_paths =
         PathList::new(&[PathBuf::from("/worktrees/project/feature-a/project")]);
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id,
         title: "Feature Terminal".into(),
         custom_title: None,
@@ -4897,6 +4902,7 @@ async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes
     let main_paths = PathList::new(&[PathBuf::from("/main-project")]);
     let closed_worktree_paths = PathList::new(&[PathBuf::from("/worktrees/feature-a")]);
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id,
         title: "Closed Project Terminal".into(),
         custom_title: None,
@@ -4989,6 +4995,7 @@ async fn test_successful_delayed_terminal_kill_deletes_metadata_after_sidebar_is
     let main_paths = PathList::new(&[PathBuf::from("/main-project")]);
     let closed_worktree_paths = PathList::new(&[PathBuf::from("/worktrees/feature-a")]);
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id,
         title: "Closed Project Terminal".into(),
         custom_title: None,
@@ -5085,6 +5092,7 @@ async fn test_timed_out_terminal_close_keeps_metadata_and_allows_retry(cx: &mut 
     let main_paths = PathList::new(&[PathBuf::from("/main-project")]);
     let closed_paths = PathList::new(&[PathBuf::from("/worktrees/feature-a")]);
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id, title: "Timed out close".into(), custom_title: None,
         created_at: chrono::Utc::now(),
         worktree_paths: WorktreePaths::from_path_lists(main_paths.clone(), closed_paths.clone()).unwrap(),
@@ -5152,6 +5160,7 @@ async fn test_failed_close_terminal_entry_retains_metadata_until_session_kill_su
     let main_paths = PathList::new(&[PathBuf::from("/main-project")]);
     let closed_worktree_paths = PathList::new(&[PathBuf::from("/worktrees/feature-a")]);
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id,
         title: "Closed Project Terminal".into(),
         custom_title: None,
@@ -5271,6 +5280,7 @@ async fn test_closed_terminal_uses_saved_root_order_and_not_unrelated_same_host_
     ));
     let paths = PathList::new(&[PathBuf::from("/z-saved"), PathBuf::from("/a-saved")]);
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id: id, title: "Ordered saved context".into(), custom_title: None,
         created_at: chrono::Utc::now(),
         worktree_paths: WorktreePaths::from_path_lists(paths.clone(), paths.clone()).unwrap(),
@@ -5306,6 +5316,7 @@ async fn test_unavailable_saved_root_keeps_terminal_metadata_and_session(cx: &mu
     let sidebar = setup_sidebar(&multi_workspace, cx);
     let paths = PathList::new(&[PathBuf::from("/absent-saved-root")]);
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id: id, title: "Missing saved context".into(), custom_title: None,
         created_at: chrono::Utc::now(),
         worktree_paths: WorktreePaths::from_path_lists(paths.clone(), paths.clone()).unwrap(),
@@ -5347,6 +5358,7 @@ async fn test_saved_terminal_checks_every_root_and_allows_retry(cx: &mut TestApp
         PathBuf::from("/missing-second"),
     ]);
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id, title: "Unavailable second root".into(), custom_title: None,
         created_at: chrono::Utc::now(),
         worktree_paths: WorktreePaths::from_path_lists(paths.clone(), paths.clone()).unwrap(),
@@ -5404,6 +5416,74 @@ async fn test_saved_terminal_checks_every_root_and_allows_retry(cx: &mut TestApp
 }
 
 #[gpui::test]
+async fn test_terminal_close_preserves_conflicting_live_daemon_owners(cx: &mut TestAppContext) {
+    let first_project = init_test_project_with_agent_panel("/shared", cx).await;
+    let fs = first_project.read_with(cx, |project, _| project.fs().clone());
+    let second_project = project::Project::test(fs, [Path::new("/shared")], cx).await;
+    let terminal_id = TerminalId::new();
+    let session_name = terminal_id.session_name();
+    let first_fake = first_project.update(cx, |project, _| project.enable_fake_shpool(&[]));
+    let second_fake = second_project.update(cx, |project, _| project.enable_fake_shpool(&[]));
+    second_fake.state.lock().socket = "/tmp/preexisting-other-daemon.socket".into();
+    let _first_terminal = first_project.update(cx, |project, cx| {
+        project.create_persistent_terminal_shell(None, session_name.clone(), None, cx)
+    }).await.unwrap();
+    let _second_terminal = second_project.update(cx, |project, cx| {
+        project.create_persistent_terminal_shell(None, session_name.clone(), None, cx)
+    }).await.unwrap();
+    let original_context = first_project.read_with(cx, |project, _| {
+        project.persistent_terminal_context(&session_name).cloned().unwrap()
+    });
+    let metadata = TerminalThreadMetadata {
+        shpool_context: Some(original_context.clone()),
+        terminal_id, title: "Conflicting daemon owners".into(), custom_title: None,
+        created_at: chrono::Utc::now(),
+        worktree_paths: first_project.read_with(cx, |project, cx| project.worktree_paths(cx)),
+        remote_connection: None, working_directory: None,
+    };
+    let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+        MultiWorkspace::test_new(first_project, window, cx)
+    });
+    let (sidebar, first_panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+    let first_workspace = multi_workspace.read_with(cx, |multi_workspace, _| {
+        multi_workspace.workspace().clone()
+    });
+    let second_workspace = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.retain_active_workspace(cx);
+        multi_workspace.test_add_workspace(second_project, window, cx)
+    });
+    let second_panel = add_agent_panel(&second_workspace, cx);
+    cx.update(|_, cx| TerminalThreadMetadataStore::global(cx)
+        .update(cx, |store, cx| store.save(metadata.clone(), cx)));
+    for panel in [&first_panel, &second_panel] {
+        panel.update_in(cx, |panel, window, cx| {
+            panel.restore_test_terminal(metadata.clone(), false,
+                AgentThreadSource::AgentPanel, None, window, cx).unwrap();
+        });
+    }
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.close_terminal(&metadata, &ThreadEntryWorkspace::Open(first_workspace), window, cx);
+    });
+    cx.run_until_parked();
+    assert!(first_fake.kill_history().is_empty());
+    assert!(second_fake.kill_history().is_empty());
+    assert!(first_fake.has_session(&session_name));
+    assert!(second_fake.has_session(&session_name));
+    for panel in [&first_panel, &second_panel] {
+        assert!(panel.read_with(cx, |panel, _| panel.has_terminal(terminal_id)));
+    }
+    cx.update(|_, cx| {
+        let store = TerminalThreadMetadataStore::global(cx);
+        assert_eq!(store.read(cx).entry(terminal_id).unwrap().shpool_context.as_ref(),
+            Some(&original_context));
+        assert!(!store.read(cx).is_intentionally_closing(terminal_id));
+    });
+    assert_eq!(multi_workspace.read_with(cx, |multi_workspace, _| {
+        multi_workspace.workspaces().count()
+    }), 2);
+}
+
+#[gpui::test]
 async fn test_terminal_close_coordinates_sole_same_window_owner(cx: &mut TestAppContext) {
     let project = init_test_project_with_agent_panel("/shared", cx).await;
     let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
@@ -5424,6 +5504,7 @@ async fn test_terminal_close_coordinates_sole_same_window_owner(cx: &mut TestApp
             fake.add_session(&session_name);
             fake.state.lock().probe_delay = pending.then_some(Duration::from_secs(1));
             let metadata = TerminalThreadMetadata {
+                shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
                 terminal_id, title: "Sole same-window owner".into(), custom_title: None,
                 created_at: chrono::Utc::now(),
                 worktree_paths: project.read_with(cx, |project, cx| project.worktree_paths(cx)),
@@ -5501,6 +5582,7 @@ async fn test_terminal_close_coordinates_live_owners_in_all_windows(cx: &mut Tes
     let (sidebar, origin_panel) = setup_sidebar_with_agent_panel(&origin_multi_workspace, &mut origin_context);
     let (_, target_panel) = setup_sidebar_with_agent_panel(&target_multi_workspace, &mut target_context);
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id, title: "Shared terminal".into(), custom_title: None,
         created_at: chrono::Utc::now(), worktree_paths: project.read_with(cx, |project, cx| project.worktree_paths(cx)),
         remote_connection: None, working_directory: None,
@@ -5546,6 +5628,7 @@ async fn test_terminal_close_coordinates_same_window_live_and_pending_owners(cx:
     let (sidebar, first) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
     let first_workspace = multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id, title: "Same-window shared session".into(), custom_title: None,
         created_at: chrono::Utc::now(),
         worktree_paths: project.read_with(cx, |project, cx| project.worktree_paths(cx)),
@@ -5622,6 +5705,7 @@ async fn test_terminal_close_waits_for_pending_owner_in_another_window(cx: &mut 
     let (sidebar, _) = setup_sidebar_with_agent_panel(&origin_multi_workspace, &mut origin_context);
     let (_, panel) = setup_sidebar_with_agent_panel(&target_multi_workspace, &mut target_context);
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id, title: "Pending shared terminal".into(), custom_title: None,
         created_at: chrono::Utc::now(), worktree_paths: project.read_with(cx, |project, cx| project.worktree_paths(cx)),
         remote_connection: None, working_directory: None,
@@ -5696,6 +5780,7 @@ async fn test_close_local_saved_terminal_from_remote_workspace_without_opening_w
     ));
     let paths = PathList::new(&[PathBuf::from("/saved-local")]);
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id: id, title: "Saved local terminal".into(), custom_title: None,
         created_at: chrono::Utc::now(),
         worktree_paths: WorktreePaths::from_path_lists(paths.clone(), paths.clone()).unwrap(),
@@ -5761,6 +5846,7 @@ async fn test_close_remote_saved_terminal_connects_without_opening_workspace(
     ));
     let paths = PathList::new(&[PathBuf::from("/saved-remote")]);
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id: id, title: "Saved remote terminal".into(), custom_title: None,
         created_at: chrono::Utc::now(),
         worktree_paths: WorktreePaths::from_path_lists(paths.clone(), paths.clone()).unwrap(),
@@ -5797,6 +5883,7 @@ async fn test_close_terminal_entry_without_matching_project_retains_metadata(
     let remote_connection =
         remote::RemoteConnectionOptions::Mock(remote::MockConnectionOptions { id: 99 });
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id,
         title: "Unavailable Remote Terminal".into(),
         custom_title: None,
@@ -16081,6 +16168,7 @@ async fn test_closing_terminal_on_mixed_worktree_cancel_preserves_session_items_
         })
         .unwrap();
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id,
         title: "Feature Terminal".into(),
         custom_title: None,
@@ -16227,6 +16315,7 @@ async fn test_closing_terminal_on_mixed_worktree_cancel_preserves_session_items_
         })
         .unwrap();
     let second_metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id: second_terminal_id,
         title: "Second Feature Terminal".into(),
         custom_title: None,
@@ -16383,6 +16472,7 @@ async fn test_closing_terminal_on_mixed_worktree_keeps_new_item_opened_during_ki
         })
         .unwrap();
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id,
         title: "Feature Terminal".into(),
         custom_title: None,
@@ -18233,6 +18323,7 @@ async fn test_sidebar_close_waits_for_pending_terminal_startup(cx: &mut TestAppC
     let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
     let terminal_id = TerminalId::new();
     let metadata = TerminalThreadMetadata {
+        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
         terminal_id,
         title: "Starting terminal".into(), custom_title: None,
         created_at: chrono::Utc::now(),
