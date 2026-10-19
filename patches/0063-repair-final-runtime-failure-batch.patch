@@ -1,0 +1,379 @@
+From e2eac08ac10441b7061d3f58bb2200432470cca2 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 01:29:54 +0000
+Subject: [PATCH] Repair the complete final runtime failure batch
+
+Enumerate registered workspace models without borrowing leased window roots, replay native close decisions for terminals completed before insertion, and preserve realistic shared-client and event-turn fixtures. Keep real shpool sockets short and include full daemon diagnostics without weakening mandatory assertions.
+---
+ crates/agent_ui/src/agent_panel.rs            |  3 +-
+ crates/project/src/terminals.rs               | 18 +++-
+ crates/sidebar/src/sidebar.rs                 | 88 +++++++++++++------
+ crates/sidebar/src/sidebar_tests.rs           | 16 +++-
+ crates/terminal/src/terminal.rs               | 13 +++
+ crates/workspace/src/multi_workspace.rs       |  9 +-
+ crates/workspace/src/multi_workspace_tests.rs | 35 ++++++--
+ 7 files changed, 139 insertions(+), 43 deletions(-)
+
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index f11e24a..4c39b7e 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -2645,7 +2645,8 @@ impl AgentPanel {
+         self.emit_terminal_thread_started(terminal_id, source, cx);
+         if terminal_entity.read(cx).has_exited() {
+             self.handle_terminal_process_exited(terminal_id, window, cx);
+-            if !persistent {
++            if !persistent && terminal_entity.read(cx).close_on_exit_requested() {
++                self.close_terminal_internal(terminal_id, false, true, window, cx);
+                 return;
+             }
+         }
+diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
+index fb83ab9..1b89848 100644
+--- a/crates/project/src/terminals.rs
++++ b/crates/project/src/terminals.rs
+@@ -2140,7 +2140,13 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
+             "the enabled real-shpool regression requires shpool on PATH"
+         );
+ 
+-        let temp_dir = tempfile::tempdir().expect("tempdir creation");
++        // Darwin's default TMPDIR is deeply nested; shpool binds both control
++        // and event Unix sockets. Keep this fixture's paths below sun_path's
++        // limit even after /tmp is resolved to /private/tmp.
++        let temp_dir = tempfile::Builder::new()
++            .prefix("zed-shpool-")
++            .tempdir_in("/tmp")
++            .expect("short isolated tempdir creation");
+         let isolated_runtime = temp_dir.path().join("runtime");
+         let isolated_home = temp_dir.path().join("home");
+         std::fs::create_dir_all(&isolated_runtime).expect("create isolated runtime");
+@@ -2181,7 +2187,15 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
+         let task = project.update(cx, |p, cx| p.exec_script_in_sh(probe_script, cx));
+         let mut cmd = task.await.expect("probe command creation");
+         let output = cmd.output().await.expect("probe execution");
+-        assert!(output.status.success(), "probe script must succeed");
++        assert!(
++            output.status.success(),
++            "probe script must succeed: status={}; stdout={}; stderr={}; daemon log={}",
++            output.status,
++            String::from_utf8_lossy(&output.stdout),
++            String::from_utf8_lossy(&output.stderr),
++            std::fs::read_to_string(isolated_runtime.join("shpool/daemonized-shpool.log"))
++                .unwrap_or_else(|error| format!("unavailable: {error}")),
++        );
+         let stdout = String::from_utf8_lossy(&output.stdout);
+         let probe = parse_shpool_probe(&stdout)
+             .expect("should parse output")
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index 15d6ed6..c98a64e 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -3805,22 +3805,56 @@ impl Sidebar {
+         }
+     }
+ 
++    fn workspace_stores(&self, cx: &App) -> Vec<Entity<workspace::WorkspaceStore>> {
++        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
++            return Vec::new();
++        };
++        let mut stores = Vec::new();
++        for workspace in multi_workspace.read(cx).workspaces() {
++            let store = workspace.read(cx).app_state().workspace_store.clone();
++            if !stores.contains(&store) {
++                stores.push(store);
++            }
++        }
++        stores
++    }
++
++    fn registered_workspaces(
++        stores: &[Entity<workspace::WorkspaceStore>],
++        cx: &App,
++    ) -> Vec<(gpui::AnyWindowHandle, Entity<Workspace>)> {
++        // The live Window may already be leased by the caller. The existing
++        // workspace registry provides model handles without reading its root.
++        let windows = cx.windows();
++        let mut seen = HashSet::default();
++        let mut workspaces = Vec::new();
++        for store in stores {
++            for (registered_window, weak_workspace) in store.read(cx).workspaces_with_windows() {
++                let Some(window) = windows.iter().copied().find(|window| {
++                    window.window_id() == registered_window.window_id()
++                }) else { continue };
++                if window.downcast::<MultiWorkspace>().is_none() {
++                    continue;
++                }
++                let Some(workspace) = weak_workspace.upgrade() else { continue };
++                if seen.insert(workspace.entity_id()) {
++                    workspaces.push((window, workspace));
++                }
++            }
++        }
++        workspaces
++    }
++
+     fn find_workspace_across_windows(
+         &self,
+         cx: &App,
+         predicate: impl Fn(&Entity<Workspace>, &App) -> bool,
+     ) -> Option<(WindowHandle<MultiWorkspace>, Entity<Workspace>)> {
+-        cx.windows()
++        Self::registered_workspaces(&self.workspace_stores(cx), cx)
+             .into_iter()
+-            .filter_map(|window| window.downcast::<MultiWorkspace>())
+-            .find_map(|window| {
+-                let workspace = window.read(cx).ok().and_then(|multi_workspace| {
+-                    multi_workspace
+-                        .workspaces()
+-                        .find(|workspace| predicate(workspace, cx))
+-                        .cloned()
+-                })?;
+-                Some((window, workspace))
++            .find_map(|(window, workspace)| {
++                let window = window.downcast::<MultiWorkspace>()?;
++                predicate(&workspace, cx).then_some((window, workspace))
+             })
+     }
+ 
+@@ -5297,24 +5331,21 @@ impl Sidebar {
+ 
+     fn terminal_owners(
+         metadata: &TerminalThreadMetadata,
++        stores: &[Entity<workspace::WorkspaceStore>],
+         cx: &App,
+     ) -> Vec<(gpui::AnyWindowHandle, Entity<Workspace>, Entity<AgentPanel>)> {
+         let mut owners = Vec::new();
+-        for handle in cx.windows() {
+-            let Some(window) = handle.downcast::<MultiWorkspace>() else { continue };
+-            let Ok(workspaces) = window.read_with(cx, |mw, _| mw.workspaces().cloned().collect::<Vec<_>>()) else { continue };
+-            for workspace in workspaces {
+-                let state = workspace.read(cx);
+-                if !same_terminal_remote_connection(
+-                    state.project().read(cx).remote_connection_options(cx).as_ref(),
+-                    metadata.remote_connection.as_ref(),
+-                ) { continue; }
+-                let Some(panel) = state.panel::<AgentPanel>(cx) else { continue };
+-                if panel.read(cx).has_terminal(metadata.terminal_id)
+-                    || panel.read(cx).is_terminal_spawn_pending(metadata.terminal_id)
+-                {
+-                    owners.push((handle, workspace, panel));
+-                }
++        for (window, workspace) in Self::registered_workspaces(stores, cx) {
++            let state = workspace.read(cx);
++            if !same_terminal_remote_connection(
++                state.project().read(cx).remote_connection_options(cx).as_ref(),
++                metadata.remote_connection.as_ref(),
++            ) { continue; }
++            let Some(panel) = state.panel::<AgentPanel>(cx) else { continue };
++            if panel.read(cx).has_terminal(metadata.terminal_id)
++                || panel.read(cx).is_terminal_spawn_pending(metadata.terminal_id)
++            {
++                owners.push((window, workspace, panel));
+             }
+         }
+         owners
+@@ -5326,7 +5357,8 @@ impl Sidebar {
+         origin: gpui::WindowId,
+         cx: &mut Context<Self>,
+     ) -> bool {
+-        let owners = Self::terminal_owners(metadata, cx);
++        let stores = self.workspace_stores(cx);
++        let owners = Self::terminal_owners(metadata, &stores, cx);
+         // Several workspaces can own one session inside the same window.
+         let owner = if owners.len() > 1 {
+             owners.first()
+@@ -5344,7 +5376,7 @@ impl Sidebar {
+             let result = async {
+                 // The global intent blocks new restorations. Every startup
+                 // already in flight must settle before the shared session ends.
+-                let owners = cx.update(|cx| Self::terminal_owners(&metadata, cx));
++                let owners = cx.update(|cx| Self::terminal_owners(&metadata, &stores, cx));
+                 let mut may_exist = owners.is_empty();
+                 for (window, _, panel) in &owners {
+                     let pending = panel.update(cx, |panel, cx| {
+@@ -5361,7 +5393,7 @@ impl Sidebar {
+                     // Re-read after waiting: a workspace may have moved to a
+                     // different window. Remove only this terminal's views, not
+                     // their workspaces, buffers or worktree directories.
+-                    for (window, _, panel) in Self::terminal_owners(&metadata, cx) {
++                    for (window, _, panel) in Self::terminal_owners(&metadata, &stores, cx) {
+                         window.update(cx, |_, window, cx| {
+                             panel.update(cx, |panel, cx| {
+                                 panel.close_terminal_after_session_kill(id, false, window, cx);
+diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
+index 7ec170b..ca18416 100644
+--- a/crates/sidebar/src/sidebar_tests.rs
++++ b/crates/sidebar/src/sidebar_tests.rs
+@@ -5234,8 +5234,14 @@ async fn test_terminal_close_coordinates_live_owners_in_all_windows(cx: &mut Tes
+     let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
+     fake.add_session(&session_name);
+     let origin_window_handle = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+-    let target_window_handle = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+     let origin_multi_workspace = origin_window_handle.root(cx).unwrap();
++    let shared_app_state = origin_multi_workspace.read_with(cx, |multi_workspace, cx| {
++        multi_workspace.workspace().read(cx).app_state().clone()
++    });
++    let target_window_handle = cx.add_window(|window, cx| {
++        let workspace = cx.new(|cx| Workspace::new(None, project.clone(), shared_app_state, window, cx));
++        MultiWorkspace::new(workspace, window, cx)
++    });
+     let target_multi_workspace = target_window_handle.root(cx).unwrap();
+     let mut origin_context = VisualTestContext::from_window(origin_window_handle.into(), cx);
+     let mut target_context = VisualTestContext::from_window(target_window_handle.into(), cx);
+@@ -5349,8 +5355,14 @@ async fn test_terminal_close_waits_for_pending_owner_in_another_window(cx: &mut
+     fake.add_session(&session_name);
+     fake.state.lock().probe_delay = Some(Duration::from_secs(1));
+     let origin_window_handle = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+-    let target_window_handle = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+     let origin_multi_workspace = origin_window_handle.root(cx).unwrap();
++    let shared_app_state = origin_multi_workspace.read_with(cx, |multi_workspace, cx| {
++        multi_workspace.workspace().read(cx).app_state().clone()
++    });
++    let target_window_handle = cx.add_window(|window, cx| {
++        let workspace = cx.new(|cx| Workspace::new(None, project.clone(), shared_app_state, window, cx));
++        MultiWorkspace::new(workspace, window, cx)
++    });
+     let target_multi_workspace = target_window_handle.root(cx).unwrap();
+     let mut origin_context = VisualTestContext::from_window(origin_window_handle.into(), cx);
+     let mut target_context = VisualTestContext::from_window(target_window_handle.into(), cx);
+diff --git a/crates/terminal/src/terminal.rs b/crates/terminal/src/terminal.rs
+index e111d1c..c9d1478 100644
+--- a/crates/terminal/src/terminal.rs
++++ b/crates/terminal/src/terminal.rs
+@@ -1103,6 +1103,7 @@ impl TerminalBuilder {
+             },
+             child_exited: None,
+             process_exited: false,
++            close_on_exit_requested: false,
+             keyboard_input_sent: false,
+             init_command_startup_marker: None,
+             init_command_startup_tx: None,
+@@ -1424,6 +1425,7 @@ impl TerminalBuilder {
+                 },
+                 child_exited: None,
+                 process_exited: false,
++                close_on_exit_requested: false,
+                 keyboard_input_sent: false,
+                 init_command_startup_marker: None,
+                 init_command_startup_tx: None,
+@@ -1637,6 +1639,9 @@ pub struct Terminal {
+     // The PTY can report `Exit` without a `ChildExit` status, so `child_exited`
+     // alone does not tell whether the process is gone.
+     process_exited: bool,
++    // A subscriber can attach after completion; preserve the native hide
++    // decision instead of replaying only the ProcessExited half of the event.
++    close_on_exit_requested: bool,
+     keyboard_input_sent: bool,
+     init_command_startup_marker: Option<String>,
+     init_command_startup_tx: Option<Sender<()>>,
+@@ -3367,6 +3372,10 @@ impl Terminal {
+         self.process_exited
+     }
+ 
++    pub fn close_on_exit_requested(&self) -> bool {
++        self.close_on_exit_requested
++    }
++
+     #[cfg(any(test, feature = "test-support"))]
+     pub fn simulate_process_exit(&mut self, cx: &mut Context<Self>) {
+         self.register_task_finished(None, cx);
+@@ -3402,6 +3411,7 @@ impl Terminal {
+                     self.child_exited.is_none_or(|e| e.code() == Some(0))
+                 };
+                 if should_close {
++                    self.close_on_exit_requested = true;
+                     cx.emit(Event::CloseTerminal);
+                 }
+                 return;
+@@ -3440,10 +3450,12 @@ impl Terminal {
+         match hide {
+             HideStrategy::Never => {}
+             HideStrategy::Always => {
++                self.close_on_exit_requested = true;
+                 cx.emit(Event::CloseTerminal);
+             }
+             HideStrategy::OnSuccess => {
+                 if finished_successfully {
++                    self.close_on_exit_requested = true;
+                     cx.emit(Event::CloseTerminal);
+                 }
+             }
+@@ -4750,6 +4762,7 @@ mod tests {
+             assert!(recorded.contains(&Event::ProcessExited));
+             assert_eq!(recorded.contains(&Event::CloseTerminal), should_close, "{hide:?}, exit {code}");
+             terminal.read_with(cx, |terminal, _| {
++                assert_eq!(terminal.close_on_exit_requested(), should_close, "{hide:?}, exit {code}");
+                 assert_eq!(terminal.task().unwrap().status, TaskStatus::Completed { success: code == 0 });
+                 assert!(terminal.get_content().contains("retained task output"));
+             });
+diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
+index 4e34a33..172e221 100644
+--- a/crates/workspace/src/multi_workspace.rs
++++ b/crates/workspace/src/multi_workspace.rs
+@@ -1738,7 +1738,14 @@ impl MultiWorkspace {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) -> Entity<Workspace> {
+-        let workspace = cx.new(|cx| Workspace::test_new(project, window, cx));
++        let app_state = self.workspace().read(cx).app_state().clone();
++        let workspace = if std::sync::Arc::ptr_eq(&project.read(cx).client(), &app_state.client) {
++            // One client owns one WorkspaceStore (and one Follow handler), as
++            // in production. Reusing that client must reuse its application state.
++            cx.new(|cx| Workspace::new(None, project, app_state, window, cx))
++        } else {
++            cx.new(|cx| Workspace::test_new(project, window, cx))
++        };
+         self.activate(workspace.clone(), None, window, cx);
+         workspace
+     }
+diff --git a/crates/workspace/src/multi_workspace_tests.rs b/crates/workspace/src/multi_workspace_tests.rs
+index 223e118..218b2e5 100644
+--- a/crates/workspace/src/multi_workspace_tests.rs
++++ b/crates/workspace/src/multi_workspace_tests.rs
+@@ -1871,19 +1871,36 @@ async fn test_item_close_guard_preserves_discard_and_saved_formatting(cx: &mut T
+     let (multi_workspace, cx) =
+         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+     let item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
+-    multi_workspace.update_in(cx, |_multi_workspace, window, cx| {
+-        let mut discard = ItemCloseGuard::new(vec![Box::new(item.clone())], window, cx);
++    let mut discard = multi_workspace.update_in(cx, |_, window, cx| {
++        ItemCloseGuard::new(vec![Box::new(item.clone())], window, cx)
++    });
++    cx.update(|_, cx| {
+         assert!(discard.accept_consent(cx), "an explicitly discarded unchanged buffer is accepted");
+-        let mut saved_then_edited = ItemCloseGuard::new(vec![Box::new(item.clone())], window, cx);
+-        item.update(cx, |item, cx| { item.is_dirty = false; cx.emit(ItemEvent::UpdateTab); });
+-        item.update(cx, |item, cx| { item.is_dirty = true; cx.emit(ItemEvent::Edit); });
++    });
++    let mut saved_then_edited = multi_workspace.update_in(cx, |_, window, cx| {
++        ItemCloseGuard::new(vec![Box::new(item.clone())], window, cx)
++    });
++    // User edits and prompt responses are separate event turns. Let the
++    // window-scoped item subscriptions observe them before accepting consent.
++    item.update(cx, |item, cx| { item.is_dirty = false; cx.emit(ItemEvent::UpdateTab); });
++    item.update(cx, |item, cx| { item.is_dirty = true; cx.emit(ItemEvent::Edit); });
++    cx.run_until_parked();
++    cx.update(|_, cx| {
+         assert!(!saved_then_edited.accept_consent(cx), "an edit during another prompt remains unsaved");
+-        let mut formatting = ItemCloseGuard::new(vec![Box::new(item.clone())], window, cx);
+-        item.update(cx, |item, cx| { item.is_dirty = true; cx.emit(ItemEvent::Edit); });
+-        item.update(cx, |item, cx| { item.is_dirty = false; cx.emit(ItemEvent::UpdateTab); });
++    });
++    let mut formatting = multi_workspace.update_in(cx, |_, window, cx| {
++        ItemCloseGuard::new(vec![Box::new(item.clone())], window, cx)
++    });
++    item.update(cx, |item, cx| { item.is_dirty = true; cx.emit(ItemEvent::Edit); });
++    item.update(cx, |item, cx| { item.is_dirty = false; cx.emit(ItemEvent::UpdateTab); });
++    cx.run_until_parked();
++    cx.update(|_, cx| {
+         assert!(formatting.accept_consent(cx), "saved formatting is part of accepted save consent");
+         assert!(!formatting.changed(cx));
+-        item.update(cx, |item, cx| { item.is_dirty = true; cx.emit(ItemEvent::Edit); });
++    });
++    item.update(cx, |item, cx| { item.is_dirty = true; cx.emit(ItemEvent::Edit); });
++    cx.run_until_parked();
++    cx.update(|_, cx| {
+         assert!(formatting.changed(cx), "edits after consent still refuse destructive cleanup");
+     });
+ }
