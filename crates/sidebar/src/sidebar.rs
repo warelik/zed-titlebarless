@@ -5320,6 +5320,16 @@ impl Sidebar {
             // Load the saved roots so per-project terminal settings/environment
             // select the same daemon as terminal activation would.
             for path in paths {
+                // Worktree creation accepts nonexistent roots. Resolve the
+                // actual local/remote path before selecting its daemon context.
+                let resolve = project.update(cx, |project, cx| {
+                    project.resolve_abs_path(&path.to_string_lossy(), cx)
+                });
+                anyhow::ensure!(
+                    resolve.await.is_some(),
+                    "saved terminal root is unavailable: {}",
+                    path.display(),
+                );
                 let load = project.update(cx, |project, cx| {
                     project.find_or_create_worktree(path.as_path(), true, cx)
                 });

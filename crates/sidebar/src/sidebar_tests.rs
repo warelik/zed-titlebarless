@@ -5328,6 +5328,67 @@ async fn test_unavailable_saved_root_keeps_terminal_metadata_and_session(cx: &mu
 }
 
 #[gpui::test]
+async fn test_saved_terminal_checks_every_root_and_allows_retry(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/unrelated", cx).await;
+    let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
+    let fs = project.read_with(cx, |project, _| project.fs().clone());
+    fs.as_fake().insert_tree("/available-first", serde_json::json!({})).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+    let active_workspace = multi_workspace.read_with(cx, |multi_workspace, _| {
+        multi_workspace.workspace().clone()
+    });
+    let terminal_id = TerminalId::new();
+    let session_name = terminal_id.session_name();
+    fake.add_session(&session_name);
+    let paths = PathList::new(&[
+        PathBuf::from("/available-first"),
+        PathBuf::from("/missing-second"),
+    ]);
+    let metadata = TerminalThreadMetadata {
+        terminal_id, title: "Unavailable second root".into(), custom_title: None,
+        created_at: chrono::Utc::now(),
+        worktree_paths: WorktreePaths::from_path_lists(paths.clone(), paths.clone()).unwrap(),
+        remote_connection: None, working_directory: None,
+    };
+    cx.update(|_, cx| TerminalThreadMetadataStore::global(cx)
+        .update(cx, |store, cx| store.save(metadata.clone(), cx)));
+    let entry_workspace = ThreadEntryWorkspace::Closed {
+        folder_paths: paths.clone(),
+        project_group_key: ProjectGroupKey::new(None, paths.clone()),
+    };
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.close_terminal(&metadata, &entry_workspace, window, cx);
+    });
+    cx.run_until_parked();
+    assert!(fake.kill_history().is_empty(), "every saved root must be available before kill");
+    assert!(fake.has_session(&session_name));
+    cx.update(|_, cx| {
+        let store = TerminalThreadMetadataStore::global(cx);
+        let saved = store.read(cx).entry(terminal_id).expect("failed context keeps metadata");
+        assert_eq!(saved.folder_paths(), &paths);
+        assert!(!store.read(cx).is_intentionally_closing(terminal_id));
+    });
+    fs.as_fake().insert_tree("/missing-second", serde_json::json!({})).await;
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.close_terminal(&metadata, &entry_workspace, window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(fake.kill_history(), vec![session_name.clone()]);
+    assert!(!fake.has_session(&session_name));
+    cx.update(|_, cx| {
+        let store = TerminalThreadMetadataStore::global(cx);
+        assert!(store.read(cx).entry(terminal_id).is_none());
+        assert!(!store.read(cx).is_intentionally_closing(terminal_id));
+    });
+    multi_workspace.read_with(cx, |multi_workspace, _| {
+        assert_eq!(multi_workspace.workspace(), &active_workspace);
+        assert_eq!(multi_workspace.workspaces().count(), 1);
+    });
+}
+
+#[gpui::test]
 async fn test_terminal_close_coordinates_sole_same_window_owner(cx: &mut TestAppContext) {
     let project = init_test_project_with_agent_panel("/shared", cx).await;
     let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
