@@ -2646,7 +2646,8 @@ impl AgentPanel {
         self.emit_terminal_thread_started(terminal_id, source, cx);
         if terminal_entity.read(cx).has_exited() {
             self.handle_terminal_process_exited(terminal_id, window, cx);
-            if !persistent {
+            if !persistent && terminal_entity.read(cx).close_on_exit_requested() {
+                self.close_terminal_internal(terminal_id, false, true, window, cx);
                 return;
             }
         }
