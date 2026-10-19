@@ -5328,6 +5328,82 @@ async fn test_unavailable_saved_root_keeps_terminal_metadata_and_session(cx: &mu
 }
 
 #[gpui::test]
+async fn test_terminal_close_coordinates_sole_same_window_owner(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/shared", cx).await;
+    let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+    let owner_workspace = multi_workspace.read_with(cx, |multi_workspace, _| {
+        multi_workspace.workspace().clone()
+    });
+    let non_owner_workspace = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.retain_active_workspace(cx);
+        multi_workspace.test_add_workspace(project.clone(), window, cx)
+    });
+    for closed_entry in [false, true] {
+        for pending in [false, true] {
+            let terminal_id = TerminalId::new();
+            let session_name = terminal_id.session_name();
+            fake.add_session(&session_name);
+            fake.state.lock().probe_delay = pending.then_some(Duration::from_secs(1));
+            let metadata = TerminalThreadMetadata {
+                terminal_id, title: "Sole same-window owner".into(), custom_title: None,
+                created_at: chrono::Utc::now(),
+                worktree_paths: project.read_with(cx, |project, cx| project.worktree_paths(cx)),
+                remote_connection: None, working_directory: None,
+            };
+            cx.update(|_, cx| TerminalThreadMetadataStore::global(cx)
+                .update(cx, |store, cx| store.save(metadata.clone(), cx)));
+            panel.update_in(cx, |panel, window, cx| panel.restore_terminal(
+                metadata.clone(), false, AgentThreadSource::AgentPanel, None, window, cx,
+            ));
+            cx.run_until_parked();
+            assert_eq!(panel.read_with(cx, |panel, _| panel.is_terminal_spawn_pending(terminal_id)), pending);
+            if !pending {
+                assert!(panel.read_with(cx, |panel, _| panel.has_terminal(terminal_id)));
+            }
+            let entry_workspace = if closed_entry {
+                let paths = metadata.folder_paths().clone();
+                ThreadEntryWorkspace::Closed {
+                    folder_paths: paths.clone(),
+                    project_group_key: ProjectGroupKey::new(None, paths),
+                }
+            } else {
+                ThreadEntryWorkspace::Open(non_owner_workspace.clone())
+            };
+            let kills_before = fake.kill_history().len();
+            sidebar.update_in(cx, |sidebar, window, cx| {
+                sidebar.close_terminal(&metadata, &entry_workspace, window, cx);
+            });
+            cx.run_until_parked();
+            if pending {
+                assert_eq!(fake.kill_history().len(), kills_before, "startup must settle before kill");
+                cx.update(|_, cx| assert!(TerminalThreadMetadataStore::global(cx)
+                    .read(cx).is_intentionally_closing(terminal_id)));
+                cx.executor().advance_clock(Duration::from_secs(1));
+                cx.run_until_parked();
+            }
+            assert_eq!(&fake.kill_history()[kills_before..], &[session_name.clone()]);
+            assert!(!fake.has_session(&session_name));
+            assert!(!panel.read_with(cx, |panel, _| {
+                panel.has_terminal(terminal_id) || panel.is_terminal_spawn_pending(terminal_id)
+            }));
+            multi_workspace.read_with(cx, |multi_workspace, _| {
+                assert_eq!(multi_workspace.workspace(), &non_owner_workspace);
+                assert_eq!(multi_workspace.workspaces().count(), 2);
+                assert!(multi_workspace.workspaces().any(|workspace| workspace == &owner_workspace));
+            });
+            cx.update(|_, cx| {
+                let store = TerminalThreadMetadataStore::global(cx);
+                assert!(store.read(cx).entry(terminal_id).is_none());
+                assert!(!store.read(cx).is_intentionally_closing(terminal_id));
+            });
+        }
+    }
+}
+
+#[gpui::test]
 async fn test_terminal_close_coordinates_live_owners_in_all_windows(cx: &mut TestAppContext) {
     let project = init_test_project_with_agent_panel("/shared", cx).await;
     let terminal_id = TerminalId::new();
