@@ -1,0 +1,24 @@
+From cc8d8cafcf6c21e243f4aad3875ec6b8332cf2b2 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 02:10:47 +0000
+Subject: [PATCH] Pin the workspace registry deduplication set type
+
+Specify the already imported EntityId so the collections HashSet default selects its existing default hasher. Resolve the complete E0283 compiler batch without changing behavior, tests or upstream compiler configuration.
+---
+ crates/sidebar/src/sidebar.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index 9bd6b52..4cae6ed 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -3826,7 +3826,7 @@ impl Sidebar {
+         // The live Window may already be leased by the caller. The existing
+         // workspace registry provides model handles without reading its root.
+         let windows = cx.windows();
+-        let mut seen = HashSet::default();
++        let mut seen = HashSet::<EntityId>::default();
+         let mut workspaces = Vec::new();
+         for store in stores {
+             for (registered_window, weak_workspace) in store.read(cx).workspaces_with_windows() {
