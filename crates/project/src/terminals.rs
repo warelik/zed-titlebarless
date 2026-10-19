@@ -265,8 +265,9 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" list --json
 "#
 );
 
-/// Legacy destructive operations may discover an existing daemon, never start
-/// an unrelated empty one and infer that its absent session has ended.
+/// Legacy restore and close may inspect an existing daemon, never start an
+/// unrelated one. Missing-client discovery remains an error for both callers;
+/// only new threads use the ordinary probe's unmanaged-shell fallback.
 const SHPOOL_EXISTING_PROBE_SCRIPT: &str = concat!(
     shpool_script_prelude!("127"),
     r#"
@@ -778,11 +779,10 @@ impl Project {
         cx.spawn(async move |project, cx| {
             let probe_result = probe.await?;
             if legacy_restore {
-                // An absent client keeps the ordinary unmanaged-shell fallback.
-                // The existing-only probe starts no daemon, and no persistent
-                // attachment is allowed without a positive session match.
+                // A saved UUID with an unknown locator may still have a live
+                // shell. Unavailable discovery must not create a second shell.
                 anyhow::ensure!(
-                    probe_result.as_ref().is_none_or(|probe| probe.sessions.contains(&session_name)),
+                    probe_result.as_ref().is_some_and(|probe| probe.sessions.contains(&session_name)),
                     "original shpool context is unknown and the saved session was not found; metadata retained",
                 );
             }
@@ -2080,17 +2080,20 @@ mod tests {
         assert!(fake.attach_history().is_empty(), "unknown legacy sessions must not be duplicated");
 
         fake.state.lock().available = false;
-        let unmanaged = project.update(cx, |project, cx| {
+        assert!(project.update(cx, |project, cx| {
             project.create_persistent_terminal_shell_in_context(
                 None, "zed-legacy".into(), None, None, true, cx,
             )
-        }).await.unwrap();
-        assert_eq!(unmanaged.session, PersistentSession::Unavailable);
-        assert!(fake.attach_history().is_empty(), "an absent client must not attach a persistent session");
+        }).await.is_err(), "unavailable discovery must not duplicate a legacy shell");
+        assert!(project.update(cx, |project, cx| {
+            project.kill_persistent_terminal_session_in_context("zed-legacy".into(), None, cx)
+        }).await.is_err(), "unavailable discovery cannot prove that a legacy session ended");
+        assert!(fake.attach_history().is_empty());
+        assert!(fake.kill_history().is_empty());
         assert!(!fake.has_session("zed-legacy"));
         assert!(project.read_with(cx, |project, _| {
             project.persistent_terminal_context("zed-legacy").is_none()
-        }), "an unmanaged fallback must not invent an original daemon locator");
+        }), "failed legacy discovery must not invent an original daemon locator");
         fake.state.lock().available = true;
 
         fake.add_session("zed-legacy");
@@ -2592,6 +2595,40 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
             "probe script syntax invalid under /bin/sh: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+
+        let isolated_home = tempfile::Builder::new()
+            .prefix("zed-shpool-no-client-")
+            .tempdir_in("/tmp")
+            .expect("create missing-client probe fixture");
+        for (script, expected_status) in [
+            (SHPOOL_PROBE_SCRIPT, 0),
+            (SHPOOL_EXISTING_PROBE_SCRIPT, 127),
+            (SHPOOL_KILL_SCRIPT_PRELUDE, 127),
+        ] {
+            // Hide only machine-specific discovery paths. Keep the actual
+            // production status handling and probe parser under test, without
+            // contacting a developer's installed client or live daemon.
+            let script = script
+                .replace("/opt/homebrew/bin/shpool", "\"$HOME/absent-homebrew/shpool\"")
+                .replace("/usr/local/bin/shpool", "\"$HOME/absent-local/shpool\"");
+            let output = smol::process::Command::new("/bin/sh")
+                .args(["-c", &script])
+                .env("HOME", isolated_home.path())
+                .env("PATH", isolated_home.path())
+                .env("XDG_RUNTIME_DIR", isolated_home.path())
+                .output()
+                .await
+                .expect("execute isolated missing-client probe");
+            assert_eq!(output.status.code(), Some(expected_status));
+            assert!(output.stdout.is_empty(), "an absent client emits no probe marker");
+            if expected_status == 0 {
+                assert!(parse_shpool_probe_output(&output).unwrap().is_none(),
+                    "new threads without shpool retain the unmanaged-shell fallback");
+            } else {
+                assert!(parse_shpool_probe_output(&output).is_err(),
+                    "legacy restore and destructive close must reject missing-client discovery");
+            }
+        }
     }
 
     #[cfg(unix)]

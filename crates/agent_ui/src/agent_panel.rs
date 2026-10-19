@@ -17795,11 +17795,19 @@ mod tests {
             working_directory: None,
         };
         panel.update_in(&mut cx, |panel, window, cx| {
-            panel.restore_terminal(
-                metadata,
+            // This is a new, never-managed shell. A legacy restore with an
+            // unknown original daemon must instead remain blocked.
+            panel.spawn_terminal(
+                metadata.terminal_id,
+                metadata.working_directory,
+                metadata.custom_title,
+                Some(metadata.title),
+                None,
+                metadata.shpool_context,
+                TerminalSelectMode::Always,
+                true,
                 true,
                 AgentThreadSource::AgentPanel,
-                None,
                 window,
                 cx,
             );
