@@ -633,6 +633,10 @@
     ],
     [
       "sidebar",
+      "test_saved_terminal_checks_every_root_and_allows_retry"
+    ],
+    [
+      "sidebar",
       "test_search_finds_threads_inside_collapsed_groups"
     ],
     [
