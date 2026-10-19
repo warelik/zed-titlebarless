@@ -3805,22 +3805,56 @@ impl Sidebar {
         }
     }
 
+    fn workspace_stores(&self, cx: &App) -> Vec<Entity<workspace::WorkspaceStore>> {
+        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
+            return Vec::new();
+        };
+        let mut stores = Vec::new();
+        for workspace in multi_workspace.read(cx).workspaces() {
+            let store = workspace.read(cx).app_state().workspace_store.clone();
+            if !stores.contains(&store) {
+                stores.push(store);
+            }
+        }
+        stores
+    }
+
+    fn registered_workspaces(
+        stores: &[Entity<workspace::WorkspaceStore>],
+        cx: &App,
+    ) -> Vec<(gpui::AnyWindowHandle, Entity<Workspace>)> {
+        // The live Window may already be leased by the caller. The existing
+        // workspace registry provides model handles without reading its root.
+        let windows = cx.windows();
+        let mut seen = HashSet::default();
+        let mut workspaces = Vec::new();
+        for store in stores {
+            for (registered_window, weak_workspace) in store.read(cx).workspaces_with_windows() {
+                let Some(window) = windows.iter().copied().find(|window| {
+                    window.window_id() == registered_window.window_id()
+                }) else { continue };
+                if window.downcast::<MultiWorkspace>().is_none() {
+                    continue;
+                }
+                let Some(workspace) = weak_workspace.upgrade() else { continue };
+                if seen.insert(workspace.entity_id()) {
+                    workspaces.push((window, workspace));
+                }
+            }
+        }
+        workspaces
+    }
+
     fn find_workspace_across_windows(
         &self,
         cx: &App,
         predicate: impl Fn(&Entity<Workspace>, &App) -> bool,
     ) -> Option<(WindowHandle<MultiWorkspace>, Entity<Workspace>)> {
-        cx.windows()
+        Self::registered_workspaces(&self.workspace_stores(cx), cx)
             .into_iter()
-            .filter_map(|window| window.downcast::<MultiWorkspace>())
-            .find_map(|window| {
-                let workspace = window.read(cx).ok().and_then(|multi_workspace| {
-                    multi_workspace
-                        .workspaces()
-                        .find(|workspace| predicate(workspace, cx))
-                        .cloned()
-                })?;
-                Some((window, workspace))
+            .find_map(|(window, workspace)| {
+                let window = window.downcast::<MultiWorkspace>()?;
+                predicate(&workspace, cx).then_some((window, workspace))
             })
     }
 
@@ -5297,24 +5331,21 @@ impl Sidebar {
 
     fn terminal_owners(
         metadata: &TerminalThreadMetadata,
+        stores: &[Entity<workspace::WorkspaceStore>],
         cx: &App,
     ) -> Vec<(gpui::AnyWindowHandle, Entity<Workspace>, Entity<AgentPanel>)> {
         let mut owners = Vec::new();
-        for handle in cx.windows() {
-            let Some(window) = handle.downcast::<MultiWorkspace>() else { continue };
-            let Ok(workspaces) = window.read_with(cx, |mw, _| mw.workspaces().cloned().collect::<Vec<_>>()) else { continue };
-            for workspace in workspaces {
-                let state = workspace.read(cx);
-                if !same_terminal_remote_connection(
-                    state.project().read(cx).remote_connection_options(cx).as_ref(),
-                    metadata.remote_connection.as_ref(),
-                ) { continue; }
-                let Some(panel) = state.panel::<AgentPanel>(cx) else { continue };
-                if panel.read(cx).has_terminal(metadata.terminal_id)
-                    || panel.read(cx).is_terminal_spawn_pending(metadata.terminal_id)
-                {
-                    owners.push((handle, workspace, panel));
-                }
+        for (window, workspace) in Self::registered_workspaces(stores, cx) {
+            let state = workspace.read(cx);
+            if !same_terminal_remote_connection(
+                state.project().read(cx).remote_connection_options(cx).as_ref(),
+                metadata.remote_connection.as_ref(),
+            ) { continue; }
+            let Some(panel) = state.panel::<AgentPanel>(cx) else { continue };
+            if panel.read(cx).has_terminal(metadata.terminal_id)
+                || panel.read(cx).is_terminal_spawn_pending(metadata.terminal_id)
+            {
+                owners.push((window, workspace, panel));
             }
         }
         owners
@@ -5326,7 +5357,8 @@ impl Sidebar {
         origin: gpui::WindowId,
         cx: &mut Context<Self>,
     ) -> bool {
-        let owners = Self::terminal_owners(metadata, cx);
+        let stores = self.workspace_stores(cx);
+        let owners = Self::terminal_owners(metadata, &stores, cx);
         // Several workspaces can own one session inside the same window.
         let owner = if owners.len() > 1 {
             owners.first()
@@ -5344,7 +5376,7 @@ impl Sidebar {
             let result = async {
                 // The global intent blocks new restorations. Every startup
                 // already in flight must settle before the shared session ends.
-                let owners = cx.update(|cx| Self::terminal_owners(&metadata, cx));
+                let owners = cx.update(|cx| Self::terminal_owners(&metadata, &stores, cx));
                 let mut may_exist = owners.is_empty();
                 for (window, _, panel) in &owners {
                     let pending = panel.update(cx, |panel, cx| {
@@ -5361,7 +5393,7 @@ impl Sidebar {
                     // Re-read after waiting: a workspace may have moved to a
                     // different window. Remove only this terminal's views, not
                     // their workspaces, buffers or worktree directories.
-                    for (window, _, panel) in Self::terminal_owners(&metadata, cx) {
+                    for (window, _, panel) in Self::terminal_owners(&metadata, &stores, cx) {
                         window.update(cx, |_, window, cx| {
                             panel.update(cx, |panel, cx| {
                                 panel.close_terminal_after_session_kill(id, false, window, cx);
