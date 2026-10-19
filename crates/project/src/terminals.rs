@@ -778,8 +778,11 @@ impl Project {
         cx.spawn(async move |project, cx| {
             let probe_result = probe.await?;
             if legacy_restore {
+                // An absent client keeps the ordinary unmanaged-shell fallback.
+                // The existing-only probe starts no daemon, and no persistent
+                // attachment is allowed without a positive session match.
                 anyhow::ensure!(
-                    probe_result.as_ref().is_some_and(|probe| probe.sessions.contains(&session_name)),
+                    probe_result.as_ref().is_none_or(|probe| probe.sessions.contains(&session_name)),
                     "original shpool context is unknown and the saved session was not found; metadata retained",
                 );
             }
@@ -1015,7 +1018,7 @@ impl Project {
         if let Some(fake) = &self.fake_shpool {
             if context.as_ref().is_some_and(|context| {
                 let state = fake.state.lock();
-                !state.available || state.socket.to_string_lossy().as_bytes() != context.socket.as_bytes()
+                state.socket.to_string_lossy().as_bytes() != context.socket.as_bytes()
             }) {
                 return Task::ready(Err(anyhow::anyhow!("original shpool daemon is unavailable")));
             }
@@ -1023,6 +1026,11 @@ impl Project {
             let delay = {
                 let mut state = state.lock();
                 state.kill_history.push(session_name.clone());
+                // Like executing the pinned client in production, a failed
+                // command is still an attempt against this original backend.
+                if context.is_some() && !state.available {
+                    return Task::ready(Err(anyhow::anyhow!("original shpool daemon is unavailable")));
+                }
                 state.kill_delay
             };
             if let Some(delay) = delay {
@@ -2070,6 +2078,21 @@ mod tests {
             )
         }).await.is_err());
         assert!(fake.attach_history().is_empty(), "unknown legacy sessions must not be duplicated");
+
+        fake.state.lock().available = false;
+        let unmanaged = project.update(cx, |project, cx| {
+            project.create_persistent_terminal_shell_in_context(
+                None, "zed-legacy".into(), None, None, true, cx,
+            )
+        }).await.unwrap();
+        assert_eq!(unmanaged.session, PersistentSession::Unavailable);
+        assert!(fake.attach_history().is_empty(), "an absent client must not attach a persistent session");
+        assert!(!fake.has_session("zed-legacy"));
+        assert!(project.read_with(cx, |project, _| {
+            project.persistent_terminal_context("zed-legacy").is_none()
+        }), "an unmanaged fallback must not invent an original daemon locator");
+        fake.state.lock().available = true;
+
         fake.add_session("zed-legacy");
         let restored = project.update(cx, |project, cx| {
             project.create_persistent_terminal_shell_in_context(
