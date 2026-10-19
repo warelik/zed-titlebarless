@@ -1783,6 +1783,7 @@ fn quote_cmd_command_arg_for_outer_shell(arg: &str, shell_kind: ShellKind) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::BorrowAppContext;
     use pretty_assertions::assert_eq;
 
     fn prepared_cmd_task(command_arg: &str) -> SpawnInTerminal {
