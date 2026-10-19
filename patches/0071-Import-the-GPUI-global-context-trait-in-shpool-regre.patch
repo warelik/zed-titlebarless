@@ -1,0 +1,24 @@
+From 8993590d9a032f045a503020198126600fbac386 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 06:17:15 +0000
+Subject: [PATCH] Import the GPUI global-context trait in shpool regression
+ fixtures
+
+Final run39206577081 reported the complete two-error E0599 batch at the two settings mutations in the existing real-shpool regression. Both calls use App::update_global through the public BorrowAppContext extension trait; import it once in the unit-test module. Preserve every fixture, assertion and all207 required cases. No profile, compiler, runtime or policy changes.
+---
+ crates/project/src/terminals.rs | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
+index 5515b26..7dd39ee 100644
+--- a/crates/project/src/terminals.rs
++++ b/crates/project/src/terminals.rs
+@@ -1783,6 +1783,7 @@ fn quote_cmd_command_arg_for_outer_shell(arg: &str, shell_kind: ShellKind) -> Op
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use gpui::BorrowAppContext;
+     use pretty_assertions::assert_eq;
+ 
+     fn prepared_cmd_task(command_arg: &str) -> SpawnInTerminal {
