@@ -5355,17 +5355,21 @@ impl Sidebar {
         &mut self,
         metadata: &TerminalThreadMetadata,
         origin: gpui::WindowId,
+        direct_workspace: &ThreadEntryWorkspace,
         cx: &mut Context<Self>,
     ) -> bool {
         let stores = self.workspace_stores(cx);
         let owners = Self::terminal_owners(metadata, &stores, cx);
-        // Several workspaces can own one session inside the same window.
-        let owner = if owners.len() > 1 {
-            owners.first()
-        } else {
-            owners.iter().find(|(window, _, _)| window.window_id() != origin)
-        };
-        let Some((_, workspace, _)) = owner else { return false };
+        let Some((owner_window, workspace, _)) = owners.first() else { return false };
+        // Only the exact owner handled by the ordinary close path can bypass
+        // coordination. Saved paths can classify an entry as closed or point
+        // at another workspace even while this window still owns its terminal.
+        if owners.len() == 1
+            && owner_window.window_id() == origin
+            && matches!(direct_workspace, ThreadEntryWorkspace::Open(direct) if direct == workspace)
+        {
+            return false;
+        }
         let project = workspace.read(cx).project().clone();
         let metadata = metadata.clone();
         let id = metadata.terminal_id;
@@ -5420,7 +5424,7 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.close_terminal_with_other_owners(metadata, window.window_handle().window_id(), cx) {
+        if self.close_terminal_with_other_owners(metadata, window.window_handle().window_id(), workspace, cx) {
             return;
         }
         let project = match workspace {
@@ -5446,7 +5450,7 @@ impl Sidebar {
                 }
             };
             this.update_in(cx, |this, window, cx| {
-                if this.close_terminal_with_other_owners(&metadata, window.window_handle().window_id(), cx) {
+                if this.close_terminal_with_other_owners(&metadata, window.window_handle().window_id(), &workspace, cx) {
                     return;
                 }
                 // Re-read live state after connection setup: activation may have
@@ -5553,7 +5557,7 @@ impl Sidebar {
                     return anyhow::Ok(());
                 }
                 if this.update(cx, |this, cx| {
-                    this.close_terminal_with_other_owners(&metadata, close_window_id, cx)
+                    this.close_terminal_with_other_owners(&metadata, close_window_id, &workspace, cx)
                 })? { return anyhow::Ok(()); }
                 if !gpui::AsyncApp::update(cx, |cx| begin_terminal_close(terminal_id, cx)) {
                     return anyhow::Ok(());
@@ -5627,6 +5631,7 @@ impl Sidebar {
         let callback_kill_succeeded = kill_succeeded.clone();
         let callback_close_guard = close_guard.clone();
         let callback_metadata = metadata.clone();
+        let callback_workspace = workspace.clone();
         let remove_task = multi_workspace.update(cx, |multi_workspace, cx| {
             multi_workspace.remove_with_pre_remove(
                 workspaces_to_remove,
@@ -5646,7 +5651,7 @@ impl Sidebar {
                         return Ok(false);
                     }
                     if sidebar.update(cx, |this, cx| {
-                        this.close_terminal_with_other_owners(&callback_metadata, close_window_id, cx)
+                        this.close_terminal_with_other_owners(&callback_metadata, close_window_id, &callback_workspace, cx)
                     })? { return Ok(false); }
                     if !gpui::AsyncApp::update(cx, |cx| begin_terminal_close(terminal_id, cx)) {
                         return Ok(false);
