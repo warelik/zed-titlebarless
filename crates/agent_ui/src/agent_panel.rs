@@ -3025,13 +3025,21 @@ impl AgentPanel {
     }
 
     fn update_terminal_worktree_paths(&self, cx: &mut Context<Self>) {
-        let worktree_paths = self.project.read(cx).worktree_paths(cx);
+        let (worktree_paths, path_style, remote_connection) = {
+            let project = self.project.read(cx);
+            (
+                project.worktree_paths(cx),
+                project.path_style(cx),
+                project.remote_connection_options(cx),
+            )
+        };
         if !worktree_paths.is_empty() {
             if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
                 store.update(cx, |store, cx| {
                     store.update_worktree_paths_for_project(
                         &worktree_paths,
-                        self.project.read(cx).remote_connection_options(cx).as_ref(),
+                        path_style,
+                        remote_connection.as_ref(),
                         cx,
                     );
                 });
