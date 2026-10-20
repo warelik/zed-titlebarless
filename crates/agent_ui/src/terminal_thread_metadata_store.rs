@@ -14,7 +14,7 @@ use futures::{FutureExt, future::Shared};
 use gpui::{AppContext as _, Entity, Global, Task};
 use remote::{RemoteConnectionOptions, same_remote_connection_identity};
 use ui::{App, Context, SharedString};
-use util::ResultExt as _;
+use util::{ResultExt as _, paths::PathStyle};
 use workspace::PathList;
 
 use crate::{TerminalId, thread_metadata_store::WorktreePaths};
@@ -418,6 +418,7 @@ impl TerminalThreadMetadataStore {
     pub fn update_worktree_paths_for_project(
         &mut self,
         worktree_paths: &WorktreePaths,
+        path_style: PathStyle,
         remote_connection: Option<&RemoteConnectionOptions>,
         cx: &mut Context<Self>,
     ) {
@@ -441,7 +442,9 @@ impl TerminalThreadMetadataStore {
                                 .folder_path_list()
                                 .paths()
                                 .iter()
-                                .any(|folder_path| working_directory.starts_with(folder_path))
+                                .any(|folder_path| {
+                                    path_style.starts_with(working_directory, folder_path)
+                                })
                         })
                 {
                     let mut updated = terminal;
@@ -1256,7 +1259,12 @@ mod tests {
             // A corrupted pair must not become a rootless cached terminal that
             // can be adopted by this unrelated project's matching cwd.
             store.update(cx, |store, cx| {
-                store.update_worktree_paths_for_project(&adopting_context, None, cx);
+                store.update_worktree_paths_for_project(
+                    &adopting_context,
+                    PathStyle::Unix,
+                    None,
+                    cx,
+                );
             });
             cx.run_until_parked();
             let stored = db.select_bound::<String, (String, String, String, String)>(
@@ -1685,6 +1693,7 @@ mod tests {
             TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
                 store.update_worktree_paths_for_project(
                     &project_worktree_paths,
+                    PathStyle::local(),
                     Some(&remote_connection),
                     cx,
                 );
@@ -1766,6 +1775,57 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_remote_windows_working_directory_uses_project_path_style(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let remote_connection = RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+            host: "windows-host".into(),
+            ..Default::default()
+        });
+        let project_paths = PathList::new(&[Path::new(r"C:\repo")]);
+        let project_worktree_paths = WorktreePaths::from_folder_paths(&project_paths);
+
+        let mut nested = metadata("Windows nested", WorktreePaths::default());
+        nested.working_directory = Some(PathBuf::from(r"C:\repo\nested"));
+        nested.remote_connection = Some(remote_connection.clone());
+        let nested_id = nested.terminal_id;
+
+        let mut sibling = metadata("Windows sibling prefix", WorktreePaths::default());
+        sibling.working_directory = Some(PathBuf::from(r"C:\repo-other\nested"));
+        sibling.remote_connection = Some(remote_connection.clone());
+        let sibling_id = sibling.terminal_id;
+
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(nested, cx);
+                store.save(sibling, cx);
+                store.update_worktree_paths_for_project(
+                    &project_worktree_paths,
+                    PathStyle::Windows,
+                    Some(&remote_connection),
+                    cx,
+                );
+            });
+        });
+
+        cx.update(|cx| {
+            let store = TerminalThreadMetadataStore::global(cx);
+            let store = store.read(cx);
+            assert_eq!(
+                store.entry(nested_id).unwrap().worktree_paths,
+                project_worktree_paths,
+                "a Windows remote cwd must be compared with the remote project's path style"
+            );
+            assert!(
+                store.entry(sibling_id).unwrap().worktree_paths.is_empty(),
+                "a Windows sibling path with a shared string prefix must not be adopted"
+            );
+        });
+    }
+
+    #[gpui::test]
     async fn test_ssh_routing_arguments_scope_terminal_project_assignment(
         cx: &mut TestAppContext,
     ) {
@@ -1801,6 +1861,7 @@ mod tests {
                 store.save(other_destination, cx);
                 store.update_worktree_paths_for_project(
                     &project_worktree_paths,
+                    PathStyle::local(),
                     Some(&project_connection),
                     cx,
                 );
