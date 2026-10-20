@@ -436,7 +436,7 @@ impl MultiWorkspace {
         workspace.update(cx, |workspace, cx| {
             workspace.set_multi_workspace(weak_self, active_workspace_id.clone(), cx);
         });
-        Self {
+        let mut this = Self {
             window_id: window.window_handle().window_id(),
             held: vec![HeldWorkspace {
                 workspace,
@@ -452,7 +452,19 @@ impl MultiWorkspace {
             _serialize_task: None,
             _subscriptions: vec![release_subscription, settings_subscription],
             previous_focus_handle: None,
+        };
+        if this.multi_workspace_enabled(cx)
+            && threads_sidebar_in_agent_panel(cx)
+            && !this
+                .workspace()
+                .read(cx)
+                .project_group_key(cx)
+                .path_list()
+                .is_empty()
+        {
+            this.retain_active_workspace(cx);
         }
+        this
     }
 
     pub fn register_sidebar<T: Sidebar>(&mut self, sidebar: Entity<T>, cx: &mut Context<Self>) {

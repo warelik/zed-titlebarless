@@ -118,6 +118,30 @@ async fn test_sidebar_disabled_when_disable_ai_is_enabled(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+async fn test_initial_agent_panel_retains_nonempty_active_workspace(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(|cx| {
+        let mut settings = AgentSettings::get_global(cx).clone();
+        settings.threads_sidebar.in_agent_panel = true;
+        AgentSettings::override_global(settings, cx);
+    });
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file.txt": "" })).await;
+    let project = Project::test(fs, ["/root_a".as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+    multi_workspace.read_with(cx, |multi_workspace, cx| {
+        assert!(multi_workspace.multi_workspace_enabled(cx));
+        assert!(
+            multi_workspace.active_workspace_is_retained(),
+            "the initial nonempty project must be retained when the threads sidebar starts in the agent panel"
+        );
+    });
+}
+
+#[gpui::test]
 async fn test_multi_workspace_collapses_when_agent_is_disabled(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
