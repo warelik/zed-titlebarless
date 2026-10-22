@@ -529,6 +529,10 @@
     ],
     [
       "sidebar",
+      "test_agent_panel_sidebar_keeps_empty_workspace_transient"
+    ],
+    [
+      "sidebar",
       "test_agent_panel_terminal_notifications_update_sidebar"
     ],
     [

@@ -1073,7 +1073,7 @@ class CrossApplicationFinalHistoryTests(unittest.TestCase):
 
 
 class PublishedRecoveryCheckpointTests(unittest.TestCase):
-    def test_rejected_recovery_does_not_advance_and_late_failure_restores_its_checkpoint(self):
+    def test_rejected_recovery_does_not_advance_and_cleanup_failure_keeps_public_checkpoint(self):
         repo, app, config, upstream, patchset = "owner/zed", "a" * 40, "b" * 40, "c" * 40, "d" * 64
         identity = {"repository": repo, "candidate_sha": app, "config_sha": config,
                     "upstream_sha": upstream, "patchset_sha256": patchset,
@@ -1089,8 +1089,9 @@ class PublishedRecoveryCheckpointTests(unittest.TestCase):
                        "CANDIDATE_PR": "7", "ARTIFACT_RECEIPT_PATH": "/unused/receipt",
                        "ARTIFACT_VALIDATED_RUN_ID": "21", "ARTIFACT_VALIDATED_RUN_ATTEMPT": "1",
                        "ARTIFACT_VALIDATED_WORKFLOW_SHA": config}
-        for ready, minor, cleanup_failure in ((False, False, False), (True, True, False),
-                                               (True, False, False), (True, False, True)):
+        for ready, minor, cleanup_failure in ((False, False, None), (True, True, None),
+                                               (True, False, None), (True, False, "review"),
+                                               (True, False, "repair")):
             with self.subTest(ready=ready, minor=minor, cleanup_failure=cleanup_failure):
                 events = []
                 with (patch.dict(os.environ, environment, clear=True),
@@ -1103,8 +1104,8 @@ class PublishedRecoveryCheckpointTests(unittest.TestCase):
                       patch.object(release, "minor_findings", side_effect=lambda *a: (events.append("minor") or ([{}] if minor else []))),
                       patch.object(release, "advance_published_baseline", side_effect=lambda *a: events.append("advance")) as advance,
                       patch.object(release, "restore_publication_baseline", side_effect=lambda *a: events.append("restore")) as restore,
-                      patch.object(release, "close_published_reviews", side_effect=RuntimeError("cleanup failed") if cleanup_failure else None),
-                      patch.object(release, "close_recovered_repair")):
+                      patch.object(release, "close_published_reviews", side_effect=RuntimeError("cleanup failed") if cleanup_failure == "review" else None),
+                      patch.object(release, "close_recovered_repair", side_effect=RuntimeError("cleanup failed") if cleanup_failure == "repair" else None)):
                     if not ready or minor:
                         with self.assertRaises(ValueError):
                             release.publish(Path("/unused"))
@@ -1113,7 +1114,8 @@ class PublishedRecoveryCheckpointTests(unittest.TestCase):
                     elif cleanup_failure:
                         with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
                             release.publish(Path("/unused"))
-                        self.assertEqual(events, ["review", "minor", "advance", "restore"])
+                        self.assertEqual(events, ["review", "minor", "advance"])
+                        restore.assert_not_called()
                     else:
                         release.publish(Path("/unused"))
                         self.assertEqual(events, ["review", "minor", "advance"])

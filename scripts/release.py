@@ -4686,18 +4686,16 @@ def publish(directory):
         minor = bool(minor_findings(repo, int(os.environ["CANDIDATE_PR"]), review_sha))
         if minor:
             raise ValueError("Published candidate now has unresolved review findings")
-        try:
-            if shared:
-                advance_published_baseline(repo, identity["release_id"])
-            close_published_reviews(repo, review_sha, upstream,
-                                    f"review/{review_sha}" if shared else f"review/{upstream}-{patchset}",
-                                    shared=shared)
-            close_recovered_repair(repo, config, has_minor=minor,
-                                   expected_head=os.environ.get("REPAIR_HEAD"))
-        except Exception:
-            if shared:
-                restore_publication_baseline(repo, identity["release_id"])
-            raise
+        # The verified release remains public during recovery. Its checkpoint
+        # must remain advanced even if closing a review or repair fails; the
+        # next callback can retry that cleanup against the same publication.
+        if shared:
+            advance_published_baseline(repo, identity["release_id"])
+        close_published_reviews(repo, review_sha, upstream,
+                                f"review/{review_sha}" if shared else f"review/{upstream}-{patchset}",
+                                shared=shared)
+        close_recovered_repair(repo, config, has_minor=minor,
+                               expected_head=os.environ.get("REPAIR_HEAD"))
         return
     if api(f"repos/{repo}/commits/downstream")["sha"] != config:
         raise ValueError("Configuration changed during the build; do not publish a stale candidate")
