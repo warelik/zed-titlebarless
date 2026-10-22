@@ -32,6 +32,42 @@ def request(head=SEED, attempt=1, age=0):
 
 
 class RepairBoundaryTests(unittest.TestCase):
+    def test_application_repair_can_register_only_its_derived_regressions(self):
+        path = "patches/0009-fix.patch"
+        manifest_path = "patches/source.json"
+        before = {"schema": 1, "baseline_tag": "v1.24.2",
+                  "test_cases": [["workspace", "test_historical"]],
+                  "regression_cases": [["workspace", "test_preserved"]]}
+        valid = {**before, "regression_cases": [["workspace", "test_new"], ["workspace", "test_preserved"]]}
+        patch_text = ("diff --git a/crates/workspace/src/tests.rs b/crates/workspace/src/tests.rs\n"
+                      "+++ b/crates/workspace/src/tests.rs\n+#[gpui::test]\n+async fn test_new() {}\n")
+        mutations = [valid, {**valid, "test_cases": []}, {**valid, "baseline_tag": "v0.0.0"},
+                     before, {**valid, "regression_cases": valid["regression_cases"] + [["workspace", "test_unrelated"]]}]
+        for index, after in enumerate(mutations):
+            with self.subTest(case=index):
+                def run(*args, **kwargs):
+                    if args[:2] == ("git", "rev-parse"):
+                        return CONFIG
+                    if args[:2] == ("git", "diff"):
+                        return path + "\n" + manifest_path
+                    if args[:2] == ("git", "ls-tree"):
+                        return "100644 blob " + HEAD + "\t" + args[-1]
+                    if args[:2] == ("git", "show"):
+                        if args[2] == f"{CONFIG}:{manifest_path}":
+                            return json.dumps(before)
+                        if args[2] == f"{HEAD}:{manifest_path}":
+                            return json.dumps(after)
+                        if args[2] == f"{HEAD}:{path}":
+                            return patch_text
+                        self.fail("Unexpected source read")
+                    return ""
+                with patch.object(release, "run", side_effect=run):
+                    if index == 0:
+                        self.assertEqual(release.repair_changes(STATE), ([path, manifest_path], False))
+                    else:
+                        with self.assertRaises(ValueError):
+                            release.repair_changes(STATE)
+
     def test_shared_patch_registration_precedes_review_for_direct_and_repair_candidates(self):
         for repaired in (False, True):
             for registered in (False, True):

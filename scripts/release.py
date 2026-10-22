@@ -2866,6 +2866,28 @@ def repair_pull(repo, config, *, shared=False):
                 "created_at": pull["created_at"], "branch": pull["head"]["ref"]}
     return None
 
+def validate_repair_registrations(state, patches):
+    before_text = run("git", "show", f"{state['config']}:patches/source.json", cwd=ROOT)
+    after_text = run("git", "show", f"{state['head']}:patches/source.json", cwd=ROOT)
+    if any(not 0 < len(text.encode("utf-8")) < 1024 * 1024 for text in (before_text, after_text)):
+        raise ValueError("Repair regression manifest is missing or oversized")
+    before = strict_json(before_text, "Trusted regression manifest")
+    after = strict_json(after_text, "Repair regression manifest")
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        raise ValueError("Repair regression manifest must be an object")
+    manifest_cases(before)
+    manifest_cases(after)
+    derived = set()
+    for path in patches:
+        derived.update(added_cases(run("git", "show", f"{state['head']}:{path}", cwd=ROOT)))
+    expected = dict(before)
+    baseline = {tuple(case) for case in before["test_cases"]}
+    prior = {tuple(case) for case in before.get("regression_cases", [])}
+    expected["regression_cases"] = [list(case) for case in sorted((prior | derived) - baseline)]
+    if after != expected:
+        raise ValueError("Repair may only add its patch-derived regressions to the trusted manifest")
+
+
 def repair_changes(state):
     if not SHA.fullmatch(state["head"]):
         raise ValueError("Repair head is not an exact commit")
@@ -2879,14 +2901,21 @@ def repair_changes(state):
     policy = [p for p in changed if p in {"scripts/release.py", "scripts/maintenance.py",
               "scripts/maintenance.lock.json", ".github/workflows/release.yml"}
               or re.fullmatch(r"scripts/test_[A-Za-z0-9_]+\.py", p)]
-    if set(changed) != set(patches + policy) or (patches and policy):
+    manifest = [path for path in changed if path == "patches/source.json"]
+    if (set(changed) != set(patches + policy + manifest)
+            or (patches and policy) or (manifest and (not patches or policy))):
         raise ValueError("Repair must change either application patches or release policy, without mixing them")
+    existing_patches = []
     for path in changed:
         entry = run("git", "ls-tree", state["head"], "--", path, cwd=ROOT)
         if entry and not entry.startswith("100644 blob "):
             raise ValueError(f"Repair introduced a nonregular file: {path}")
-        if not entry and path in policy:
+        if not entry and (path in policy or path in manifest):
             raise ValueError("Repair must not remove release policy or its tests")
+        if entry and path in patches:
+            existing_patches.append(path)
+    if manifest:
+        validate_repair_registrations(state, existing_patches)
     return changed, bool(policy)
 
 def pending_review(requested_at):
@@ -3512,9 +3541,13 @@ def repair_text(state, attempt, failure, prepared=None):
         "submission procedure, not this downstream's repair gate. Do not add "
         "that banner or alter README/AGENTS: this task uses independent exact-SHA "
         "Codex review instead and does not submit a PR to upstream.\n\n"
-        "For an application defect, change only `patches/*.patch`: append a "
+        "For an application defect, change `patches/*.patch`: append a "
         "separate logical patch for a new bug and include a Rust regression named "
-        "`test_*` in the affected crate. For an upstream conflict, minimally "
+        "`test_*` in the affected crate. Accompany patch changes with a canonical "
+        "`patches/source.json` update that only adds their derived cases to "
+        "`regression_cases`; preserve historical `test_cases` and every other field. "
+        "Do not change that manifest alone or mix it with policy changes. "
+        "For an upstream conflict, minimally "
         "refresh existing patches while preserving new upstream behavior and "
         "our contracts. Remove a redundant fix only after proving its regression "
         "passes without it, retaining useful coverage. Never skip a patch or "
@@ -3527,7 +3560,7 @@ def repair_text(state, attempt, failure, prepared=None):
         "reviewer identity, trusted baseline regressions, credential isolation, "
         "immutable publication, artifact checksums and debug-symbol UUID checks. "
         "Do not weaken checks, change prompt/review criteria or task markers, "
-        "edit the historical source manifest or AGENTS files, invent credentials, "
+        "edit historical source-manifest fields or AGENTS files, invent credentials, "
         "force-push, merge, deploy, close a live editor or disrupt active work.\n\n"
         "After pushing the complete repair, add exactly one immutable Codex issue comment "
         "to this repair PR using the existing `fork-review-disposition:v1` marker with payload "
@@ -4646,8 +4679,6 @@ def publish(directory):
     check_delta_for_publication(repo, config, allow_closed=not release["draft"])
     if not release["draft"]:
         verify_published_release(repo, release, sha, upstream, patchset, version)
-        if shared:
-            advance_published_baseline(repo, identity["release_id"])
         ready, reason = check_review(repo, int(os.environ["CANDIDATE_PR"]), review_sha, upstream,
                                      allow_closed=True, published_at=published_at)
         if not ready:
@@ -4655,11 +4686,18 @@ def publish(directory):
         minor = bool(minor_findings(repo, int(os.environ["CANDIDATE_PR"]), review_sha))
         if minor:
             raise ValueError("Published candidate now has unresolved review findings")
-        close_published_reviews(repo, review_sha, upstream,
-                                f"review/{review_sha}" if shared else f"review/{upstream}-{patchset}",
-                                shared=shared)
-        close_recovered_repair(repo, config, has_minor=minor,
-                               expected_head=os.environ.get("REPAIR_HEAD"))
+        try:
+            if shared:
+                advance_published_baseline(repo, identity["release_id"])
+            close_published_reviews(repo, review_sha, upstream,
+                                    f"review/{review_sha}" if shared else f"review/{upstream}-{patchset}",
+                                    shared=shared)
+            close_recovered_repair(repo, config, has_minor=minor,
+                                   expected_head=os.environ.get("REPAIR_HEAD"))
+        except Exception:
+            if shared:
+                restore_publication_baseline(repo, identity["release_id"])
+            raise
         return
     if api(f"repos/{repo}/commits/downstream")["sha"] != config:
         raise ValueError("Configuration changed during the build; do not publish a stale candidate")

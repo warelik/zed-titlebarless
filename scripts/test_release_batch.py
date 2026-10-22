@@ -83,6 +83,7 @@ class BatchedReviewTests(unittest.TestCase):
                 "active_snapshot": None,
                 "select_upstream": ("v1.24.2", upstream),
                 "patch_identity": ([Path("fixture.patch")], "d" * 64),
+                "missing_patch_regressions": set(),
                 "ensure_forward_release": None, "push_review_refs": None,
                 "check_review": full, "delta_review": (2, "e" * 40, config, *delta),
                 "minor_findings": list(findings), "review_records": list(findings),
@@ -1069,6 +1070,53 @@ class CrossApplicationFinalHistoryTests(unittest.TestCase):
         application = workflow.split("\n  test:\n", 1)[1].split("\n  publish:\n", 1)[0]
         self.assertIn("needs.activate-policy.result == 'success'", application)
         self.assertIn("needs.activate-policy.outputs.final_failed == 'true'", workflow)
+
+
+class PublishedRecoveryCheckpointTests(unittest.TestCase):
+    def test_rejected_recovery_does_not_advance_and_late_failure_restores_its_checkpoint(self):
+        repo, app, config, upstream, patchset = "owner/zed", "a" * 40, "b" * 40, "c" * 40, "d" * 64
+        identity = {"repository": repo, "candidate_sha": app, "config_sha": config,
+                    "upstream_sha": upstream, "patchset_sha256": patchset,
+                    "version": "1.24.2", "release_id": 9}
+        candidate = {"schema": 1, "repository": repo, "application_sha": app,
+                     "configuration_sha": config, "upstream_sha": upstream,
+                     "patchset_sha256": patchset, "recipe_sha256": "e" * 64,
+                     "platform": "macos/aarch64"}
+        environment = {"MAINTENANCE_CANDIDATE": json.dumps(candidate),
+                       "MAINTENANCE_BASELINE": json.dumps({"variable": {"value": json.dumps({
+                           "publication": {"published_at": "2026-10-19T10:00:00Z"}})}}),
+                       "FULL_REVIEW_SHA": "f" * 40, "RELEASE_TAG": "verified-tag",
+                       "CANDIDATE_PR": "7", "ARTIFACT_RECEIPT_PATH": "/unused/receipt",
+                       "ARTIFACT_VALIDATED_RUN_ID": "21", "ARTIFACT_VALIDATED_RUN_ATTEMPT": "1",
+                       "ARTIFACT_VALIDATED_WORKFLOW_SHA": config}
+        for ready, minor, cleanup_failure in ((False, False, False), (True, True, False),
+                                               (True, False, False), (True, False, True)):
+            with self.subTest(ready=ready, minor=minor, cleanup_failure=cleanup_failure):
+                events = []
+                with (patch.dict(os.environ, environment, clear=True),
+                      patch.object(release, "build_identity", return_value=identity),
+                      patch.object(release, "verify_artifact_receipt"),
+                      patch.object(release, "api", return_value={"draft": False}),
+                      patch.object(release, "check_delta_for_publication"),
+                      patch.object(release, "verify_published_release"),
+                      patch.object(release, "check_review", side_effect=lambda *a, **k: (events.append("review") or (ready, "review rejected"))),
+                      patch.object(release, "minor_findings", side_effect=lambda *a: (events.append("minor") or ([{}] if minor else []))),
+                      patch.object(release, "advance_published_baseline", side_effect=lambda *a: events.append("advance")) as advance,
+                      patch.object(release, "restore_publication_baseline", side_effect=lambda *a: events.append("restore")) as restore,
+                      patch.object(release, "close_published_reviews", side_effect=RuntimeError("cleanup failed") if cleanup_failure else None),
+                      patch.object(release, "close_recovered_repair")):
+                    if not ready or minor:
+                        with self.assertRaises(ValueError):
+                            release.publish(Path("/unused"))
+                        advance.assert_not_called()
+                        restore.assert_not_called()
+                    elif cleanup_failure:
+                        with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
+                            release.publish(Path("/unused"))
+                        self.assertEqual(events, ["review", "minor", "advance", "restore"])
+                    else:
+                        release.publish(Path("/unused"))
+                        self.assertEqual(events, ["review", "minor", "advance"])
 
 
 if __name__ == "__main__":
