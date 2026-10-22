@@ -18028,6 +18028,31 @@ fn set_threads_sidebar_in_agent_panel(in_agent_panel: bool, cx: &mut VisualTestC
 }
 
 #[gpui::test]
+async fn test_agent_panel_sidebar_keeps_empty_workspace_transient(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+    let project = project::Project::test(fs, [], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
+    let workspace = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+
+    for in_agent_panel in [true, false, true] {
+        set_threads_sidebar_in_agent_panel(in_agent_panel, cx);
+        cx.run_until_parked();
+        sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+        cx.run_until_parked();
+        multi_workspace.read_with(cx, |mw, _cx| {
+            assert_eq!(mw.workspace(), &workspace);
+            assert_eq!(mw.workspaces().count(), 1);
+            assert!(mw.project_group_keys().is_empty());
+            assert!(!mw.active_workspace_is_retained());
+        });
+    }
+}
+
+#[gpui::test]
 async fn test_m2_in_agent_panel_does_not_clobber_sidebar_open_state(cx: &mut TestAppContext) {
     let project = init_test_project_with_agent_panel("/my-project", cx).await;
     let (multi_workspace, cx) =
