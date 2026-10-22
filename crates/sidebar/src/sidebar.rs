@@ -2143,7 +2143,15 @@ impl Sidebar {
 
         if Self::in_agent_panel(cx) {
             multi_workspace.update(cx, |multi_workspace, cx| {
-                multi_workspace.retain_active_workspace(cx);
+                if !multi_workspace
+                    .workspace()
+                    .read(cx)
+                    .project_group_key(cx)
+                    .path_list()
+                    .is_empty()
+                {
+                    multi_workspace.retain_active_workspace(cx);
+                }
             });
         }
 
