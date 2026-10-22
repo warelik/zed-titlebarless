@@ -801,6 +801,14 @@
     ],
     [
       "workspace",
+      "test_agent_panel_layout_changes_keep_empty_workspace_transient"
+    ],
+    [
+      "workspace",
+      "test_agent_panel_layout_changes_retain_nonempty_workspace"
+    ],
+    [
+      "workspace",
       "test_cancel_project_close_preserves_transient_retention"
     ],
     [

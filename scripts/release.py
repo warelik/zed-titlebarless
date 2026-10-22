@@ -3777,6 +3777,14 @@ def prepare(app, *, shared=False):
         raise ValueError("Expected a full upstream commit")
     mode = "policy" if state and state.get("policy") else "application"
     review_config = state["head"] if state else config
+    if shared and (not state or not state.get("policy")):
+        missing = missing_patch_regressions(review_config, patches)
+        if missing:
+            details = ", ".join(f"{crate}::{test}" for crate, test in sorted(missing))
+            output(ready=False, followup=True,
+                   reason="The candidate patch series omits regression identities from patches/source.json")
+            raise ValueError("Candidate regression manifest must include these patch-derived cases "
+                             "before review or adoption: " + details)
     policy_changed = policy_snapshot(ROOT) != policy_snapshot(CONTROL_ROOT)
     policy_verified = review_config == os.environ.get("ZED_TRUSTED_POLICY_SHA")
     output(ready=False, mode=mode, upstream=upstream, patchset=patchset,
@@ -4019,14 +4027,6 @@ def prepare(app, *, shared=False):
             output(ready=False, followup=True,
                    reason="Both review scopes completed; the complete carried finding batch remains")
             raise ValueError("Consolidated shared review batch:\n" + details)
-        if state and not state.get("policy"):
-            missing = missing_patch_regressions(review_config, patches)
-            if missing:
-                details = ", ".join(f"{crate}::{test}" for crate, test in sorted(missing))
-                output(ready=False, followup=True,
-                       reason="The reviewed patch series omits regression identities from patches/source.json")
-                raise ValueError("Complete review pair is ready, but the candidate regression manifest "
-                                 "must include these patch-derived cases before adoption: " + details)
         bundle_verified = False
         if bootstrap_candidate:
             # A bootstrap bundle is a prerequisite to the final reservation: the

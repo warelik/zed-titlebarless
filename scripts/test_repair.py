@@ -32,6 +32,44 @@ def request(head=SEED, attempt=1, age=0):
 
 
 class RepairBoundaryTests(unittest.TestCase):
+    def test_shared_patch_registration_precedes_source_preparation_for_direct_and_repair_candidates(self):
+        for repaired in (False, True):
+            for registered in (False, True):
+                with self.subTest(repaired=repaired, registered=registered), \
+                        tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    patch_path = root / "new.patch"
+                    patch_path.write_text(
+                        "diff --git a/crates/workspace/src/tests.rs b/crates/workspace/src/tests.rs\n"
+                        "+++ b/crates/workspace/src/tests.rs\n"
+                        "+#[gpui::test]\n+async fn test_new_workspace_case() {}\n")
+                    state = {**STATE, "waiting": False, "policy": False,
+                             "patches": root} if repaired else None
+                    manifest = {"schema": 1, "test_cases": [["workspace", "test_existing_workspace_case"]],
+                                "regression_cases": [["workspace", "test_new_workspace_case"]]
+                                if registered else []}
+                    with (patch.dict(os.environ, ENV, clear=True),
+                          patch.object(release, "api", return_value={"sha": CONFIG}),
+                          patch.object(release, "mirror_main"),
+                          patch.object(release, "proposal", return_value=state),
+                          patch.object(release, "patch_identity", return_value=([patch_path], "e" * 64)),
+                          patch.object(release, "active_snapshot", return_value=UPSTREAM),
+                          patch.object(release, "output"),
+                          patch.object(release, "policy_snapshot", side_effect=RuntimeError("registration accepted")) as next_stage,
+                          patch.object(release, "run", return_value=json.dumps(manifest)) as run,
+                          patch.object(release, "reserve_release") as reserve):
+                        if registered:
+                            with self.assertRaisesRegex(RuntimeError, "registration accepted"):
+                                release.prepare(root / "app", shared=True)
+                            next_stage.assert_called_once()
+                        else:
+                            with self.assertRaisesRegex(ValueError, "workspace::test_new_workspace_case"):
+                                release.prepare(root / "app", shared=True)
+                            next_stage.assert_not_called()
+                        expected_source = HEAD if repaired else CONFIG
+                        run.assert_called_once_with("git", "show", f"{expected_source}:patches/source.json", cwd=release.ROOT)
+                        reserve.assert_not_called()
+
     def test_deferred_proposal_preserves_recovery_and_bounded_repair_paths(self):
         # An unresolved repair must not fall back to building the original tree.
         # Expiration remains observable even if the native task never responds.
