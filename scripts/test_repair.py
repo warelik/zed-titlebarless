@@ -167,7 +167,7 @@ class RepairBoundaryTests(unittest.TestCase):
               patch.object(release, "cleanup_closed_pull_refs") as cleanup):
             release.close_recovered_repair(REPO, CONFIG, state=STATE)
         self.assertEqual(api.call_args.kwargs, {"method": "PATCH", "data": {"state": "closed"}})
-        cleanup.assert_called_once_with(REPO, 2, HEAD)
+        cleanup.assert_called_once_with(REPO, 2, HEAD, shared=False)
 
     def test_late_lookup_closes_the_captured_unchanged_blocking_repair(self):
         with (patch.object(release, "repair_pull", return_value=STATE),
@@ -176,7 +176,7 @@ class RepairBoundaryTests(unittest.TestCase):
               patch.object(release, "cleanup_closed_pull_refs") as cleanup):
             release.close_recovered_repair(REPO, CONFIG, expected_head=HEAD)
         self.assertEqual(api.call_args.kwargs, {"method": "PATCH", "data": {"state": "closed"}})
-        cleanup.assert_called_once_with(REPO, 2, HEAD)
+        cleanup.assert_called_once_with(REPO, 2, HEAD, shared=False)
 
     def test_late_lookup_does_not_close_a_repair_advanced_after_preparation(self):
         with (patch.object(release, "repair_pull", return_value={**STATE, "head": SEED}),
@@ -563,7 +563,7 @@ class NativeTaskTests(unittest.TestCase):
         self.assertIn("Failed job: Regression", evidence)
         self.assertIn("Actual assertion failed", evidence)
         self.assertIn("open-sse/utils/example.js:3", evidence)
-        self.assertIn(f"Exact review: https://github.com/{REPO}/pull/1 at {HEAD}", evidence)
+        self.assertIn(f"Complete project review: https://github.com/{REPO}/pull/1 at {HEAD}", evidence)
         self.assertIn("[P1] Formal exact-SHA finding", evidence)
         self.assertIn("[P2] Restore custom call type", evidence)
         self.assertIn("[P2] Native issue finding", evidence)
@@ -1352,7 +1352,8 @@ class AdoptionTests(unittest.TestCase):
 
         with (tempfile.TemporaryDirectory() as directory,
               patch.dict(os.environ, {"GH_TOKEN": "fake", "GITHUB_TOKEN": "fake",
-                  "CODEX_REQUEST_TOKEN": "fake", "NINEROUTER_KEY": "fake", "GITHUB_ENV": "/not-allowed"}),
+                  "CODEX_REQUEST_TOKEN": "fake", "NINEROUTER_KEY": "fake", "GITHUB_ENV": "/not-allowed",
+                  "FORK_MAINTENANCE_ROOT": ""}),
               patch.object(release.subprocess, "run", side_effect=execute),
               patch.object(release, "urlopen") as fetch,
               self.assertRaisesRegex(ValueError, "actionlint archive integrity")):
@@ -1375,6 +1376,7 @@ class AdoptionTests(unittest.TestCase):
                 raise subprocess.TimeoutExpired(args, 180)
             return SimpleNamespace(returncode=0)
         with (tempfile.TemporaryDirectory() as directory,
+              patch.dict(os.environ, {"FORK_MAINTENANCE_ROOT": ""}),
               patch.object(release.subprocess, "run", side_effect=execute),
               patch.object(release, "urlopen", side_effect=AssertionError("Failed policy cannot reach lint")),
               self.assertRaises(subprocess.TimeoutExpired)):
@@ -1390,6 +1392,7 @@ class AdoptionTests(unittest.TestCase):
                 raise subprocess.TimeoutExpired(args, 180)
             return SimpleNamespace(returncode=1, args=args, stdout="", stderr="daemon unavailable")
         with (tempfile.TemporaryDirectory() as directory,
+              patch.dict(os.environ, {"FORK_MAINTENANCE_ROOT": ""}),
               patch.object(release.subprocess, "run", side_effect=execute),
               patch.object(release, "urlopen", side_effect=AssertionError("Cleanup failure blocks lint")),
               self.assertRaises(subprocess.CalledProcessError)):

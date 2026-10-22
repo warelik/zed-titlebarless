@@ -291,7 +291,6 @@ jobs:
       FORK_FINAL_RUN_ID: ${{ needs.prepare.outputs.final_run_id }}
       FORK_FINAL_ATTEMPT: ${{ needs.prepare.outputs.final_attempt }}
       FORK_FINAL_WORKFLOW_SHA: ${{ needs.prepare.outputs.final_workflow_sha }}
-      ARTIFACT_RECEIPT_PATH: ${{ runner.temp }}/zed-artifact-receipt.json
     steps:
       - name: Require The Original Frozen Application Run Attempt
         run: |
@@ -299,6 +298,7 @@ jobs:
           test "$FORK_FINAL_RUN_ID" = "$GITHUB_RUN_ID"
           test "$FORK_FINAL_ATTEMPT" = "$GITHUB_RUN_ATTEMPT"
           test "$FORK_FINAL_WORKFLOW_SHA" = "$GITHUB_SHA"
+          echo "ARTIFACT_RECEIPT_PATH=$RUNNER_TEMP/zed-artifact-receipt.json" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.sha }}

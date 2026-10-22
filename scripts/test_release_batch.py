@@ -51,14 +51,22 @@ class BatchedReviewTests(unittest.TestCase):
                 if "/pulls?" in path:
                     return [{"number": 1, "state": "open", "head": {"sha": candidate}}]
                 review_config = adopted_config or config
-                return [{"body": (f"<!-- zed-codex:{candidate} -->\n"
+                stamp = datetime.now(timezone.utc).isoformat()
+                return [{"id": 7, "body": (f"<!-- zed-codex:{candidate} -->\n"
                                    f"<!-- zed-full:{candidate}:{review_config} -->"),
-                         "user": {"login": "maintainer"},
-                         "created_at": datetime.now(timezone.utc).isoformat()}]
+                         "user": {"login": "maintainer", "type": "User"},
+                         "created_at": stamp, "updated_at": stamp}]
+
+            def native_api(path, **kwargs):
+                if path == "user":
+                    return {"login": "maintainer", "type": "User"}
+                if path.endswith("/git/matching-refs/heads/review/"):
+                    return []
+                return {"sha": config if path.endswith("/downstream") else upstream}
 
             environment = {
                 "GITHUB_REPOSITORY": "maintainer/zed-fork", "GITHUB_SHA": config,
-                "GITHUB_RUN_ID": "123",
+                "GITHUB_RUN_ID": "123", "CODEX_REQUEST_TOKEN": "fixture-owner-token",
             }
             if verified_policy:
                 environment["ZED_TRUSTED_POLICY_SHA"] = adopted_config or config
@@ -119,9 +127,8 @@ class BatchedReviewTests(unittest.TestCase):
                     release, "authorize_shared_final", return_value=final_decision))
                 stack.enter_context(patch.object(release, "owner_token", return_value="owner-token"))
                 stack.enter_context(patch.object(release.maintenance, "load", return_value=private))
-                if adopted_config:
-                    stack.enter_context(patch.object(release, "adopted_review_configuration",
-                                                     return_value=adopted_config))
+                stack.enter_context(patch.object(release, "adopted_review_configuration",
+                                                 return_value=adopted_config))
                 stack.enter_context(patch.object(
                     release, "delta_review",
                     return_value=(2, "e" * 40, adopted_config or config, *delta)))
@@ -131,8 +138,7 @@ class BatchedReviewTests(unittest.TestCase):
             stack.enter_context(patch.object(release, "run", side_effect=run))
             stack.enter_context(patch.object(release, "pages", side_effect=pages))
             stack.enter_context(patch.object(release, "output", side_effect=lambda **v: outputs.update(v)))
-            stack.enter_context(patch.object(release, "api", side_effect=lambda path, **kw:
-                                {"sha": config if path.endswith("/downstream") else upstream}))
+            stack.enter_context(patch.object(release, "api", side_effect=native_api))
             recipe = stack.enter_context(patch.object(
                 release, "verify_upstream_recipes",
                 side_effect=ValueError("upstream recipe drift") if recipe_failure else None))
@@ -666,7 +672,7 @@ class BatchedReviewTests(unittest.TestCase):
         from unittest.mock import Mock
 
         workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
-        repair = workflow.split("\n  repair:\n", 1)[1]
+        repair = workflow.split("\n  repair:\n", 1)[1].split("\n  verify-bootstrap-bundle:\n", 1)[0]
         self.assertNotIn("bootstrap-policy", repair)
         self.assertIn("needs.verify-bootstrap-bundle.result == 'failure'", repair)
         actual_repair = repair.split("      - name: Repair The Actual Failure Without Publishing Or Disrupting Editors\n", 1)[1]

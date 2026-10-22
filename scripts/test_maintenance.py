@@ -291,11 +291,14 @@ class SharedZedReviewTests(unittest.TestCase):
     def test_verified_closed_delta_is_reused_without_reopening_or_another_request(self):
         repo, head, base = "owner/zed", "a" * 40, "b" * 40
         candidate = {"configuration_sha": head}
-        proof = {"variable": {"value": json.dumps({"candidate": {"configuration_sha": base}})}}
+        proof = {"variable": {"value": json.dumps({"candidate": {"configuration_sha": base},
+                    "publication": {"published_at": "2026-10-19T00:00:00Z"}})}}
         pull = {"number": 91, "state": "closed",
                 "head": {"sha": head, "ref": f"review/changes-{head}", "repo": {"full_name": repo}},
                 "base": {"sha": base, "ref": f"review-base/{base}", "repo": {"full_name": repo}}}
-        comments = [{"user": {"login": "owner"},
+        comments = [{"id": 92, "user": {"login": "owner", "type": "User"},
+                     "created_at": "2026-10-19T01:00:00Z",
+                     "updated_at": "2026-10-19T01:00:00Z",
                      "body": f"<!-- zed-codex:{head} -->\nexact-shared-marker"}]
         def pages(route):
             return [pull] if "/pulls?" in route else comments
@@ -521,7 +524,8 @@ class SharedZedReviewTests(unittest.TestCase):
             "findings": [{"finding_id": "nested", "status": "fixed",
                           "evidence": "code change and regression"}],
         }, separators=(",", ":")) + " -->"
-        nested_candidate = "<!-- fork-candidate:v1 " + json.dumps(candidate, separators=(",", ":")) + " -->"
+        nested_candidate = "<!-- fork-candidate:v1 " + json.dumps({**candidate, "configuration_sha": "9" * 40},
+            separators=(",", ":")) + " -->"
         nested_reservation = "<!-- fork-final:v1 " + json.dumps({
             "schema": 1, "candidate_id": candidate_id, "run_id": 701,
             "run_attempt": 1, "workflow_sha": "a" * 40,
@@ -643,7 +647,9 @@ class SharedZedReviewTests(unittest.TestCase):
                      "application_sha": application, "configuration_sha": configuration,
                      "patchset_sha256": "e" * 64, "recipe_sha256": "f" * 64,
                      "platform": "macos/aarch64"}
-        candidate_id, finding_id = "c" * 64, "inline:7:11"
+        candidate_id = hashlib.sha256(json.dumps(
+            candidate, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        finding_id = "inline:7:11"
         finding = {"finding_id": finding_id, "candidate_id": candidate_id,
                    "body": (f"Old text <!-- zed-final:{application} --> and "
                             "<!-- fork-review-history:v1 {"),
@@ -813,6 +819,7 @@ class SharedZedReviewTests(unittest.TestCase):
                      "patchset_sha256": "d" * 64, "recipe_sha256": "e" * 64,
                      "platform": "macos/aarch64"}
         accepted = {"variable": {"value": json.dumps({
+            "repository": "owner/zed",
             "publication": {"published_at": "2026-10-19T10:00:00Z"}})}}
         pull = {"number": 7, "state": "closed", "updated_at": "2026-10-19T11:00:00Z",
                 "head": {"sha": source, "repo": {"full_name": "owner/zed"}}}
@@ -1577,6 +1584,26 @@ class FrozenPublicExecutionTests(unittest.TestCase):
                         product.index("Run Every Preserved Rust Regression"))
         self.assertIn("record-artifact-receipt", product)
 
+    def test_macos_artifact_receipt_path_is_exported_before_production(self):
+        workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
+        product = workflow.split("\n  test:\n", 1)[1].split("\n  publish:\n", 1)[0]
+        job_environment = product.split("    env:\n", 1)[1].split("    steps:\n", 1)[0]
+        self.assertNotIn("ARTIFACT_RECEIPT_PATH", job_environment)
+
+        frozen_attempt = product.split(
+            "      - name: Require The Original Frozen Application Run Attempt\n", 1)[1]
+        frozen_attempt = frozen_attempt.split("      - uses: actions/checkout@v4", 1)[0]
+        assignment = 'echo "ARTIFACT_RECEIPT_PATH=$RUNNER_TEMP/zed-artifact-receipt.json" >> "$GITHUB_ENV"'
+        self.assertIn(assignment, frozen_attempt)
+        producer = product.index("      - name: Record The Exact Native Artifact Attempt\n")
+        self.assertLess(product.index(assignment), producer)
+
+        self.assertIn("path: ${{ runner.temp }}/zed-artifact-receipt.json", product)
+        publish = workflow.split("\n  publish:\n", 1)[1]
+        self.assertIn(
+            "ARTIFACT_RECEIPT_PATH: ${{ runner.temp }}/zed-artifact-receipt/zed-artifact-receipt.json",
+            publish)
+
     def test_bootstrap_failure_skips_private_acquisition_before_escalation(self):
         workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
         repair = workflow.split("\n  repair:\n", 1)[1].split("\n  verify-bootstrap-bundle:\n", 1)[0]
@@ -1650,7 +1677,8 @@ class FrozenPublicExecutionTests(unittest.TestCase):
         self.assertEqual(dispositions[0]["finding_id"], finding["finding_id"])
         self.assertEqual(dispositions[0]["proposal_comment"], proposal_comment)
 
-        owner_id = "4" * 64
+        owner_id = hashlib.sha256(json.dumps(
+            candidate, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         private = Mock()
         private.candidate_identity.return_value = owner_id
         created = {"id": 34, "created_at": "2026-10-20T12:01:00Z",
