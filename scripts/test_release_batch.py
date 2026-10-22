@@ -66,7 +66,8 @@ class BatchedReviewTests(unittest.TestCase):
 
             environment = {
                 "GITHUB_REPOSITORY": "maintainer/zed-fork", "GITHUB_SHA": config,
-                "GITHUB_RUN_ID": "123", "CODEX_REQUEST_TOKEN": "fixture-owner-token",
+                "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
+                "CODEX_REQUEST_TOKEN": "fixture-owner-token",
             }
             if verified_policy:
                 environment["ZED_TRUSTED_POLICY_SHA"] = adopted_config or config
