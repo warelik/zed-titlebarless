@@ -32,7 +32,7 @@ def request(head=SEED, attempt=1, age=0):
 
 
 class RepairBoundaryTests(unittest.TestCase):
-    def test_shared_patch_registration_precedes_source_preparation_for_direct_and_repair_candidates(self):
+    def test_shared_patch_registration_precedes_review_for_direct_and_repair_candidates(self):
         for repaired in (False, True):
             for registered in (False, True):
                 with self.subTest(repaired=repaired, registered=registered), \
@@ -55,8 +55,11 @@ class RepairBoundaryTests(unittest.TestCase):
                           patch.object(release, "patch_identity", return_value=([patch_path], "e" * 64)),
                           patch.object(release, "active_snapshot", return_value=UPSTREAM),
                           patch.object(release, "output"),
-                          patch.object(release, "policy_snapshot", side_effect=RuntimeError("registration accepted")) as next_stage,
-                          patch.object(release, "run", return_value=json.dumps(manifest)) as run,
+                          patch.object(release, "policy_snapshot", return_value={}),
+                          patch.object(release, "validate_paths", side_effect=RuntimeError("registration accepted")) as next_stage,
+                          patch.object(release, "run", side_effect=lambda *args, **kwargs:
+                                       json.dumps(manifest) if args[:2] == ("git", "show")
+                                       else HEAD if args == ("git", "rev-parse", "HEAD") else "") as run,
                           patch.object(release, "reserve_release") as reserve):
                         if registered:
                             with self.assertRaisesRegex(RuntimeError, "registration accepted"):
@@ -67,7 +70,10 @@ class RepairBoundaryTests(unittest.TestCase):
                                 release.prepare(root / "app", shared=True)
                             next_stage.assert_not_called()
                         expected_source = HEAD if repaired else CONFIG
-                        run.assert_called_once_with("git", "show", f"{expected_source}:patches/source.json", cwd=release.ROOT)
+                        manifest_reads = [call for call in run.call_args_list
+                                          if call.args == ("git", "show", f"{expected_source}:patches/source.json")]
+                        self.assertEqual(len(manifest_reads), 1)
+                        self.assertEqual(manifest_reads[0].kwargs, {"cwd": release.ROOT})
                         reserve.assert_not_called()
 
     def test_deferred_proposal_preserves_recovery_and_bounded_repair_paths(self):

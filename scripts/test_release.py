@@ -19,6 +19,30 @@ BOT = {"login": release.BOT, "type": "Bot"}
 APP = {"slug": release.APP}
 
 
+class PolicySnapshotIdentityTests(unittest.TestCase):
+    def test_regression_manifest_changes_are_not_an_unchanged_published_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            roots = [Path(directory) / name for name in ("trusted", "candidate")]
+            for root in roots:
+                (root / "scripts").mkdir(parents=True)
+                (root / "patches").mkdir()
+                (root / "scripts/release.py").write_text("# identical policy bytes\n")
+                (root / "patches/source.json").write_text(json.dumps({
+                    "test_cases": [["workspace", "test_existing_case"]],
+                    "regression_cases": [],
+                }))
+            trusted = release.policy_snapshot(roots[0])
+            self.assertEqual(trusted, release.policy_snapshot(roots[1]))
+            (roots[1] / "patches/source.json").write_text(json.dumps({
+                "test_cases": [["workspace", "test_existing_case"]],
+                "regression_cases": [["workspace", "test_required_case"]],
+            }))
+            changed = release.policy_snapshot(roots[1])
+            self.assertNotEqual(trusted, changed)
+            self.assertEqual(trusted["scripts/release.py"], changed["scripts/release.py"])
+            self.assertNotEqual(trusted["patches/source.json"], changed["patches/source.json"])
+
+
 def receipt(sha=HEAD):
     return {
         "user": BOT, "performed_via_github_app": APP, "created_at": COMPLETED,

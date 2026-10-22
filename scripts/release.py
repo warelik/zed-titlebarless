@@ -248,6 +248,9 @@ def policy_snapshot(directory):
     workflow = directory / ".github/workflows/release.yml"
     if workflow.is_file():
         paths.append(workflow)
+    manifest = directory / "patches/source.json"
+    if manifest.is_file():
+        paths.append(manifest)
     return {str(path.relative_to(directory)): file_digest(path) for path in paths}
 
 def release_tag(version, upstream, patchset, candidate):
@@ -3777,14 +3780,6 @@ def prepare(app, *, shared=False):
         raise ValueError("Expected a full upstream commit")
     mode = "policy" if state and state.get("policy") else "application"
     review_config = state["head"] if state else config
-    if shared and (not state or not state.get("policy")):
-        missing = missing_patch_regressions(review_config, patches)
-        if missing:
-            details = ", ".join(f"{crate}::{test}" for crate, test in sorted(missing))
-            output(ready=False, followup=True,
-                   reason="The candidate patch series omits regression identities from patches/source.json")
-            raise ValueError("Candidate regression manifest must include these patch-derived cases "
-                             "before review or adoption: " + details)
     policy_changed = policy_snapshot(ROOT) != policy_snapshot(CONTROL_ROOT)
     policy_verified = review_config == os.environ.get("ZED_TRUSTED_POLICY_SHA")
     output(ready=False, mode=mode, upstream=upstream, patchset=patchset,
@@ -3805,6 +3800,14 @@ def prepare(app, *, shared=False):
     sha = run("git", "rev-parse", "HEAD", cwd=app)
     if unfinished and sha != unfinished["candidate"]["application_sha"]:
         raise ValueError("Unfinished review application did not reproduce from the current patch series")
+    if shared and (not state or not state.get("policy")):
+        missing = missing_patch_regressions(review_config, patches)
+        if missing:
+            details = ", ".join(f"{crate}::{test}" for crate, test in sorted(missing))
+            output(ready=False, followup=True,
+                   reason="The candidate patch series omits regression identities from patches/source.json")
+            raise ValueError("Candidate regression manifest must include these patch-derived cases "
+                             "before review or adoption: " + details)
     validate_paths(run("git", "diff", "--name-only", upstream, sha, cwd=app).splitlines())
     original = tomllib.loads(run("git", "show", f"{upstream}:crates/zed/Cargo.toml", cwd=app))
     patched = tomllib.loads((app / "crates/zed/Cargo.toml").read_text())
