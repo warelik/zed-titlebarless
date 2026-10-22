@@ -412,7 +412,14 @@ impl MultiWorkspace {
 
                 let in_agent_panel = threads_sidebar_in_agent_panel(cx);
                 if in_agent_panel != previous_in_agent_panel && multi_workspace_enabled {
-                    if in_agent_panel {
+                    if in_agent_panel
+                        && !this
+                            .workspace()
+                            .read(cx)
+                            .project_group_key(cx)
+                            .path_list()
+                            .is_empty()
+                    {
                         this.retain_active_workspace(cx);
                     }
                     let sidebar_focus_handle = this
