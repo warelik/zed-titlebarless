@@ -886,7 +886,22 @@ impl Project {
 
                     project.create_terminal_shell_internal(cwd, false, command, pty_startup, cx)
                 })?
-                .await?;
+                .await;
+            let terminal = match terminal {
+                Ok(terminal) => terminal,
+                Err(error) => {
+                    if !pinned && !restoring_existing {
+                        project.update(cx, |project, _| {
+                            if context.as_ref().is_some_and(|context| {
+                                project.persistent_terminal_context(&session_name) == Some(context)
+                            }) {
+                                project.forget_persistent_terminal_context(&session_name);
+                            }
+                        })?;
+                    }
+                    return Err(error);
+                }
+            };
             Ok(PersistentTerminal { terminal, session })
         })
     }
@@ -2345,6 +2360,70 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
             probe.sessions,
             vec!["zed-active-1".to_string(), "zed-active-2".to_string()]
         );
+    }
+
+    #[gpui::test]
+    async fn test_failed_fresh_terminal_does_not_keep_provisional_shpool_context(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = settings::SettingsStore::test(cx);
+            cx.set_global(store);
+            TerminalSettings::register(cx);
+            let mut settings = TerminalSettings::get(None, cx).clone();
+            settings.shell = Shell::Program("invalid\0shell".into());
+            TerminalSettings::override_global(settings, cx);
+        });
+        let project = Project::test(fs::FakeFs::new(cx.executor()), [], cx).await;
+        let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
+        for name in ["failed-fresh-one", "failed-fresh-two"] {
+            let result = project.update(cx, |project, cx| {
+                project.create_persistent_terminal_shell(None, name.into(), None, cx)
+            }).await;
+            assert!(result.is_err());
+            assert!(result.err().expect("invalid shell must fail").to_string()
+                .contains("invalid terminal shell argument"));
+            project.read_with(cx, |project, _| {
+                assert!(project.persistent_terminal_context(name).is_none());
+                assert!(project.terminals.session_contexts.is_empty());
+            });
+        }
+        assert!(fake.attach_history().is_empty());
+        assert!(fake.kill_history().is_empty());
+    }
+
+    #[gpui::test]
+    async fn test_failed_saved_terminal_keeps_original_shpool_context(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = settings::SettingsStore::test(cx);
+            cx.set_global(store);
+            TerminalSettings::register(cx);
+            let mut settings = TerminalSettings::get(None, cx).clone();
+            settings.shell = Shell::Program("invalid\0shell".into());
+            TerminalSettings::override_global(settings, cx);
+        });
+        let project = Project::test(fs::FakeFs::new(cx.executor()), [], cx).await;
+        let name = "failed-saved-terminal";
+        let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[name]));
+        let context = project.update(cx, |project, _| {
+            project.ensure_test_persistent_terminal_context(name.into())
+        }).expect("saved fake session must have a valid original context");
+        let result = project.update(cx, |project, cx| {
+            project.create_persistent_terminal_shell_in_context(
+                None, name.into(), None, Some(context.clone()), true, cx,
+            )
+        }).await;
+        assert!(result.is_err());
+        assert!(result.err().expect("invalid shell must fail").to_string()
+            .contains("invalid terminal shell argument"));
+        project.read_with(cx, |project, _| {
+            assert_eq!(project.persistent_terminal_context(name), Some(&context));
+        });
+        assert!(fake.has_session(name));
+        assert!(fake.attach_history().is_empty());
+        assert!(fake.kill_history().is_empty());
     }
 
     #[gpui::test]
