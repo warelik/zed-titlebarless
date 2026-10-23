@@ -10279,14 +10279,26 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window(cx: &m
     cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
 
     let project_a = project::Project::test(fs.clone(), ["/project-a".as_ref()], cx).await;
-    let project_b = project::Project::test(fs.clone(), ["/project-b".as_ref()], cx).await;
 
     let multi_workspace_a =
         cx.add_window(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
-    let multi_workspace_b =
-        cx.add_window(|window, cx| MultiWorkspace::test_new(project_b, window, cx));
-
     let multi_workspace_a_entity = multi_workspace_a.root(cx).unwrap();
+    let app_state = multi_workspace_a_entity.read_with(cx, |mw, cx| {
+        mw.workspace().read(cx).app_state().clone()
+    });
+    let project_b = cx.update(|cx| project::Project::local(
+        app_state.client.clone(), app_state.node_runtime.clone(), app_state.user_store.clone(),
+        app_state.languages.clone(), fs.clone(), None, project::LocalProjectFlags::default(), cx,
+    ));
+    let (worktree, _) = project_b.update(cx, |project, cx| {
+        project.find_or_create_worktree("/project-b", true, cx)
+    }).await.unwrap();
+    worktree.read_with(cx, |tree, _| tree.as_local().unwrap().scan_complete()).await;
+    let multi_workspace_b = cx.add_window(|window, cx| {
+        let workspace = cx.new(|cx| Workspace::new(None, project_b, app_state, window, cx));
+        MultiWorkspace::new(workspace, window, cx)
+    });
+
     let multi_workspace_b_entity = multi_workspace_b.root(cx).unwrap();
 
     let cx_b = &mut gpui::VisualTestContext::from_window(multi_workspace_b.into(), cx);
@@ -10359,14 +10371,26 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window_with_t
     cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
 
     let project_a = project::Project::test(fs.clone(), ["/project-a".as_ref()], cx).await;
-    let project_b = project::Project::test(fs.clone(), ["/project-b".as_ref()], cx).await;
 
     let multi_workspace_a =
         cx.add_window(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
-    let multi_workspace_b =
-        cx.add_window(|window, cx| MultiWorkspace::test_new(project_b.clone(), window, cx));
-
     let multi_workspace_a_entity = multi_workspace_a.root(cx).unwrap();
+    let app_state = multi_workspace_a_entity.read_with(cx, |mw, cx| {
+        mw.workspace().read(cx).app_state().clone()
+    });
+    let project_b = cx.update(|cx| project::Project::local(
+        app_state.client.clone(), app_state.node_runtime.clone(), app_state.user_store.clone(),
+        app_state.languages.clone(), fs.clone(), None, project::LocalProjectFlags::default(), cx,
+    ));
+    let (worktree, _) = project_b.update(cx, |project, cx| {
+        project.find_or_create_worktree("/project-b", true, cx)
+    }).await.unwrap();
+    worktree.read_with(cx, |tree, _| tree.as_local().unwrap().scan_complete()).await;
+    let multi_workspace_b = cx.add_window(|window, cx| {
+        let workspace = cx.new(|cx| Workspace::new(None, project_b, app_state, window, cx));
+        MultiWorkspace::new(workspace, window, cx)
+    });
+
     let multi_workspace_b_entity = multi_workspace_b.root(cx).unwrap();
 
     let cx_a = &mut gpui::VisualTestContext::from_window(multi_workspace_a.into(), cx);
@@ -18120,6 +18144,116 @@ fn set_threads_sidebar_in_agent_panel(in_agent_panel: bool, cx: &mut VisualTestC
                 )
                 .unwrap();
         });
+    });
+}
+
+#[gpui::test]
+async fn test_agent_panel_retains_rootless_remote_workspace(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+    server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+    let params = cx.update(workspace::AppState::test);
+    cx.update(|cx| cx.update_global::<settings::SettingsStore, _>(|store, cx| {
+        store.set_user_settings(
+            r#"{"agent":{"threads_sidebar":{"in_agent_panel":true}}}"#, cx,
+        ).unwrap();
+    }));
+    let (options, server, guard) = remote::RemoteClient::fake_server(cx, server_cx);
+    let ping = server_cx.new(|_| ());
+    server.add_request_handler::<client::proto::Ping, _, _, _>(
+        ping.downgrade(), |_, _, _| async { Ok(client::proto::Ack {}) },
+    );
+    drop(guard);
+    let client = remote::RemoteClient::connect_mock(options, cx).await;
+    let project = cx.update(|cx| project::Project::remote(
+        client, params.client.clone(), params.node_runtime.clone(), params.user_store.clone(),
+        params.languages.clone(), params.fs.clone(), false, cx,
+    ));
+    let (multi_workspace, cx) = cx.add_window_view({
+        let params = params.clone();
+        move |window, cx| {
+            let workspace = cx.new(|cx| workspace::Workspace::new(None, project, params, window, cx));
+            MultiWorkspace::new(workspace, window, cx)
+        }
+    });
+    let remote_workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    assert!(remote_workspace.read_with(cx, |workspace, cx| workspace.root_paths(cx).is_empty()));
+    assert!(multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&remote_workspace)));
+    multi_workspace.read_with(cx, |mw, cx| mw.assert_project_group_key_integrity(cx).unwrap());
+    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
+    for enabled in [false, true, false, true] {
+        set_threads_sidebar_in_agent_panel(enabled, cx);
+        cx.run_until_parked();
+        sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+        cx.run_until_parked();
+        if enabled {
+            assert!(multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&remote_workspace)));
+            multi_workspace.read_with(cx, |mw, cx| mw.assert_project_group_key_integrity(cx).unwrap());
+        }
+        assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.has_open_projects));
+    }
+    let local = cx.update(|_, cx| project::Project::local(
+        params.client.clone(), params.node_runtime.clone(), params.user_store.clone(),
+        params.languages.clone(), params.fs.clone(), None, project::LocalProjectFlags::default(), cx,
+    ));
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        let workspace = cx.new(|cx| workspace::Workspace::new(None, local, params, window, cx));
+        mw.activate(workspace, None, window, cx)
+    });
+    assert!(multi_workspace.read_with(cx, |mw, _| {
+        mw.is_workspace_retained(&remote_workspace)
+            && mw.workspaces().any(|workspace| workspace == &remote_workspace)
+    }));
+    multi_workspace.read_with(cx, |mw, cx| mw.assert_project_group_key_integrity(cx).unwrap());
+    let remote_key = remote_workspace.read_with(cx, |workspace, cx| workspace.project_group_key(cx));
+    assert!(!remote_key.is_empty(), "rootless remote workspaces keep their host identity");
+    multi_workspace.read_with(cx, |mw, cx| {
+        assert!(mw.project_group_keys().contains(&remote_key),
+            "the retained remote workspace still requires its project-group metadata");
+        assert!(mw.workspace().read(cx).project_group_key(cx).is_empty(),
+            "the local fixture has no project group");
+    });
+    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+    cx.run_until_parked();
+    assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.entries.iter().any(|entry| {
+        matches!(entry, ListEntry::ProjectHeader { key, .. } if key == &remote_key)
+    })));
+    assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.has_open_projects));
+}
+
+#[gpui::test]
+async fn test_rootless_remote_history_is_visible_without_open_project(cx: &mut TestAppContext) {
+    init_test(cx);
+    let project = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
+    let remote_key = |host: &str| ProjectGroupKey::new(
+        Some(remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+            host: host.into(), ..Default::default()
+        })),
+        PathList::default(),
+    );
+    let first = remote_key("first-host");
+    let second = remote_key("second-host");
+    multi_workspace.update(cx, |mw, cx| mw.restore_project_groups(vec![
+        workspace::SerializedProjectGroupState { key: first.clone(), expanded: true },
+        workspace::SerializedProjectGroupState { key: second.clone(), expanded: true },
+    ], cx));
+    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+    cx.run_until_parked();
+    sidebar.read_with(cx, |sidebar, _| {
+        assert!(sidebar.contents.has_open_projects);
+        let headers = sidebar.contents.entries.iter().filter_map(|entry| match entry {
+            ListEntry::ProjectHeader { key, label, .. } => Some((key, label.to_string())),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert!(headers.iter().any(|(key, label)| *key == &first && label == "first-host"));
+        assert!(headers.iter().any(|(key, label)| *key == &second && label == "second-host"));
+        assert_ne!(first.display_name(&Default::default()), second.display_name(&Default::default()));
     });
 }
 
