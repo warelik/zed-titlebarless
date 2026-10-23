@@ -65,6 +65,7 @@ pub struct SessionWorkspace {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SerializedProjectGroup {
     pub path_list: SerializedPathList,
+    #[serde(serialize_with = "serialize_project_group_location")]
     pub(crate) location: SerializedWorkspaceLocation,
     #[serde(default = "default_expanded")]
     pub expanded: bool,
@@ -74,12 +75,43 @@ fn default_expanded() -> bool {
     true
 }
 
+fn project_group_host_for_persistence(host: RemoteConnectionOptions) -> RemoteConnectionOptions {
+    match host {
+        RemoteConnectionOptions::Ssh(options) => {
+            RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+                host: options.host,
+                username: options.username,
+                port: options.port,
+                nickname: options.nickname,
+                ..Default::default()
+            })
+        }
+        RemoteConnectionOptions::Docker(mut options) => {
+            options.remote_env.clear();
+            RemoteConnectionOptions::Docker(options)
+        }
+        other => other,
+    }
+}
+
+fn serialize_project_group_location<S: serde::Serializer>(
+    location: &SerializedWorkspaceLocation,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    match location {
+        SerializedWorkspaceLocation::Remote(host) => SerializedWorkspaceLocation::Remote(
+            project_group_host_for_persistence(host.clone()),
+        ).serialize(serializer),
+        SerializedWorkspaceLocation::Local => location.serialize(serializer),
+    }
+}
+
 impl SerializedProjectGroup {
     pub fn from_group(key: &ProjectGroupKey, expanded: bool) -> Self {
         Self {
             path_list: key.path_list().serialize(),
             location: match key.host() {
-                Some(host) => SerializedWorkspaceLocation::Remote(host),
+                Some(host) => SerializedWorkspaceLocation::Remote(project_group_host_for_persistence(host)),
                 None => SerializedWorkspaceLocation::Local,
             },
             expanded,
@@ -90,7 +122,7 @@ impl SerializedProjectGroup {
         let path_list = PathList::deserialize(&self.path_list);
         let host = match self.location {
             SerializedWorkspaceLocation::Local => None,
-            SerializedWorkspaceLocation::Remote(opts) => Some(opts),
+            SerializedWorkspaceLocation::Remote(opts) => Some(project_group_host_for_persistence(opts)),
         };
         SerializedProjectGroupState {
             key: ProjectGroupKey::new(host, path_list),
