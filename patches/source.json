@@ -405,6 +405,10 @@
     ],
     [
       "agent_ui",
+      "test_panel_load_preserves_terminal_from_another_remote_connection"
+    ],
+    [
+      "agent_ui",
       "test_remote_windows_working_directory_uses_project_path_style"
     ],
     [
@@ -418,6 +422,10 @@
     [
       "agent_ui",
       "test_terminal_exit_before_insertion_uses_the_normal_lifecycle"
+    ],
+    [
+      "agent_ui",
+      "test_terminal_id_lookup_requires_matching_ssh_routing_arguments"
     ],
     [
       "agent_ui",
