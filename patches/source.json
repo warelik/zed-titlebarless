@@ -877,6 +877,10 @@
     ],
     [
       "workspace",
+      "test_restore_preserves_rootless_remote_project_groups"
+    ],
+    [
+      "workspace",
       "test_title_bar_to_status_bar_keeps_title_when_status_bar_hidden"
     ],
     [
