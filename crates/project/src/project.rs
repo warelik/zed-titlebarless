@@ -1473,10 +1473,7 @@ impl Project {
 
                 buffers_needing_diff: Default::default(),
                 git_diff_debouncer: DebouncedDelay::new(),
-                terminals: Terminals {
-                    local_handles: Vec::new(),
-                    session_contexts: HashMap::default(),
-                },
+                terminals: Terminals::default(),
                 #[cfg(any(test, feature = "test-support"))]
                 fake_shpool: None,
                 node: Some(node),
@@ -1720,10 +1717,7 @@ impl Project {
                 remote_client: Some(remote.clone()),
                 buffers_needing_diff: Default::default(),
                 git_diff_debouncer: DebouncedDelay::new(),
-                terminals: Terminals {
-                    local_handles: Vec::new(),
-                    session_contexts: HashMap::default(),
-                },
+                terminals: Terminals::default(),
                 #[cfg(any(test, feature = "test-support"))]
                 fake_shpool: None,
                 node: Some(node),
@@ -2018,10 +2012,7 @@ impl Project {
                 agent_server_store,
                 buffers_needing_diff: Default::default(),
                 git_diff_debouncer: DebouncedDelay::new(),
-                terminals: Terminals {
-                    local_handles: Vec::new(),
-                    session_contexts: HashMap::default(),
-                },
+                terminals: Terminals::default(),
                 #[cfg(any(test, feature = "test-support"))]
                 fake_shpool: None,
                 node: None,
@@ -6939,6 +6930,10 @@ impl ProjectGroupKey {
 
     pub fn path_list(&self) -> &PathList {
         &self.paths
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty() && self.host.is_none()
     }
 
     pub fn display_name(

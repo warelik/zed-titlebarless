@@ -18028,6 +18028,63 @@ fn set_threads_sidebar_in_agent_panel(in_agent_panel: bool, cx: &mut VisualTestC
 }
 
 #[gpui::test]
+async fn test_agent_panel_retains_rootless_remote_workspace(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let params = cx.update(workspace::AppState::test);
+    cx.update(|cx| cx.update_global::<settings::SettingsStore, _>(|store, cx| {
+        store.set_user_settings(
+            r#"{"agent":{"threads_sidebar":{"in_agent_panel":true}}}"#, cx,
+        ).unwrap();
+    }));
+    let (options, server, guard) = remote::RemoteClient::fake_server(cx, server_cx);
+    let ping = server_cx.new(|_| ());
+    server.add_request_handler::<client::proto::Ping, _, _, _>(
+        ping.downgrade(), |_, _, _| async { Ok(client::proto::Ack {}) },
+    );
+    drop(guard);
+    let client = remote::RemoteClient::connect_mock(options, cx).await;
+    let project = cx.update(|cx| project::Project::remote(
+        client, params.client.clone(), params.node_runtime.clone(), params.user_store.clone(),
+        params.languages.clone(), params.fs.clone(), false, cx,
+    ));
+    let (multi_workspace, cx) = cx.add_window_view({
+        let params = params.clone();
+        move |window, cx| {
+            let workspace = cx.new(|cx| workspace::Workspace::new(None, project, params, window, cx));
+            MultiWorkspace::new(workspace, window, cx)
+        }
+    });
+    let remote_workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    assert!(remote_workspace.read_with(cx, |workspace, cx| workspace.root_paths(cx).is_empty()));
+    assert!(multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&remote_workspace)));
+    multi_workspace.read_with(cx, |mw, cx| mw.assert_project_group_key_integrity(cx).unwrap());
+    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
+    for enabled in [false, true, false, true] {
+        set_threads_sidebar_in_agent_panel(enabled, cx);
+        cx.run_until_parked();
+        sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+        cx.run_until_parked();
+        if enabled {
+            assert!(multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&remote_workspace)));
+            multi_workspace.read_with(cx, |mw, cx| mw.assert_project_group_key_integrity(cx).unwrap());
+        }
+    }
+    let local = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        let workspace = cx.new(|cx| workspace::Workspace::new(None, local, params, window, cx));
+        mw.activate(workspace, None, window, cx)
+    }).unwrap();
+    assert!(multi_workspace.read_with(cx, |mw, _| {
+        mw.is_workspace_retained(&remote_workspace)
+            && mw.workspaces().any(|workspace| workspace == &remote_workspace)
+    }));
+    multi_workspace.read_with(cx, |mw, cx| mw.assert_project_group_key_integrity(cx).unwrap());
+}
+
+#[gpui::test]
 async fn test_agent_panel_sidebar_keeps_empty_workspace_transient(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
