@@ -232,6 +232,16 @@ impl TerminalThreadMetadataStore {
         self.terminals.get(&terminal_id)
     }
 
+    pub(crate) fn entry_for_remote_connection(
+        &self,
+        terminal_id: TerminalId,
+        remote_connection: Option<&RemoteConnectionOptions>,
+    ) -> Option<&TerminalThreadMetadata> {
+        self.entry(terminal_id).filter(|metadata| {
+            same_terminal_remote_connection(metadata.remote_connection.as_ref(), remote_connection)
+        })
+    }
+
     pub fn entries(&self) -> impl Iterator<Item = &TerminalThreadMetadata> + '_ {
         self.terminals.values()
     }
@@ -1899,6 +1909,64 @@ mod tests {
                 ),
                 "archive cleanup must not treat another SSH destination as a path reference"
             );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_terminal_id_lookup_requires_matching_ssh_routing_arguments(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let connection = |configuration: &str| {
+            RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+                host: "same-host".into(),
+                username: Some("developer".into()),
+                port: Some(22),
+                args: Some(vec!["-F".into(), configuration.into()]),
+                ..Default::default()
+            })
+        };
+        let saved_connection = connection("work.conf");
+        let current_connection = connection("personal.conf");
+        assert!(same_remote_connection_identity(
+            Some(&saved_connection),
+            Some(&current_connection),
+        ));
+
+        let mut saved = metadata("Saved remote terminal", WorktreePaths::default());
+        saved.remote_connection = Some(saved_connection.clone());
+        let saved_id = saved.terminal_id;
+        let local = metadata("Local terminal", WorktreePaths::default());
+        let local_id = local.terminal_id;
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(saved, cx);
+                store.save(local, cx);
+            });
+        });
+        cx.update(|cx| {
+            let store = TerminalThreadMetadataStore::global(cx);
+            let store = store.read(cx);
+            let original = store.entry(saved_id).cloned();
+            assert!(original.is_some());
+            assert_eq!(
+                store.entry_for_remote_connection(saved_id, Some(&saved_connection)),
+                original.as_ref(),
+            );
+            assert!(
+                store
+                    .entry_for_remote_connection(saved_id, Some(&current_connection))
+                    .is_none(),
+                "the same SSH alias with different -F arguments must not restore a saved terminal"
+            );
+            assert!(store.entry_for_remote_connection(saved_id, None).is_none());
+            assert!(store.entry_for_remote_connection(local_id, None).is_some());
+            assert!(
+                store
+                    .entry_for_remote_connection(local_id, Some(&saved_connection))
+                    .is_none()
+            );
+            assert_eq!(store.entry(saved_id), original.as_ref());
         });
     }
 
