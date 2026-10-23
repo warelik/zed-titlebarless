@@ -701,6 +701,10 @@
     ],
     [
       "sidebar",
+      "test_rootless_remote_history_is_visible_without_open_project"
+    ],
+    [
+      "sidebar",
       "test_saved_terminal_checks_every_root_and_allows_retry"
     ],
     [
