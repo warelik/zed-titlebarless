@@ -10579,7 +10579,7 @@ pub async fn apply_restored_multiworkspace_state(
                 }
             }
             let resolved = ProjectGroupKey::new(key.host(), PathList::new(&resolved_paths));
-            if !resolved_groups.iter().any(|g| g.key == resolved) {
+            if !resolved_groups.iter().any(|g| g.key.matches(&resolved)) {
                 resolved_groups.push(SerializedProjectGroupState {
                     key: resolved,
                     expanded,
@@ -12736,6 +12736,88 @@ mod tests {
                        vec![&first, &second]);
             assert!(!groups[0].expanded);
             assert!(groups[1].expanded);
+        }).unwrap();
+    }
+
+    #[test]
+    fn test_project_group_serialization_excludes_connection_secrets() {
+        let ssh = remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+            host: "host".into(), username: Some("user".into()), port: Some(2222),
+            password: Some("fixture_ssh_credential".into()),
+            args: Some(vec!["fixture_proxy_credential".into()]),
+            nickname: Some("label".into()), ..Default::default()
+        });
+        let docker = remote::RemoteConnectionOptions::Docker(remote::DockerConnectionOptions {
+            name: "container".into(), container_id: "container-id".into(), remote_user: "user".into(),
+            use_podman: true, upload_binary_over_docker_exec: true,
+            remote_env: std::collections::BTreeMap::from([
+                ("ACCESS_TOKEN".into(), "fixture_docker_credential".into()),
+            ]),
+        });
+        for host in [ssh, docker] {
+            let key = ProjectGroupKey::new(Some(host.clone()), PathList::default());
+            let regular = SerializedProjectGroup::from_group(&key, false);
+            let legacy = SerializedProjectGroup {
+                path_list: PathList::default().serialize(),
+                location: SerializedWorkspaceLocation::Remote(host), expanded: false,
+            };
+            for group in [regular, legacy] {
+                let encoded = serde_json::to_string(&group).unwrap();
+                for value in ["fixture_ssh_credential", "fixture_proxy_credential", "fixture_docker_credential"] {
+                    assert!(!encoded.contains(value));
+                }
+                let restored = group.into_restored_state();
+                assert!(!restored.expanded);
+                assert!(restored.key.matches(&key));
+                match restored.key.host().unwrap() {
+                    remote::RemoteConnectionOptions::Ssh(options) => {
+                        assert!(options.password.is_none());
+                        assert!(options.args.is_none());
+                        assert_eq!(options.username.as_deref(), Some("user"));
+                        assert_eq!(options.port, Some(2222));
+                    }
+                    remote::RemoteConnectionOptions::Docker(options) => {
+                        assert!(options.remote_env.is_empty());
+                        assert!(options.use_podman);
+                        assert_eq!(options.container_id, "container-id");
+                    }
+                    _ => panic!("fixture must remain the same connection kind"),
+                }
+            }
+            assert_eq!(key.host().is_some(), true);
+        }
+    }
+
+    #[gpui::test]
+    async fn test_restored_remote_groups_keep_live_identity_options(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs.clone(), [], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let key = |nickname: &str, argument: &str, upload| ProjectGroupKey::new(
+            Some(remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+                host: "host".into(), username: Some("user".into()), port: Some(22),
+                nickname: Some(nickname.into()), args: Some(vec![argument.into()]),
+                upload_binary_over_ssh: upload, ..Default::default()
+            })),
+            PathList::default(),
+        );
+        let previous = key("old-label", "old-routing", false);
+        let current = key("current-label", "current-routing", true);
+        assert!(previous.matches(&current));
+        window.update(cx, |multi_workspace, _, cx| multi_workspace.restore_project_groups(vec![
+            SerializedProjectGroupState { key: current.clone(), expanded: true },
+        ], cx)).unwrap();
+        let state = MultiWorkspaceState {
+            project_groups: vec![SerializedProjectGroup::from_group(&previous, false)],
+            ..MultiWorkspaceState::default()
+        };
+        apply_restored_multiworkspace_state(window, &state, fs, &mut cx.to_async()).await;
+        window.read_with(cx, |multi_workspace, cx| {
+            let groups = multi_workspace.project_groups(cx);
+            assert_eq!(groups.len(), 1);
+            assert_eq!(groups[0].key, current);
+            assert!(!groups[0].expanded);
         }).unwrap();
     }
 
