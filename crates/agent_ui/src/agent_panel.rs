@@ -1379,12 +1379,15 @@ impl AgentPanel {
                 })
                 .await;
 
-            let has_open_project = workspace
+            let restoration_project = workspace
                 .read_with(cx, |workspace, cx| {
-                    !workspace.root_paths(cx).is_empty()
-                        || workspace.project().read(cx).is_remote()
+                    (!workspace.root_paths(cx).is_empty()
+                        || workspace.project().read(cx).is_remote())
+                    .then(|| workspace.project().clone())
                 })
-                .unwrap_or(false);
+                .ok()
+                .flatten();
+            let has_open_project = restoration_project.is_some();
             let terminal_id_to_restore = if has_open_project {
                 serialized_panel
                     .as_ref()
@@ -1415,10 +1418,17 @@ impl AgentPanel {
                 reload_task.await;
             }
 
-            let terminal_to_restore = if let Some(terminal_id) = terminal_id_to_restore {
+            let terminal_to_restore = if let Some((terminal_id, project)) =
+                terminal_id_to_restore.zip(restoration_project.as_ref())
+            {
                 cx.update(|_window, cx| {
-                    TerminalThreadMetadataStore::try_global(cx)
-                        .and_then(|store| store.read(cx).entry(terminal_id).cloned())
+                    let remote_connection = project.read(cx).remote_connection_options(cx);
+                    TerminalThreadMetadataStore::try_global(cx).and_then(|store| {
+                        store
+                            .read(cx)
+                            .entry_for_remote_connection(terminal_id, remote_connection.as_ref())
+                            .cloned()
+                    })
                 })
                 .ok()
                 .flatten()
@@ -8652,6 +8662,101 @@ mod tests {
                     .into_iter()
                     .any(|terminal| terminal.id == terminal_id),
                 "active terminal metadata should be restored into the loaded panel"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_panel_load_preserves_terminal_from_another_remote_connection(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            TerminalThreadMetadataStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/project", json!({ "file.txt": "" })).await;
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs, [Path::new("/project")], cx).await;
+        let terminal_id = TerminalId::new();
+        let session_name = terminal_id.session_name();
+        let fake = project.update(cx, |project, _| {
+            project.enable_fake_shpool(&[session_name.as_str()])
+        });
+        let remote_connection = remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+            host: "same-host".into(),
+            args: Some(vec!["-F".into(), "work.conf".into()]),
+            ..Default::default()
+        });
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(
+                    TerminalThreadMetadata {
+                        terminal_id,
+                        title: "Saved remote terminal".into(),
+                        custom_title: None,
+                        created_at: Utc::now(),
+                        worktree_paths: WorktreePaths::default(),
+                        remote_connection: Some(remote_connection.clone()),
+                        working_directory: None,
+                        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
+                    },
+                    cx,
+                );
+            });
+        });
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .unwrap();
+        workspace.update(cx, |workspace, _| workspace.set_random_database_id());
+        let workspace_id = workspace
+            .read_with(cx, |workspace, _| workspace.database_id())
+            .unwrap();
+        let kvp = cx.update(|cx| KeyValueStore::global(cx));
+        cx.background_spawn(async move {
+            save_serialized_panel(
+                workspace_id,
+                SerializedAgentPanel {
+                    last_active_terminal_id: Some(terminal_id.to_key_string()),
+                    ..SerializedAgentPanel::default()
+                },
+                kvp,
+            )
+            .await
+            .unwrap();
+        })
+        .await;
+
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let async_cx = cx.update(|window, cx| window.to_async(cx));
+        let loaded = AgentPanel::load(workspace.downgrade(), async_cx)
+            .await
+            .expect("panel load should succeed without restoring the foreign terminal");
+        for _ in 0..8 {
+            cx.run_until_parked();
+        }
+        loaded.read_with(cx, |panel, _| {
+            assert!(!panel.has_terminal(terminal_id));
+            assert_ne!(panel.active_terminal_id(), Some(terminal_id));
+        });
+        assert!(fake.has_session(&session_name));
+        assert!(!fake.attach_history().contains(&session_name));
+        assert!(!fake.kill_history().contains(&session_name));
+        cx.update(|_, cx| {
+            let store = TerminalThreadMetadataStore::global(cx);
+            assert_eq!(
+                store
+                    .read(cx)
+                    .entry(terminal_id)
+                    .unwrap()
+                    .remote_connection
+                    .as_ref(),
+                Some(&remote_connection),
+                "rejecting restoration must preserve the saved session and its destination"
             );
         });
     }
@@ -16374,7 +16479,9 @@ mod tests {
             custom_title: None,
             created_at: Utc::now(),
             worktree_paths: WorktreePaths::default(),
-            remote_connection: None,
+            remote_connection: project.read_with(cx, |project, cx| {
+                project.remote_connection_options(cx)
+            }),
             working_directory: None,
         };
         cx.update(|cx| {
@@ -16444,7 +16551,7 @@ mod tests {
             |_, _, _| async { Ok(client::proto::Ack {}) },
         );
         drop(old_connection_guard);
-        let old_remote_client = RemoteClient::connect_mock(old_options, cx).await;
+        let old_remote_client = RemoteClient::connect_mock(old_options.clone(), cx).await;
         let old_project = cx.update(|cx| {
             Project::remote(
                 old_remote_client.clone(),
@@ -16458,33 +16565,11 @@ mod tests {
             )
         });
 
-        let (new_options, new_server_session, new_connection_guard) =
-            RemoteClient::fake_server(cx, server_cx);
-        let new_ping_handler = server_cx.new(|_| ());
-        new_server_session.add_request_handler::<client::proto::Ping, _, _, _>(
-            new_ping_handler.downgrade(),
-            |_, _, _| async { Ok(client::proto::Ack {}) },
-        );
-        drop(new_connection_guard);
-        let new_remote_client = RemoteClient::connect_mock(new_options, cx).await;
-        let new_project = cx.update(|cx| {
-            Project::remote(
-                new_remote_client,
-                params.client.clone(),
-                params.node_runtime.clone(),
-                params.user_store.clone(),
-                params.languages.clone(),
-                params.fs.clone(),
-                false,
-                cx,
-            )
-        });
 
         let terminal_id = TerminalId::new();
         let session_name = terminal_id.session_name();
         let fake = old_project.update(cx, |project, _| project.enable_fake_shpool(&[]));
         fake.add_session(session_name.clone());
-        new_project.update(cx, |project, _| project.set_fake_shpool(fake.clone()));
         let multi_workspace = cx.add_window({
             let params = params.clone();
             let project = old_project.clone();
@@ -16516,7 +16601,9 @@ mod tests {
             custom_title: None,
             created_at: Utc::now(),
             worktree_paths: WorktreePaths::default(),
-            remote_connection: None,
+            remote_connection: old_project.read_with(cx, |project, cx| {
+                project.remote_connection_options(cx)
+            }),
             working_directory: None,
         };
         cx.update(|cx| {
@@ -16552,6 +16639,31 @@ mod tests {
             remote_client.force_server_not_running(cx);
         });
         visual_cx.run_until_parked();
+
+        let (new_server_session, new_connection_guard) =
+            RemoteClient::fake_server_with_opts(&old_options, cx, server_cx);
+        let new_ping_handler = server_cx.new(|_| ());
+        new_server_session.add_request_handler::<client::proto::Ping, _, _, _>(
+            new_ping_handler.downgrade(),
+            |_, _, _| async { Ok(client::proto::Ack {}) },
+        );
+        drop(new_connection_guard);
+        let new_remote_client = RemoteClient::connect_mock(old_options, cx).await;
+        let new_project = cx.update(|cx| {
+            Project::remote(
+                new_remote_client,
+                params.client.clone(),
+                params.node_runtime.clone(),
+                params.user_store.clone(),
+                params.languages.clone(),
+                params.fs.clone(),
+                false,
+                cx,
+            )
+        });
+
+        new_project.update(cx, |project, _| project.set_fake_shpool(fake.clone()));
+        let visual_cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
 
         let replacement_workspace = multi_workspace
             .update(visual_cx, |multi_workspace, window, cx| {
