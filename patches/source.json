@@ -493,6 +493,14 @@
     ],
     [
       "project",
+      "test_failed_fresh_terminal_does_not_keep_provisional_shpool_context"
+    ],
+    [
+      "project",
+      "test_failed_saved_terminal_keeps_original_shpool_context"
+    ],
+    [
+      "project",
       "test_persistent_terminal_honors_configured_shell_arguments"
     ],
     [

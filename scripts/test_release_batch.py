@@ -9,6 +9,7 @@ import tempfile
 import subprocess
 import unittest
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 import release
 
@@ -18,7 +19,8 @@ class BatchedReviewTests(unittest.TestCase):
                           recipe_failure=False, verified_policy=False, shared=False,
                           bootstrap=False, mismatched_bootstrap=False, adopted_config=None,
                           reuse_artifact=False, bootstrap_decision="reuse",
-                          bootstrap_bundle_verified=True, bootstrap_bundle_malformed=False):
+                          bootstrap_bundle_verified=True, bootstrap_bundle_malformed=False,
+                          cleanup_failure=False, published_config=None):
         config, upstream, candidate = "a" * 40, "b" * 40, "c" * 40
         shared_candidate = {"schema": 1, "repository": "maintainer/zed-fork",
                             "upstream_sha": upstream, "application_sha": candidate,
@@ -106,7 +108,9 @@ class BatchedReviewTests(unittest.TestCase):
                              "shared_source": private._maintenance_lock_identity}
                     return proof
                 private.validated_bundle = validated_bundle
-                baseline = {"variable": {"value": json.dumps({"publication": {
+                published_candidate = {**shared_candidate,
+                                       "configuration_sha": published_config or config}
+                baseline = {"variable": {"value": json.dumps({"candidate": published_candidate, "publication": {
                     "published_at": "2026-10-19T10:00:00Z"}})}}
                 stack.enter_context(patch.object(
                     release, "maintenance_candidate",
@@ -114,8 +118,8 @@ class BatchedReviewTests(unittest.TestCase):
                         **shared_candidate, "configuration_sha": reviewed}))
                 stack.enter_context(patch.object(release, "accepted_baseline",
                                                  return_value=(baseline, {}, {})))
-                stack.enter_context(patch.object(release, "review_context_commit",
-                                                 return_value=candidate))
+                context_commit = stack.enter_context(patch.object(
+                    release, "review_context_commit", return_value=candidate))
                 stack.enter_context(patch.object(release, "maintenance_pair", return_value={
                     "state": "ready", "findings": [], "known_findings": [],
                     "review_dispositions": [], "fresh_findings": []}))
@@ -141,6 +145,9 @@ class BatchedReviewTests(unittest.TestCase):
             stack.enter_context(patch.object(release, "pages", side_effect=pages))
             stack.enter_context(patch.object(release, "output", side_effect=lambda **v: outputs.update(v)))
             stack.enter_context(patch.object(release, "api", side_effect=native_api))
+            cleanup = stack.enter_context(patch.object(
+                release, "close_published_reviews",
+                side_effect=ValueError("published cleanup failed") if cleanup_failure else None))
             recipe = stack.enter_context(patch.object(
                 release, "verify_upstream_recipes",
                 side_effect=ValueError("upstream recipe drift") if recipe_failure else None))
@@ -155,6 +162,8 @@ class BatchedReviewTests(unittest.TestCase):
                 failure = str(error)
             self.last_order = order
             self.last_recipe_checks = recipe.call_args_list
+            self.last_cleanup_calls = cleanup.call_args_list
+            self.last_context_calls = context_commit.call_args_list if shared else []
             self.last_authorize_calls = authorize.call_count if shared else 0
             self.last_authorize_kwargs = authorize.call_args.kwargs if shared and authorize.call_args else {}
             return outputs, final.call_count, reserve.call_count, failure
@@ -241,6 +250,41 @@ class BatchedReviewTests(unittest.TestCase):
         self.assertIn("Prepared source differs from the native private policy bundle candidate", failure)
         self.assertFalse(outputs.get("ready", False))
         self.assertEqual((final, reserve), (0, 0))
+
+    def test_published_shared_callback_retries_cleanup_without_validation_or_build(self):
+        outputs, final, reserve, failure = self.prepare_candidate(
+            (True, "complete"), (True, "complete"), published=True, shared=True)
+        self.assertIsNone(failure)
+        self.assertTrue(outputs["already_published"])
+        self.assertEqual((final, reserve), (0, 0))
+        self.assertEqual(len(self.last_cleanup_calls), 1)
+        call = self.last_cleanup_calls[0]
+        self.assertEqual(call.args, ("maintainer/zed-fork", "c" * 40, "b" * 40,
+                                     "review/" + "c" * 40))
+        self.assertTrue(call.kwargs["shared"])
+        self.assertEqual(call.kwargs["candidate"]["application_sha"], "c" * 40)
+
+    def test_published_shared_cleanup_failure_keeps_the_verified_release_without_rebuilding(self):
+        outputs, final, reserve, failure = self.prepare_candidate(
+            (True, "complete"), (True, "complete"), published=True, shared=True,
+            cleanup_failure=True)
+        self.assertEqual(failure, "published cleanup failed")
+        self.assertFalse(outputs.get("ready", False))
+        self.assertEqual((final, reserve), (0, 0))
+        self.assertEqual(len(self.last_cleanup_calls), 1)
+
+    def test_published_shared_cleanup_uses_the_published_candidate_after_policy_changes(self):
+        published_config = "9" * 40
+        outputs, final, reserve, failure = self.prepare_candidate(
+            (True, "complete"), (True, "complete"), published=True, shared=True,
+            published_config=published_config)
+        self.assertIsNone(failure)
+        self.assertTrue(outputs["already_published"])
+        self.assertEqual((final, reserve), (0, 0))
+        self.assertEqual(self.last_cleanup_calls[0].kwargs["candidate"]["configuration_sha"],
+                         published_config)
+        self.assertEqual(self.last_context_calls[-1].args[1]["configuration_sha"],
+                         published_config)
 
     def test_verified_bootstrap_with_new_application_uses_normal_final_authorization(self):
         outputs, final, reserve, failure = self.prepare_candidate(
@@ -1119,6 +1163,87 @@ class PublishedRecoveryCheckpointTests(unittest.TestCase):
                     else:
                         release.publish(Path("/unused"))
                         self.assertEqual(events, ["review", "minor", "advance"])
+
+
+class PublishedSharedReviewCleanupTests(unittest.TestCase):
+    def fixture(self):
+        repo, application, configuration, upstream = "owner/editor", "a" * 40, "b" * 40, "c" * 40
+        candidate = {"schema": 1, "repository": repo, "application_sha": application,
+                     "configuration_sha": configuration, "upstream_sha": upstream,
+                     "patchset_sha256": "d" * 64, "recipe_sha256": "e" * 64,
+                     "platform": "macos/aarch64"}
+        full_sha, baseline = "f" * 40, "1" * 40
+        side = lambda ref, sha: {"ref": ref, "sha": sha, "repo": {"full_name": repo}}
+        full = {"number": 11, "state": "open", "head": side("review/" + full_sha, full_sha),
+                "base": side("review-base/" + upstream, upstream)}
+        delta = {"number": 12, "state": "open",
+                 "head": side("review/changes-" + configuration, configuration),
+                 "base": side("review-base/" + baseline, baseline)}
+        identity = release.frozen_candidate_identity(candidate)
+        marker = lambda base: "<!-- fork-review:v1 " + json.dumps({
+            "schema": 1, "candidate_id": identity, "scope": "delta",
+            "review_sha": configuration, "base_sha": base},
+            sort_keys=True, separators=(",", ":")) + " -->"
+        comment = {"id": 71, "user": {"login": "owner", "type": "User"},
+                   "created_at": "2026-10-23T00:00:00Z", "updated_at": "2026-10-23T00:00:00Z",
+                   "body": marker(baseline)}
+        private = type("Private", (), {"candidate_identity": staticmethod(release.frozen_candidate_identity)})()
+        return repo, candidate, full, delta, comment, marker, private
+
+    def test_retry_closes_and_cleans_both_published_contexts_without_delta_environment(self):
+        for state in ("open", "closed"):
+            with self.subTest(state=state):
+                repo, candidate, full, delta, comment, _marker, private = self.fixture()
+                full["state"] = delta["state"] = state
+
+                def pages(route):
+                    head = parse_qs(urlsplit(route).query).get("head", [""])[0]
+                    if head == "owner:" + full["head"]["ref"]:
+                        return [full]
+                    if head == "owner:" + delta["head"]["ref"]:
+                        return [delta]
+                    if head == "owner:review/changes-" + candidate["application_sha"]:
+                        return []
+                    if route.endswith("/issues/12/comments"):
+                        return [comment]
+                    raise AssertionError(route)
+
+                with (patch.dict(os.environ, {}, clear=True),
+                      patch.object(release.maintenance, "load", return_value=private),
+                      patch.object(release, "pages", side_effect=pages),
+                      patch.object(release, "api") as api,
+                      patch.object(release, "cleanup_closed_pull_refs") as cleanup):
+                    release.close_published_reviews(
+                        repo, full["head"]["sha"], candidate["upstream_sha"], full["head"]["ref"],
+                        shared=True, candidate=candidate)
+                self.assertEqual([call.args[1] for call in cleanup.call_args_list], [11, 12])
+                self.assertTrue(all(call.kwargs["shared"] for call in cleanup.call_args_list))
+                self.assertEqual(api.call_count, 2 if state == "open" else 0)
+
+    def test_foreign_candidate_delta_is_not_closed(self):
+        repo, candidate, full, delta, comment, _marker, private = self.fixture()
+        comment["body"] = comment["body"].replace(release.frozen_candidate_identity(candidate), "0" * 64)
+
+        def pages(route):
+            head = parse_qs(urlsplit(route).query).get("head", [""])[0]
+            if head == "owner:" + full["head"]["ref"]:
+                return [full]
+            if head == "owner:" + delta["head"]["ref"]:
+                return [delta]
+            if route.endswith("/comments"):
+                return [comment]
+            return []
+
+        with (patch.dict(os.environ, {}, clear=True),
+              patch.object(release.maintenance, "load", return_value=private),
+              patch.object(release, "pages", side_effect=pages),
+              patch.object(release, "api") as api,
+              patch.object(release, "cleanup_closed_pull_refs") as cleanup):
+            release.close_published_reviews(
+                repo, full["head"]["sha"], candidate["upstream_sha"], full["head"]["ref"],
+                shared=True, candidate=candidate)
+        self.assertEqual([call.args[1] for call in cleanup.call_args_list], [11])
+        self.assertEqual(api.call_args.args[0], f"repos/{repo}/pulls/11")
 
 
 if __name__ == "__main__":

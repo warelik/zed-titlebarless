@@ -2809,7 +2809,33 @@ def cleanup_closed_pull_refs(repo, number, head_sha, *, upstream=None, shared=Fa
             or not isinstance(result["data"].get("updateRefs"), dict)):
         raise ValueError("GitHub rejected atomic temporary-ref cleanup")
 
-def close_published_reviews(repo, sha, upstream, head, *, shared=False):
+def close_published_reviews(repo, sha, upstream, head, *, shared=False, candidate=None):
+    recovered_delta = []
+    if shared and candidate is not None and not os.environ.get("DELTA_PR"):
+        owner = repo.split("/", 1)[0]
+        for source in sorted({candidate["configuration_sha"], candidate["application_sha"]}):
+            query = urlencode({"state": "all", "head": f"{owner}:review/changes-{source}"})
+            for pull in pages(f"repos/{repo}/pulls?{query}"):
+                delta_head, delta_base = pull.get("head") or {}, pull.get("base") or {}
+                baseline = delta_base.get("sha", "")
+                if (delta_head.get("sha") != source
+                        or delta_head.get("ref") != f"review/changes-{source}"
+                        or not SHA.fullmatch(baseline)
+                        or delta_base.get("ref") != f"review-base/{baseline}"
+                        or any((side.get("repo") or {}).get("full_name") != repo
+                               for side in (delta_head, delta_base))):
+                    continue
+                marker = maintenance_marker(candidate, "delta", source, baseline)
+                comments = pages(f"repos/{repo}/issues/{pull['number']}/comments")
+                if any(comment.get("user", {}).get("login") == owner
+                       and comment.get("user", {}).get("type") == "User"
+                       and type(comment.get("id")) is int and comment["id"] > 0
+                       and comment.get("created_at") == comment.get("updated_at")
+                       and marker in _metadata_scan_body(comment, owner)
+                       for comment in comments):
+                    recovered_delta.append((pull, source, baseline))
+        if len(recovered_delta) > 1:
+            raise ValueError("Published candidate has ambiguous native delta cleanup contexts")
     base = f"review-base/{upstream}"
     query = urlencode({"state": "all", "head": f"{repo.split('/')[0]}:{head}", "base": base})
     for pull in pages(f"repos/{repo}/pulls?{query}"):
@@ -2828,6 +2854,10 @@ def close_published_reviews(repo, sha, upstream, head, *, shared=False):
         if pull["state"] == "open":
             api(f"repos/{repo}/pulls/{number}", method="PATCH", data={"state": "closed"})
         cleanup_closed_pull_refs(repo, number, commit, upstream=baseline, shared=shared)
+    for pull, commit, baseline in recovered_delta:
+        if pull["state"] == "open":
+            api(f"repos/{repo}/pulls/{pull['number']}", method="PATCH", data={"state": "closed"})
+        cleanup_closed_pull_refs(repo, pull["number"], commit, upstream=baseline, shared=True)
 
 def retire_superseded_reviews(repo, keep, *, shared=False):
     """Pull refs retain exact commits and findings before temporary heads retire."""
@@ -3889,6 +3919,14 @@ def prepare(app, *, shared=False):
     if existing:
         verify_published_release(repo, existing, sha, upstream, patchset, version)
     if existing and not state and not policy_changed and shared and not bootstrap_candidate:
+        published_candidate = accepted_value["candidate"]
+        if any(published_candidate.get(key) != shared_candidate[key] for key in (
+                "repository", "application_sha", "upstream_sha", "patchset_sha256", "platform")):
+            raise ValueError("Published cleanup candidate differs from the verified application")
+        published_review_sha = review_context_commit(app, published_candidate)
+        close_published_reviews(repo, published_review_sha, upstream,
+                                f"review/{published_review_sha}", shared=True,
+                                candidate=published_candidate)
         output(ready=False, reason=f"Already published: {release}", already_published=True)
         return
     if existing and not state and not policy_changed and not bootstrap_candidate:
