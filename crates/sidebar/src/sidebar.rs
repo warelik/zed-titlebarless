@@ -1664,7 +1664,7 @@ impl Sidebar {
                     .has_notification
                     .then_some(terminal.metadata.terminal_id)
             }));
-            if group_key.path_list().paths().is_empty() {
+            if group_key.is_empty() {
                 continue;
             }
 

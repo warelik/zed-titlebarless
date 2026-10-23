@@ -10555,7 +10555,7 @@ pub async fn apply_restored_multiworkspace_state(
         let mut resolved_groups: Vec<SerializedProjectGroupState> = Vec::new();
         for serialized in project_groups.iter().cloned() {
             let SerializedProjectGroupState { key, expanded } = serialized.into_restored_state();
-            if key.path_list().paths().is_empty() {
+            if key.is_empty() {
                 continue;
             }
             let mut resolved_paths = Vec::new();
@@ -12700,6 +12700,39 @@ mod tests {
     use settings::SettingsStore;
     use util::path;
     use util::rel_path::rel_path;
+
+    #[gpui::test]
+    async fn test_restore_preserves_rootless_remote_project_groups(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs.clone(), [], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let remote_key = |host: &str| ProjectGroupKey::new(
+            Some(remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+                host: host.into(), ..Default::default()
+            })),
+            PathList::default(),
+        );
+        let first = remote_key("first-host");
+        let second = remote_key("second-host");
+        let state = MultiWorkspaceState {
+            project_groups: vec![
+                SerializedProjectGroup::from_group(&first, false),
+                SerializedProjectGroup::from_group(&ProjectGroupKey::default(), true),
+                SerializedProjectGroup::from_group(&second, true),
+                SerializedProjectGroup::from_group(&first, true),
+            ],
+            ..MultiWorkspaceState::default()
+        };
+        apply_restored_multiworkspace_state(window, &state, fs, &mut cx.to_async()).await;
+        window.read_with(cx, |multi_workspace, cx| {
+            let groups = multi_workspace.project_groups(cx);
+            assert_eq!(groups.iter().map(|group| &group.key).collect::<Vec<_>>(),
+                       vec![&first, &second]);
+            assert!(!groups[0].expanded);
+            assert!(groups[1].expanded);
+        }).unwrap();
+    }
 
     #[test]
     fn test_render_window_title_format_omits_empty_segments() {

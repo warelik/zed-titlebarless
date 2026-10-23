@@ -18082,6 +18082,12 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
             && mw.workspaces().any(|workspace| workspace == &remote_workspace)
     }));
     multi_workspace.read_with(cx, |mw, cx| mw.assert_project_group_key_integrity(cx).unwrap());
+    let remote_key = remote_workspace.read_with(cx, |workspace, cx| workspace.project_group_key(cx));
+    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+    cx.run_until_parked();
+    assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.entries.iter().any(|entry| {
+        matches!(entry, ListEntry::ProjectHeader { key, .. } if key == &remote_key)
+    })));
 }
 
 #[gpui::test]
