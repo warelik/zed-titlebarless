@@ -513,6 +513,14 @@
     ],
     [
       "project",
+      "test_project_group_key_distinguishes_rootless_remote_from_empty_local"
+    ],
+    [
+      "project",
+      "test_provisional_context_ownership_survives_overlapping_starts"
+    ],
+    [
+      "project",
       "test_shpool_command_preserves_shell_program_and_arguments"
     ],
     [
@@ -542,6 +550,10 @@
     [
       "recent_projects",
       "test_remove_project_group_waits_for_close_consent"
+    ],
+    [
+      "sidebar",
+      "test_agent_panel_retains_rootless_remote_workspace"
     ],
     [
       "sidebar",
