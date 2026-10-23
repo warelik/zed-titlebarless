@@ -916,20 +916,26 @@ impl MultiWorkspace {
     pub fn restore_project_groups(
         &mut self,
         groups: Vec<SerializedProjectGroupState>,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         let mut restored: Vec<ProjectGroupState> = Vec::new();
         for SerializedProjectGroupState { key, expanded } in groups {
             if key.is_empty() {
                 continue;
             }
-            if restored.iter().any(|group| group.key == key) {
+            if restored.iter().any(|group| group.key.matches(&key)) {
                 continue;
             }
+            let key = self.held.iter()
+                .map(|held| held.workspace.read(cx).project_group_key(cx))
+                .find(|live| live.matches(&key))
+                .or_else(|| self.project_groups.iter()
+                    .find(|group| group.key.matches(&key)).map(|group| group.key.clone()))
+                .unwrap_or(key);
             restored.push(ProjectGroupState { key, expanded });
         }
         for existing in std::mem::take(&mut self.project_groups) {
-            if !restored.iter().any(|group| group.key == existing.key) {
+            if !restored.iter().any(|group| group.key.matches(&existing.key)) {
                 restored.push(existing);
             }
         }
