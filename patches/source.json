@@ -865,6 +865,10 @@
     ],
     [
       "workspace",
+      "test_project_group_serialization_excludes_connection_secrets"
+    ],
+    [
+      "workspace",
       "test_remove_project_group_keeps_workspace_opened_during_consent"
     ],
     [
@@ -886,6 +890,10 @@
     [
       "workspace",
       "test_restore_preserves_rootless_remote_project_groups"
+    ],
+    [
+      "workspace",
+      "test_restored_remote_groups_keep_live_identity_options"
     ],
     [
       "workspace",

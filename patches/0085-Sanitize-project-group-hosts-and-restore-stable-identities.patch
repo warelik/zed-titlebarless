@@ -1,0 +1,215 @@
+From e8f301ec3f849769407c81f071417aaedbe0df2b Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 05:56:01 +0000
+Subject: [PATCH] Sanitize persisted project group hosts and restore stable
+ connection identities
+
+---
+ crates/workspace/src/multi_workspace.rs   | 12 +++-
+ crates/workspace/src/persistence/model.rs | 36 +++++++++-
+ crates/workspace/src/workspace.rs         | 84 ++++++++++++++++++++++-
+ 3 files changed, 126 insertions(+), 6 deletions(-)
+
+diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
+index 0b4bd1b1ab..cac2ad12a1 100644
+--- a/crates/workspace/src/multi_workspace.rs
++++ b/crates/workspace/src/multi_workspace.rs
+@@ -916,20 +916,26 @@ impl MultiWorkspace {
+     pub fn restore_project_groups(
+         &mut self,
+         groups: Vec<SerializedProjectGroupState>,
+-        _cx: &mut Context<Self>,
++        cx: &mut Context<Self>,
+     ) {
+         let mut restored: Vec<ProjectGroupState> = Vec::new();
+         for SerializedProjectGroupState { key, expanded } in groups {
+             if key.is_empty() {
+                 continue;
+             }
+-            if restored.iter().any(|group| group.key == key) {
++            if restored.iter().any(|group| group.key.matches(&key)) {
+                 continue;
+             }
++            let key = self.held.iter()
++                .map(|held| held.workspace.read(cx).project_group_key(cx))
++                .find(|live| live.matches(&key))
++                .or_else(|| self.project_groups.iter()
++                    .find(|group| group.key.matches(&key)).map(|group| group.key.clone()))
++                .unwrap_or(key);
+             restored.push(ProjectGroupState { key, expanded });
+         }
+         for existing in std::mem::take(&mut self.project_groups) {
+-            if !restored.iter().any(|group| group.key == existing.key) {
++            if !restored.iter().any(|group| group.key.matches(&existing.key)) {
+                 restored.push(existing);
+             }
+         }
+diff --git a/crates/workspace/src/persistence/model.rs b/crates/workspace/src/persistence/model.rs
+index b56279a8b0..6cdb212317 100644
+--- a/crates/workspace/src/persistence/model.rs
++++ b/crates/workspace/src/persistence/model.rs
+@@ -65,6 +65,7 @@ pub struct SessionWorkspace {
+ #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+ pub struct SerializedProjectGroup {
+     pub path_list: SerializedPathList,
++    #[serde(serialize_with = "serialize_project_group_location")]
+     pub(crate) location: SerializedWorkspaceLocation,
+     #[serde(default = "default_expanded")]
+     pub expanded: bool,
+@@ -74,12 +75,43 @@ fn default_expanded() -> bool {
+     true
+ }
+ 
++fn project_group_host_for_persistence(host: RemoteConnectionOptions) -> RemoteConnectionOptions {
++    match host {
++        RemoteConnectionOptions::Ssh(options) => {
++            RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
++                host: options.host,
++                username: options.username,
++                port: options.port,
++                nickname: options.nickname,
++                ..Default::default()
++            })
++        }
++        RemoteConnectionOptions::Docker(mut options) => {
++            options.remote_env.clear();
++            RemoteConnectionOptions::Docker(options)
++        }
++        other => other,
++    }
++}
++
++fn serialize_project_group_location<S: serde::Serializer>(
++    location: &SerializedWorkspaceLocation,
++    serializer: S,
++) -> std::result::Result<S::Ok, S::Error> {
++    match location {
++        SerializedWorkspaceLocation::Remote(host) => SerializedWorkspaceLocation::Remote(
++            project_group_host_for_persistence(host.clone()),
++        ).serialize(serializer),
++        SerializedWorkspaceLocation::Local => location.serialize(serializer),
++    }
++}
++
+ impl SerializedProjectGroup {
+     pub fn from_group(key: &ProjectGroupKey, expanded: bool) -> Self {
+         Self {
+             path_list: key.path_list().serialize(),
+             location: match key.host() {
+-                Some(host) => SerializedWorkspaceLocation::Remote(host),
++                Some(host) => SerializedWorkspaceLocation::Remote(project_group_host_for_persistence(host)),
+                 None => SerializedWorkspaceLocation::Local,
+             },
+             expanded,
+@@ -90,7 +122,7 @@ impl SerializedProjectGroup {
+         let path_list = PathList::deserialize(&self.path_list);
+         let host = match self.location {
+             SerializedWorkspaceLocation::Local => None,
+-            SerializedWorkspaceLocation::Remote(opts) => Some(opts),
++            SerializedWorkspaceLocation::Remote(opts) => Some(project_group_host_for_persistence(opts)),
+         };
+         SerializedProjectGroupState {
+             key: ProjectGroupKey::new(host, path_list),
+diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
+index 426ed3676f..3896df60f4 100644
+--- a/crates/workspace/src/workspace.rs
++++ b/crates/workspace/src/workspace.rs
+@@ -10560,7 +10560,7 @@ pub async fn apply_restored_multiworkspace_state(
+                 }
+             }
+             let resolved = ProjectGroupKey::new(key.host(), PathList::new(&resolved_paths));
+-            if !resolved_groups.iter().any(|g| g.key == resolved) {
++            if !resolved_groups.iter().any(|g| g.key.matches(&resolved)) {
+                 resolved_groups.push(SerializedProjectGroupState {
+                     key: resolved,
+                     expanded,
+@@ -12720,6 +12720,88 @@ mod tests {
+         }).unwrap();
+     }
+ 
++    #[test]
++    fn test_project_group_serialization_excludes_connection_secrets() {
++        let ssh = remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
++            host: "host".into(), username: Some("user".into()), port: Some(2222),
++            password: Some("fixture_ssh_credential".into()),
++            args: Some(vec!["fixture_proxy_credential".into()]),
++            nickname: Some("label".into()), ..Default::default()
++        });
++        let docker = remote::RemoteConnectionOptions::Docker(remote::DockerConnectionOptions {
++            name: "container".into(), container_id: "container-id".into(), remote_user: "user".into(),
++            use_podman: true, upload_binary_over_docker_exec: true,
++            remote_env: std::collections::BTreeMap::from([
++                ("ACCESS_TOKEN".into(), "fixture_docker_credential".into()),
++            ]),
++        });
++        for host in [ssh, docker] {
++            let key = ProjectGroupKey::new(Some(host.clone()), PathList::default());
++            let regular = SerializedProjectGroup::from_group(&key, false);
++            let legacy = SerializedProjectGroup {
++                path_list: PathList::default().serialize(),
++                location: SerializedWorkspaceLocation::Remote(host), expanded: false,
++            };
++            for group in [regular, legacy] {
++                let encoded = serde_json::to_string(&group).unwrap();
++                for value in ["fixture_ssh_credential", "fixture_proxy_credential", "fixture_docker_credential"] {
++                    assert!(!encoded.contains(value));
++                }
++                let restored = group.into_restored_state();
++                assert!(!restored.expanded);
++                assert!(restored.key.matches(&key));
++                match restored.key.host().unwrap() {
++                    remote::RemoteConnectionOptions::Ssh(options) => {
++                        assert!(options.password.is_none());
++                        assert!(options.args.is_none());
++                        assert_eq!(options.username.as_deref(), Some("user"));
++                        assert_eq!(options.port, Some(2222));
++                    }
++                    remote::RemoteConnectionOptions::Docker(options) => {
++                        assert!(options.remote_env.is_empty());
++                        assert!(options.use_podman);
++                        assert_eq!(options.container_id, "container-id");
++                    }
++                    _ => panic!("fixture must remain the same connection kind"),
++                }
++            }
++            assert_eq!(key.host().is_some(), true);
++        }
++    }
++
++    #[gpui::test]
++    async fn test_restored_remote_groups_keep_live_identity_options(cx: &mut TestAppContext) {
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs.clone(), [], cx).await;
++        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
++        let key = |nickname: &str, argument: &str, upload| ProjectGroupKey::new(
++            Some(remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
++                host: "host".into(), username: Some("user".into()), port: Some(22),
++                nickname: Some(nickname.into()), args: Some(vec![argument.into()]),
++                upload_binary_over_ssh: upload, ..Default::default()
++            })),
++            PathList::default(),
++        );
++        let previous = key("old-label", "old-routing", false);
++        let current = key("current-label", "current-routing", true);
++        assert!(previous.matches(&current));
++        window.update(cx, |multi_workspace, _, cx| multi_workspace.restore_project_groups(vec![
++            SerializedProjectGroupState { key: current.clone(), expanded: true },
++        ], cx)).unwrap();
++        let state = MultiWorkspaceState {
++            project_groups: vec![SerializedProjectGroup::from_group(&previous, false)],
++            ..MultiWorkspaceState::default()
++        };
++        apply_restored_multiworkspace_state(window, &state, fs, &mut cx.to_async()).await;
++        window.read_with(cx, |multi_workspace, cx| {
++            let groups = multi_workspace.project_groups(cx);
++            assert_eq!(groups.len(), 1);
++            assert_eq!(groups[0].key, current);
++            assert!(!groups[0].expanded);
++        }).unwrap();
++    }
++
+     #[test]
+     fn test_render_window_title_format_omits_empty_segments() {
+         let context = WindowTitleContext {
