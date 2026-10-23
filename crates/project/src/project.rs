@@ -6957,7 +6957,16 @@ impl ProjectGroupKey {
         }
         if names.is_empty() {
             self.host.as_ref()
-                .map(|host| host.display_name().into())
+                .map(|host| {
+                    let identity = remote::remote_connection_identity(host);
+                    match &identity {
+                        remote::RemoteConnectionIdentity::Ssh { username: None, port: None, .. }
+                        | remote::RemoteConnectionIdentity::Wsl { user: None, .. } => {
+                            host.display_name().into()
+                        }
+                        _ => format!("{} ({})", host.display_name(), identity.persistence_key()).into(),
+                    }
+                })
                 .unwrap_or_else(|| "Empty Workspace".into())
         } else {
             names.join(", ").into()

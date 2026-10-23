@@ -1889,6 +1889,38 @@ mod tests {
                    "Empty Workspace");
     }
 
+    #[test]
+    fn test_rootless_remote_group_labels_distinguish_connection_identities() {
+        let label = |connection| crate::ProjectGroupKey::new(connection, crate::PathList::default())
+            .display_name(&Default::default()).to_string();
+        let ssh = |username: Option<&str>, port| Some(remote::RemoteConnectionOptions::Ssh(
+            remote::SshConnectionOptions {
+                host: "same-host".into(), username: username.map(Into::into), port,
+                nickname: Some("same-label".into()), ..Default::default()
+            },
+        ));
+        let ssh_labels = [label(ssh(None, None)), label(ssh(Some("alice"), None)),
+                          label(ssh(Some("bob"), None)), label(ssh(None, Some(22))),
+                          label(ssh(None, Some(2222)))];
+        for (index, left) in ssh_labels.iter().enumerate() {
+            for right in &ssh_labels[index + 1..] { assert_ne!(left, right); }
+        }
+        let wsl = |user: &str| Some(remote::RemoteConnectionOptions::Wsl(
+            remote::WslConnectionOptions { distro_name: "same-distro".into(), user: Some(user.into()) },
+        ));
+        assert_ne!(label(wsl("alice")), label(wsl("bob")));
+        let docker = |id: &str, user: &str| Some(remote::RemoteConnectionOptions::Docker(
+            remote::DockerConnectionOptions {
+                name: "same-container-label".into(), container_id: id.into(), remote_user: user.into(),
+                upload_binary_over_docker_exec: false, use_podman: false, remote_env: Default::default(),
+            },
+        ));
+        assert_ne!(label(docker("first-container", "alice")),
+                   label(docker("second-container", "alice")));
+        assert_ne!(label(docker("first-container", "alice")),
+                   label(docker("first-container", "bob")));
+    }
+
 
     fn prepared_cmd_task(command_arg: &str) -> SpawnInTerminal {
         SpawnInTerminal {
