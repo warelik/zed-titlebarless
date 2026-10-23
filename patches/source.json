@@ -521,6 +521,10 @@
     ],
     [
       "project",
+      "test_rootless_remote_group_labels_distinguish_connection_identities"
+    ],
+    [
+      "project",
       "test_shpool_command_preserves_shell_program_and_arguments"
     ],
     [

@@ -1,5 +1,6 @@
 from contextlib import ExitStack
 from contextlib import redirect_stdout
+import ast
 from datetime import datetime, timezone
 import json
 import io
@@ -1114,6 +1115,36 @@ class CrossApplicationFinalHistoryTests(unittest.TestCase):
         application = workflow.split("\n  test:\n", 1)[1].split("\n  publish:\n", 1)[0]
         self.assertIn("needs.activate-policy.result == 'success'", application)
         self.assertIn("needs.activate-policy.outputs.final_failed == 'true'", workflow)
+
+
+class ArtifactReusePublicationGateTests(unittest.TestCase):
+    def test_publish_reuse_waits_for_successful_adoption_without_starting_another_build(self):
+        workflow = (Path(release.__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text()
+        publish = workflow.split("\n  publish:\n", 1)[1].split("\n  land:\n", 1)[0]
+        condition = publish.split("    if: >-\n", 1)[1].split("    runs-on:", 1)[0]
+        defaults = {"needs.prepare.result": "success", "needs.activate-policy.result": "success",
+                    "needs.prepare.outputs.repair_pr": "41", "needs.land.result": "success",
+                    "needs.test.result": "skipped", "needs.prepare.outputs.artifact_reuse": "true"}
+        cases = [({}, True), ({"needs.land.result": "failure"}, False),
+                 ({"needs.land.result": "skipped"}, False),
+                 ({"needs.prepare.outputs.repair_pr": "", "needs.land.result": "skipped"}, True),
+                 ({"needs.prepare.outputs.artifact_reuse": "false"}, False),
+                 ({"needs.prepare.outputs.artifact_reuse": "false", "needs.test.result": "success"}, True),
+                 ({"needs.prepare.result": "failure"}, False),
+                 ({"needs.activate-policy.result": "failure"}, False)]
+        for changes, expected in cases:
+            with self.subTest(changes=changes):
+                expression = " ".join(condition.split())
+                for key, value in {**defaults, **changes}.items():
+                    expression = expression.replace(key, repr(value))
+                expression = expression.replace("always()", "True").replace("!cancelled()", "True")
+                expression = expression.replace("&&", " and ").replace("||", " or ")
+                tree = ast.parse(expression, mode="eval")
+                allowed = (ast.Expression, ast.BoolOp, ast.Compare, ast.Constant,
+                           ast.And, ast.Or, ast.Eq, ast.NotEq, ast.Load)
+                self.assertTrue(all(isinstance(node, allowed) for node in ast.walk(tree)))
+                self.assertEqual(eval(compile(tree, "workflow publish condition", "eval"),
+                                      {"__builtins__": {}}, {}), expected)
 
 
 class PublishedRecoveryCheckpointTests(unittest.TestCase):

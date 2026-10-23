@@ -1,0 +1,77 @@
+From c65d51cdeee9570f44ec9ecd443d2b52e234e271 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 05:48:37 +0000
+Subject: [PATCH] Disambiguate rootless SSH WSL and Docker connection
+ identities
+
+---
+ crates/project/src/project.rs   | 11 ++++++++++-
+ crates/project/src/terminals.rs | 32 ++++++++++++++++++++++++++++++++
+ 2 files changed, 42 insertions(+), 1 deletion(-)
+
+diff --git a/crates/project/src/project.rs b/crates/project/src/project.rs
+index 17ec27a98d..749a1a7ebd 100644
+--- a/crates/project/src/project.rs
++++ b/crates/project/src/project.rs
+@@ -6822,7 +6822,16 @@ impl ProjectGroupKey {
+         }
+         if names.is_empty() {
+             self.host.as_ref()
+-                .map(|host| host.display_name().into())
++                .map(|host| {
++                    let identity = remote::remote_connection_identity(host);
++                    match &identity {
++                        remote::RemoteConnectionIdentity::Ssh { username: None, port: None, .. }
++                        | remote::RemoteConnectionIdentity::Wsl { user: None, .. } => {
++                            host.display_name().into()
++                        }
++                        _ => format!("{} ({})", host.display_name(), identity.persistence_key()).into(),
++                    }
++                })
+                 .unwrap_or_else(|| "Empty Workspace".into())
+         } else {
+             names.join(", ").into()
+diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
+index 2c441bcfc2..d60f5e1b8b 100644
+--- a/crates/project/src/terminals.rs
++++ b/crates/project/src/terminals.rs
+@@ -1889,6 +1889,38 @@ mod tests {
+                    "Empty Workspace");
+     }
+ 
++    #[test]
++    fn test_rootless_remote_group_labels_distinguish_connection_identities() {
++        let label = |connection| crate::ProjectGroupKey::new(connection, crate::PathList::default())
++            .display_name(&Default::default()).to_string();
++        let ssh = |username: Option<&str>, port| Some(remote::RemoteConnectionOptions::Ssh(
++            remote::SshConnectionOptions {
++                host: "same-host".into(), username: username.map(Into::into), port,
++                nickname: Some("same-label".into()), ..Default::default()
++            },
++        ));
++        let ssh_labels = [label(ssh(None, None)), label(ssh(Some("alice"), None)),
++                          label(ssh(Some("bob"), None)), label(ssh(None, Some(22))),
++                          label(ssh(None, Some(2222)))];
++        for (index, left) in ssh_labels.iter().enumerate() {
++            for right in &ssh_labels[index + 1..] { assert_ne!(left, right); }
++        }
++        let wsl = |user: &str| Some(remote::RemoteConnectionOptions::Wsl(
++            remote::WslConnectionOptions { distro_name: "same-distro".into(), user: Some(user.into()) },
++        ));
++        assert_ne!(label(wsl("alice")), label(wsl("bob")));
++        let docker = |id: &str, user: &str| Some(remote::RemoteConnectionOptions::Docker(
++            remote::DockerConnectionOptions {
++                name: "same-container-label".into(), container_id: id.into(), remote_user: user.into(),
++                upload_binary_over_docker_exec: false, use_podman: false, remote_env: Default::default(),
++            },
++        ));
++        assert_ne!(label(docker("first-container", "alice")),
++                   label(docker("second-container", "alice")));
++        assert_ne!(label(docker("first-container", "alice")),
++                   label(docker("first-container", "bob")));
++    }
++
+ 
+     fn prepared_cmd_task(command_arg: &str) -> SpawnInTerminal {
+         SpawnInTerminal {

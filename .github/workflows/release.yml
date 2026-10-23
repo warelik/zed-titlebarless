@@ -359,6 +359,7 @@ jobs:
     if: >-
       always() && needs.prepare.result == 'success' &&
       needs.activate-policy.result == 'success' &&
+      (needs.prepare.outputs.repair_pr == '' || needs.land.result == 'success') &&
       (needs.test.result == 'success' ||
        (needs.prepare.outputs.artifact_reuse == 'true' && needs.test.result == 'skipped')) && !cancelled()
     runs-on: ubuntu-24.04
