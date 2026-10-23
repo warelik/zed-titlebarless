@@ -25,9 +25,56 @@ use util::{
 
 use crate::{Project, ProjectPath};
 
+#[derive(Default)]
 pub struct Terminals {
     pub(crate) local_handles: Vec<WeakEntity<terminal::Terminal>>,
     pub(crate) session_contexts: HashMap<String, ShpoolSessionContext>,
+    provisional_contexts: HashMap<String, Arc<()>>,
+}
+
+impl Terminals {
+    fn reserve_context_start(
+        &mut self,
+        name: &str,
+        context: &ShpoolSessionContext,
+        retain: bool,
+    ) -> Result<Option<Arc<()>>> {
+        anyhow::ensure!(
+            self.session_contexts.get(name).is_none_or(|known| known == context),
+            "persistent session client changed before attachment",
+        );
+        let retained = self.session_contexts.contains_key(name)
+            && !self.provisional_contexts.contains_key(name);
+        self.session_contexts.entry(name.to_string()).or_insert_with(|| context.clone());
+        if retain || retained {
+            self.provisional_contexts.remove(name);
+            Ok(None)
+        } else {
+            Ok(Some(self.provisional_contexts.entry(name.to_string()).or_default().clone()))
+        }
+    }
+
+    fn finish_context_start(
+        &mut self,
+        name: &str,
+        context: &ShpoolSessionContext,
+        reservation: Arc<()>,
+        succeeded: bool,
+    ) {
+        if !self.provisional_contexts.get(name)
+            .is_some_and(|current| Arc::ptr_eq(current, &reservation))
+        {
+            return;
+        }
+        if succeeded {
+            self.provisional_contexts.remove(name);
+        } else if Arc::strong_count(&reservation) == 2 {
+            self.provisional_contexts.remove(name);
+            if self.session_contexts.get(name) == Some(context) {
+                self.session_contexts.remove(name);
+            }
+        }
+    }
 }
 
 /// The locator of the daemon that actually owns a persistent session.
@@ -758,6 +805,7 @@ impl Project {
         mut reserve_context: Option<ShpoolContextReservation>,
         cx: &mut Context<Self>,
     ) -> Task<Result<PersistentTerminal>> {
+        let context_was_supplied = context.is_some();
         let known = self.terminals.session_contexts.get(&session_name).cloned();
         if context.as_ref().zip(known.as_ref()).is_some_and(|(left, right)| left != right) {
             return Task::ready(Err(anyhow::anyhow!("persistent session daemon context changed")));
@@ -835,19 +883,20 @@ impl Project {
                     cx.update(|cx| reserve(context, cx))?;
                 }
             }
-            let terminal = project
+            let (terminal, reservation) = project
                 .update(cx, |project, cx| {
-                    if let Some(context) = &context {
-                        if project.terminals.session_contexts.get(&session_name)
-                            .is_some_and(|known| known != context)
-                        {
-                            return Task::ready(Err(anyhow::anyhow!(
-                                "persistent session client changed before attachment"
-                            )));
+                    let reservation = if let Some(context) = &context {
+                        match project.terminals.reserve_context_start(
+                            &session_name, context,
+                            restoring_existing || context_was_supplied
+                                || session == PersistentSession::Reattached,
+                        ) {
+                            Ok(reservation) => reservation,
+                            Err(error) => return (Task::ready(Err(error)), None),
                         }
-                        project.terminals.session_contexts.entry(session_name.clone())
-                            .or_insert_with(|| context.clone());
-                    }
+                    } else {
+                        None
+                    };
                     #[cfg(any(test, feature = "test-support"))]
                     if let Some(fake) = &project.fake_shpool {
                         let location = project.terminal_settings_location(cwd.as_deref(), cx);
@@ -860,7 +909,7 @@ impl Project {
                                 &settings.shell,
                             ) {
                                 Ok(args) => args,
-                                Err(error) => return Task::ready(Err(error)),
+                                Err(error) => return (Task::ready(Err(error)), reservation),
                             };
                             let mut state = fake.state.lock();
                             state.attach_history.push(command.session_name.clone());
@@ -882,27 +931,21 @@ impl Project {
                         );
                         let terminal = cx.new(|cx| builder.subscribe(cx));
                         project.terminals.local_handles.push(terminal.downgrade());
-                        return Task::ready(Ok(terminal));
+                        return (Task::ready(Ok(terminal)), reservation);
                     }
 
-                    project.create_terminal_shell_internal(cwd, false, command, pty_startup, cx)
-                })?
-                .await;
-            let terminal = match terminal {
-                Ok(terminal) => terminal,
-                Err(error) => {
-                    if !pinned && !restoring_existing {
-                        project.update(cx, |project, _| {
-                            if context.as_ref().is_some_and(|context| {
-                                project.persistent_terminal_context(&session_name) == Some(context)
-                            }) {
-                                project.forget_persistent_terminal_context(&session_name);
-                            }
-                        })?;
-                    }
-                    return Err(error);
-                }
-            };
+                    (project.create_terminal_shell_internal(cwd, false, command, pty_startup, cx),
+                     reservation)
+                })?;
+            let result = terminal.await;
+            if let (Some(reservation), Some(context)) = (reservation, context.as_ref()) {
+                project.update(cx, |project, _| {
+                    project.terminals.finish_context_start(
+                        &session_name, context, reservation, result.is_ok(),
+                    );
+                })?;
+            }
+            let terminal = result?;
             Ok(PersistentTerminal { terminal, session })
         })
     }
@@ -1019,6 +1062,7 @@ impl Project {
     /// low-level API retains it so repeated kills remain on the same daemon.
     pub fn forget_persistent_terminal_context(&mut self, session_name: &str) {
         self.terminals.session_contexts.remove(session_name);
+        self.terminals.provisional_contexts.remove(session_name);
     }
 
     fn kill_persistent_terminal_session_unbounded(
@@ -1826,6 +1870,75 @@ mod tests {
     use super::*;
     use gpui::BorrowAppContext;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn test_provisional_context_ownership_survives_overlapping_starts() {
+        for (first_succeeds, second_succeeds) in
+            [(true, false), (false, true), (false, false), (true, true)]
+        {
+            let mut terminals = Terminals::default();
+            let context = ShpoolSessionContext::for_test();
+            let first = terminals.reserve_context_start("overlap", &context, false)
+                .unwrap().expect("fresh context must be provisional");
+            let second = terminals.reserve_context_start("overlap", &context, false)
+                .unwrap().expect("overlapping start must share the reservation");
+            assert!(Arc::ptr_eq(&first, &second));
+            terminals.finish_context_start("overlap", &context, first, first_succeeds);
+            terminals.finish_context_start("overlap", &context, second, second_succeeds);
+            assert_eq!(terminals.session_contexts.get("overlap"),
+                (first_succeeds || second_succeeds).then_some(&context));
+            assert!(terminals.provisional_contexts.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_project_group_key_distinguishes_rootless_remote_from_empty_local() {
+        assert!(crate::ProjectGroupKey::default().is_empty());
+        let remote = crate::ProjectGroupKey::new(
+            Some(remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+                host: "host".into(), ..Default::default()
+            })),
+            crate::PathList::default(),
+        );
+        assert!(remote.path_list().is_empty());
+        assert!(!remote.is_empty());
+        assert_eq!(remote.display_name(&Default::default()).to_string(), "host");
+        assert_eq!(crate::ProjectGroupKey::default().display_name(&Default::default()).to_string(),
+                   "Empty Workspace");
+    }
+
+    #[test]
+    fn test_rootless_remote_group_labels_distinguish_connection_identities() {
+        let label = |connection| crate::ProjectGroupKey::new(connection, crate::PathList::default())
+            .display_name(&Default::default()).to_string();
+        let ssh = |username: Option<&str>, port| Some(remote::RemoteConnectionOptions::Ssh(
+            remote::SshConnectionOptions {
+                host: "same-host".into(), username: username.map(Into::into), port,
+                nickname: Some("same-label".into()), ..Default::default()
+            },
+        ));
+        let ssh_labels = [label(ssh(None, None)), label(ssh(Some("alice"), None)),
+                          label(ssh(Some("bob"), None)), label(ssh(None, Some(22))),
+                          label(ssh(None, Some(2222)))];
+        for (index, left) in ssh_labels.iter().enumerate() {
+            for right in &ssh_labels[index + 1..] { assert_ne!(left, right); }
+        }
+        let wsl = |user: &str| Some(remote::RemoteConnectionOptions::Wsl(
+            remote::WslConnectionOptions { distro_name: "same-distro".into(), user: Some(user.into()) },
+        ));
+        assert_ne!(label(wsl("alice")), label(wsl("bob")));
+        let docker = |id: &str, user: &str| Some(remote::RemoteConnectionOptions::Docker(
+            remote::DockerConnectionOptions {
+                name: "same-container-label".into(), container_id: id.into(), remote_user: user.into(),
+                upload_binary_over_docker_exec: false, use_podman: false, remote_env: Default::default(),
+            },
+        ));
+        assert_ne!(label(docker("first-container", "alice")),
+                   label(docker("second-container", "alice")));
+        assert_ne!(label(docker("first-container", "alice")),
+                   label(docker("first-container", "bob")));
+    }
+
 
     fn prepared_cmd_task(command_arg: &str) -> SpawnInTerminal {
         SpawnInTerminal {
