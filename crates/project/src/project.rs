@@ -6956,7 +6956,9 @@ impl ProjectGroupKey {
             }
         }
         if names.is_empty() {
-            "Empty Workspace".into()
+            self.host.as_ref()
+                .map(|host| host.display_name().into())
+                .unwrap_or_else(|| "Empty Workspace".into())
         } else {
             names.join(", ").into()
         }

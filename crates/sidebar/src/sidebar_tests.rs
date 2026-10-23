@@ -18071,6 +18071,7 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
             assert!(multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&remote_workspace)));
             multi_workspace.read_with(cx, |mw, cx| mw.assert_project_group_key_integrity(cx).unwrap());
         }
+        assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.has_open_projects));
     }
     let local = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
     multi_workspace.update_in(cx, |mw, window, cx| {
@@ -18088,6 +18089,40 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
     assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.entries.iter().any(|entry| {
         matches!(entry, ListEntry::ProjectHeader { key, .. } if key == &remote_key)
     })));
+    assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.has_open_projects));
+}
+
+#[gpui::test]
+async fn test_rootless_remote_history_is_visible_without_open_project(cx: &mut TestAppContext) {
+    init_test(cx);
+    let project = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
+    let remote_key = |host: &str| ProjectGroupKey::new(
+        Some(remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+            host: host.into(), ..Default::default()
+        })),
+        PathList::default(),
+    );
+    let first = remote_key("first-host");
+    let second = remote_key("second-host");
+    multi_workspace.update(cx, |mw, cx| mw.restore_project_groups(vec![
+        workspace::SerializedProjectGroupState { key: first.clone(), expanded: true },
+        workspace::SerializedProjectGroupState { key: second.clone(), expanded: true },
+    ], cx));
+    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+    cx.run_until_parked();
+    sidebar.read_with(cx, |sidebar, _| {
+        assert!(sidebar.contents.has_open_projects);
+        let headers = sidebar.contents.entries.iter().filter_map(|entry| match entry {
+            ListEntry::ProjectHeader { key, label, .. } => Some((key, label.to_string())),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert!(headers.iter().any(|(key, label)| *key == &first && label == "first-host"));
+        assert!(headers.iter().any(|(key, label)| *key == &second && label == "second-host"));
+        assert_ne!(first.display_name(&Default::default()), second.display_name(&Default::default()));
+    });
 }
 
 #[gpui::test]
