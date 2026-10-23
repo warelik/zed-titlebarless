@@ -1884,6 +1884,9 @@ mod tests {
         );
         assert!(remote.path_list().is_empty());
         assert!(!remote.is_empty());
+        assert_eq!(remote.display_name(&Default::default()).to_string(), "host");
+        assert_eq!(crate::ProjectGroupKey::default().display_name(&Default::default()).to_string(),
+                   "Empty Workspace");
     }
 
 
