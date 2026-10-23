@@ -1499,9 +1499,10 @@ impl Sidebar {
         let mut seen_thread_ids: HashSet<agent_ui::ThreadId> = HashSet::new();
         let mut seen_terminal_ids: HashSet<TerminalId> = HashSet::new();
 
-        let has_open_projects = workspaces
-            .iter()
-            .any(|ws| !workspace_path_list(ws, cx).paths().is_empty());
+        let groups = mw.project_groups(cx);
+        // Saved groups must remain reachable even without a live workspace.
+        let has_open_projects = groups.iter().any(|group| !group.key.is_empty())
+            || workspaces.iter().any(|ws| !ws.read(cx).project_group_key(cx).is_empty());
 
         let resolve_agent_icon = |agent_id: &AgentId| -> (IconName, Option<SharedString>) {
             let agent = Agent::from(agent_id.clone());
@@ -1517,7 +1518,6 @@ impl Sidebar {
             (icon, icon_from_external_svg)
         };
 
-        let groups = mw.project_groups(cx);
         let mut live_notified_terminal_ids: HashSet<TerminalId> = HashSet::new();
         for workspace in &workspaces {
             if let Some(agent_panel) = workspace.read(cx).panel::<AgentPanel>(cx) {
@@ -1673,7 +1673,7 @@ impl Sidebar {
                     .has_notification
                     .then_some(terminal.metadata.terminal_id)
             }));
-            if group_key.path_list().paths().is_empty() {
+            if group_key.is_empty() {
                 continue;
             }
 
@@ -2152,12 +2152,7 @@ impl Sidebar {
 
         if Self::in_agent_panel(cx) {
             multi_workspace.update(cx, |multi_workspace, cx| {
-                if !multi_workspace
-                    .workspace()
-                    .read(cx)
-                    .project_group_key(cx)
-                    .path_list()
-                    .is_empty()
+                if multi_workspace.active_workspace_has_project(cx)
                 {
                     multi_workspace.retain_active_workspace(cx);
                 }

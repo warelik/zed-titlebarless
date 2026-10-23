@@ -413,12 +413,7 @@ impl MultiWorkspace {
                 let in_agent_panel = threads_sidebar_in_agent_panel(cx);
                 if in_agent_panel != previous_in_agent_panel && multi_workspace_enabled {
                     if in_agent_panel
-                        && !this
-                            .workspace()
-                            .read(cx)
-                            .project_group_key(cx)
-                            .path_list()
-                            .is_empty()
+                        && this.active_workspace_has_project(cx)
                     {
                         this.retain_active_workspace(cx);
                     }
@@ -462,12 +457,7 @@ impl MultiWorkspace {
         };
         if this.multi_workspace_enabled(cx)
             && threads_sidebar_in_agent_panel(cx)
-            && !this
-                .workspace()
-                .read(cx)
-                .project_group_key(cx)
-                .path_list()
-                .is_empty()
+            && this.active_workspace_has_project(cx)
         {
             this.retain_active_workspace(cx);
         }
@@ -726,7 +716,7 @@ impl MultiWorkspace {
         }
 
         let new_key = workspace.read(cx).project_group_key(cx);
-        if new_key.path_list().paths().is_empty() {
+        if new_key.is_empty() {
             return;
         }
 
@@ -749,6 +739,10 @@ impl MultiWorkspace {
             .any(|held| held.pinned && held.workspace == *workspace)
     }
 
+    pub fn active_workspace_has_project(&self, cx: &App) -> bool {
+        !self.workspace().read(cx).project_group_key(cx).is_empty()
+    }
+
     pub fn active_workspace_is_retained(&self) -> bool {
         self.held[self.displayed_index()].pinned
     }
@@ -765,7 +759,7 @@ impl MultiWorkspace {
 
     /// Ensures a project group exists for `key`, creating one if needed.
     fn ensure_project_group_state(&mut self, key: ProjectGroupKey) {
-        if key.path_list().paths().is_empty() {
+        if key.is_empty() {
             return;
         }
 
@@ -801,7 +795,7 @@ impl MultiWorkspace {
             return;
         }
 
-        if new_key.path_list().paths().is_empty() {
+        if new_key.is_empty() {
             return;
         }
 
@@ -922,20 +916,26 @@ impl MultiWorkspace {
     pub fn restore_project_groups(
         &mut self,
         groups: Vec<SerializedProjectGroupState>,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         let mut restored: Vec<ProjectGroupState> = Vec::new();
         for SerializedProjectGroupState { key, expanded } in groups {
-            if key.path_list().paths().is_empty() {
+            if key.is_empty() {
                 continue;
             }
-            if restored.iter().any(|group| group.key == key) {
+            if restored.iter().any(|group| group.key.matches(&key)) {
                 continue;
             }
+            let key = self.held.iter()
+                .map(|held| held.workspace.read(cx).project_group_key(cx))
+                .find(|live| live.matches(&key))
+                .or_else(|| self.project_groups.iter()
+                    .find(|group| group.key.matches(&key)).map(|group| group.key.clone()))
+                .unwrap_or(key);
             restored.push(ProjectGroupState { key, expanded });
         }
         for existing in std::mem::take(&mut self.project_groups) {
-            if !restored.iter().any(|group| group.key == existing.key) {
+            if !restored.iter().any(|group| group.key.matches(&existing.key)) {
                 restored.push(existing);
             }
         }
@@ -1703,6 +1703,11 @@ impl MultiWorkspace {
             );
 
             let live_key = workspace.read(cx).project_group_key(cx);
+            // pin may retain a rootless local workspace, while
+            // ensure_project_group_state deliberately omits empty keys.
+            if live_key.is_empty() {
+                continue;
+            }
             anyhow::ensure!(
                 self.project_groups
                     .iter()
