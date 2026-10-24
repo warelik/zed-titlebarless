@@ -1899,14 +1899,14 @@ impl MultiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<bool>> {
-        self.remove_with_pre_remove(workspaces, intent, async |_| Ok(true), window, cx)
+        self.remove_with_pre_remove(workspaces, intent, async |_, _| Ok(true), window, cx)
     }
 
     pub fn remove_with_pre_remove(
         &mut self,
         workspaces: impl IntoIterator<Item = Entity<Workspace>>,
         intent: RemovalIntent,
-        before_remove: impl AsyncFnOnce(&mut gpui::AsyncWindowContext) -> Result<bool> + 'static,
+        before_remove: impl AsyncFnOnce(&mut gpui::AsyncWindowContext, Rc<dyn Fn(&App) -> bool>) -> Result<bool> + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<bool>> {
@@ -1974,7 +1974,7 @@ impl MultiWorkspace {
             for workspace in &workspaces {
                 let should_continue = workspace
                     .update_in(cx, |workspace, window, cx| {
-                        workspace.prepare_to_close(CloseIntent::ReplaceWindow, window, cx)
+                        workspace.prepare_to_remove(window, cx)
                     })?
                     .await?;
 
@@ -1994,25 +1994,24 @@ impl MultiWorkspace {
                 return Ok(false);
             }
 
-            if !before_remove(cx).await? {
+            let guarded_workspaces = workspaces.clone();
+            let expected_item_ids = item_ids.clone();
+            let workspaces_unchanged: Rc<dyn Fn(&App) -> bool> = Rc::new(move |cx| {
+                let current_item_ids = guarded_workspaces.iter().map(|workspace| {
+                    workspace.read(cx).panes().iter().flat_map(|pane| {
+                        pane.read(cx).items().map(|item| item.item_id()).collect::<Vec<_>>()
+                    }).collect::<Vec<_>>()
+                }).collect::<Vec<_>>();
+                !guard.changed(cx) && current_item_ids == expected_item_ids
+            });
+            if !before_remove(cx, workspaces_unchanged.clone()).await? {
                 return Ok(false);
             }
 
             // Edit phase: one synchronous update. Delete the rows, then pick
             // the replacement from the rows that actually remain.
             let (removed_any, reopen_key) = this.update_in(cx, |this, window, cx| {
-                let current_item_ids = workspaces
-                    .iter()
-                    .map(|workspace| {
-                        workspace
-                            .read(cx)
-                            .panes()
-                            .iter()
-                            .flat_map(|pane| pane.read(cx).items().map(|item| item.item_id()))
-                            .collect::<Vec<_>>()
-                    })
-                    .collect::<Vec<_>>();
-                if guard.changed(cx) || current_item_ids != item_ids {
+                if !workspaces_unchanged(cx) {
                     return (false, None);
                 }
                 let mut removed_any = false;
