@@ -4459,7 +4459,7 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.has_open_project(cx) {
+        if !self.has_open_project(cx) && !self.supports_terminal(cx) {
             return;
         }
 
@@ -7129,7 +7129,9 @@ impl AgentPanel {
                             .child(rows.projects)
                             .end_children(sandbox_status)
                             .end_child(rows.add_project)
-                            .when(can_create_entries, |this| this.end_child(new_thread_menu))
+                            .when(can_create_entries || supports_terminal, |this| {
+                                this.end_child(new_thread_menu)
+                            })
                             .end_child(full_screen_button)
                             .end_child(self.render_panel_options_menu(window, cx)),
                     )
@@ -7167,7 +7169,9 @@ impl AgentPanel {
                         .flex_none()
                         .gap_1()
                         .children(sandbox_status)
-                        .when(can_create_entries, |this| this.child(new_thread_menu))
+                        .when(can_create_entries || supports_terminal, |this| {
+                            this.child(new_thread_menu)
+                        })
                         .child(full_screen_button)
                         .child(self.render_panel_options_menu(window, cx)),
                 )
@@ -10955,6 +10959,11 @@ mod tests {
         let project = Project::test(fs, [], cx).await;
         let multi_workspace =
             cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
         let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
         let sidebar = register_test_sidebar(true, &mut cx);
 
@@ -10969,6 +10978,15 @@ mod tests {
             );
             assert!(AgentPanel::sidebar_tab_rows(window, cx).is_none(),
                 "the rendering path must reject replacement rows without an active project group");
+        });
+        let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
+            cx.new(|cx| AgentPanel::new(workspace, window, cx))
+        });
+        panel.update_in(&mut cx, |panel, window, cx| {
+            assert!(!panel.has_open_project(cx));
+            assert!(!panel.supports_terminal(cx));
+            panel.toggle_new_thread_menu(&ToggleNewThreadMenu, window, cx);
+            assert!(!panel.new_thread_menu_handle.is_deployed());
         });
     }
 
@@ -16514,6 +16532,12 @@ mod tests {
         .await;
 
         let cx = &mut VisualTestContext::from_window(remote_multi_workspace.into(), cx);
+        cx.update(|_, cx| {
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.threads_sidebar.in_agent_panel = true;
+            AgentSettings::override_global(settings, cx);
+        });
+        let _sidebar = register_test_sidebar(true, cx);
         let async_cx = cx.update(|window, cx| window.to_async(cx));
         let loaded = AgentPanel::load(workspace.downgrade(), async_cx)
             .await
@@ -16533,6 +16557,21 @@ mod tests {
                 "restored active terminal must be active even if remote workspace root_paths is empty"
             );
         });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(loaded.clone(), window, cx);
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        });
+        cx.run_until_parked();
+        loaded.update_in(cx, |panel, window, cx| {
+            assert!(!panel.has_open_project(cx));
+            assert!(panel.supports_terminal(cx));
+            panel.toggle_new_thread_menu(&ToggleNewThreadMenu, window, cx);
+        });
+        cx.run_until_parked();
+        loaded.read_with(cx, |panel, _cx| {
+            assert!(panel.new_thread_menu_handle.is_deployed());
+        });
+        assert!(cx.debug_bounds("MENU_ITEM-Terminal").is_some());
         assert_eq!(
             fake.attach_history().len(),
             1,
