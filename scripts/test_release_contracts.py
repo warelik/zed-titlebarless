@@ -245,6 +245,7 @@ class ReleaseReservationTests(unittest.TestCase):
             self.assertEqual(self.reserve(existing), 1234)
         self.assertEqual(api.call_args.kwargs["method"], "PATCH")
         self.assertIn(self.config, api.call_args.kwargs["data"]["body"])
+        self.assertEqual(api.call_args.kwargs["data"]["tag_name"], self.tag)
         ensure_forward.assert_called_once_with(
             self.repository, self.version, self.upstream, release_id=1234
         )
@@ -600,12 +601,13 @@ class PublishedReleaseTests(unittest.TestCase):
                 + json.dumps(marker_identity, sort_keys=True)
                 + " -->"
             )
-            published_body = next(
-                data["body"]
+            published_data = next(
+                data
                 for _path, method, data, _token in api_calls
                 if method == "PATCH" and data.get("draft") is False
             )
-            self.assertEqual(published_body.count(marker), 1)
+            self.assertEqual(published_data["body"].count(marker), 1)
+            self.assertEqual(published_data["tag_name"], tag)
 
     def test_corrupt_local_asset_cannot_publish(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -689,11 +691,16 @@ class PublishedReleaseTests(unittest.TestCase):
             release_path = (
                 f"repos/{identity['repository']}/releases/{identity['release_id']}"
             )
+            api_calls = []
 
             def api(path, *, method="GET", data=None, token=None):
+                api_calls.append((path, method, data))
                 if path == release_path:
                     if method == "PATCH":
                         record.update(data)
+                        # A release PATCH that omits tag_name drops the native tag binding.
+                        if "tag_name" not in data:
+                            record["tag_name"] = "untagged-native"
                     return record
                 if path == f"repos/{identity['repository']}/commits/downstream":
                     return {"sha": identity["config_sha"]}
@@ -756,6 +763,13 @@ class PublishedReleaseTests(unittest.TestCase):
             )
             self.assertEqual(record["assets"], list(assets.values()))
             self.assertEqual(record["body"].count(marker), 1)
+            self.assertTrue(
+                all(
+                    data.get("tag_name") == tag
+                    for _path, method, data in api_calls
+                    if method == "PATCH"
+                )
+            )
 
             with (
                 patch.object(release, "pages", return_value=[record]),
@@ -775,6 +789,12 @@ class PublishedReleaseTests(unittest.TestCase):
                     identity["release_id"],
                 )
             self.assertEqual(record["body"], marker)
+            self.assertEqual(record["tag_name"], tag)
+            self.assertEqual(api_calls[-1], (
+                release_path,
+                "PATCH",
+                {"body": marker, "tag_name": tag},
+            ))
             forward.assert_called_once_with(
                 identity["repository"],
                 identity["version"],
@@ -1290,72 +1310,90 @@ class PublicationBoundaryTests(unittest.TestCase):
         with patch.object(release, "api") as api:
             with self.assertRaisesRegex(ValueError, "changed review"):
                 release.publish_checked_draft("owner/fork", 42, "notes",
-                    lambda published: (_ for _ in ()).throw(ValueError("changed review")))
+                    lambda published: (_ for _ in ()).throw(ValueError("changed review")),
+                    tag="build-tag")
         api.assert_not_called()
 
     def test_postpublication_invalidation_withdraws_the_candidate(self):
         calls = []
         phases = []
+        tag = "build-tag"
         def api(path, *, method="GET", data=None):
             calls.append((path, method, data))
-            return {"id": 42, "draft": True}
+            return {"id": 42, "draft": True, "tag_name": tag}
         def validate(published):
             phases.append(published)
             if published:
                 raise ValueError("branch advanced during publication")
         with patch.object(release, "api", side_effect=api):
             with self.assertRaisesRegex(ValueError, "branch advanced"):
-                release.publish_checked_draft("owner/fork", 42, "notes", validate)
+                release.publish_checked_draft("owner/fork", 42, "notes", validate, tag=tag)
         self.assertEqual(phases, [False, True])
         self.assertEqual([data["draft"] for _, method, data in calls if method == "PATCH"],
                          [False, True])
+        self.assertEqual([data.get("tag_name") for _, method, data in calls if method == "PATCH"],
+                         [tag, tag])
         self.assertTrue(all(path.endswith("/releases/42") for path, _, _ in calls))
 
     def test_successful_publication_passes_both_boundary_checks(self):
         validate = MagicMock()
+        tag = "build-tag"
         with patch.object(release, "api") as api:
-            release.publish_checked_draft("owner/fork", 42, "notes", validate)
+            release.publish_checked_draft("owner/fork", 42, "notes", validate, tag=tag)
         self.assertEqual([call.args for call in validate.call_args_list], [(False,), (True,)])
         self.assertEqual(api.call_count, 1)
         self.assertFalse(api.call_args.kwargs["data"]["draft"])
+        self.assertEqual(api.call_args.kwargs["data"]["tag_name"], tag)
 
     def test_ambiguous_publish_error_also_withdraws_the_candidate(self):
         calls = []
+        tag = "build-tag"
         def api(path, *, method="GET", data=None):
             calls.append((method, data))
             if method == "PATCH" and data["draft"] is False:
                 raise RuntimeError("response lost")
-            return {"id": 42, "draft": True}
+            return {"id": 42, "draft": True, "tag_name": tag}
         with patch.object(release, "api", side_effect=api):
             with self.assertRaisesRegex(RuntimeError, "response lost"):
-                release.publish_checked_draft("owner/fork", 42, "notes", lambda published: None)
+                release.publish_checked_draft("owner/fork", 42, "notes",
+                                              lambda published: None, tag=tag)
         self.assertEqual([data["draft"] for method, data in calls if method == "PATCH"],
                          [False, True])
 
 
     def test_withdrawal_reads_back_an_ambiguous_patch_before_retrying(self):
         calls = []
+        tag = "build-tag"
         def api(path, *, method="GET", data=None):
             calls.append(method)
             if method == "PATCH":
                 raise RuntimeError("response lost after server accepted withdrawal")
-            return {"id": 42, "draft": True}
+            return {"id": 42, "draft": True, "tag_name": tag}
         with patch.object(release, "api", side_effect=api):
-            release.withdraw_candidate_release("owner/fork", 42)
+            release.withdraw_candidate_release("owner/fork", 42, tag=tag)
         self.assertEqual(calls, ["PATCH", "GET"])
 
     def test_transient_withdrawal_failure_retries_and_confirms_the_exact_release(self):
+        tag = "build-tag"
         responses = [RuntimeError("temporary failure"), {"id": 42, "draft": False},
-                     {}, {"id": 42, "draft": True}]
+                     {}, {"id": 42, "draft": True, "tag_name": tag}]
         with patch.object(release, "api", side_effect=responses) as api:
-            release.withdraw_candidate_release("owner/fork", 42)
+            release.withdraw_candidate_release("owner/fork", 42, tag=tag)
         self.assertEqual(api.call_count, 4)
 
     def test_unconfirmed_withdrawal_is_bounded_and_reports_publication_risk(self):
         with patch.object(release, "api", return_value={"id": 42, "draft": False}) as api:
             with self.assertRaisesRegex(ValueError, "after 3 bounded attempts.*may still be public"):
-                release.withdraw_candidate_release("owner/fork", 42)
+                release.withdraw_candidate_release("owner/fork", 42, tag="build-tag")
         self.assertEqual(api.call_count, 6)
+
+    def test_withdrawal_refuses_a_draft_with_the_wrong_tag(self):
+        record = {"id": 42, "draft": True, "tag_name": "untagged-native"}
+        with patch.object(release, "api", return_value=record) as api:
+            with self.assertRaisesRegex(ValueError, "after 3 bounded attempts.*may still be public"):
+                release.withdraw_candidate_release("owner/fork", 42, tag="build-tag")
+        methods = [call.kwargs.get("method", "GET") for call in api.call_args_list]
+        self.assertEqual(methods, ["PATCH", "GET"] * 3)
 
 class RustRegressionRunnerTests(unittest.TestCase):
     def assert_isolated(self, env):

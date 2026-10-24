@@ -3892,7 +3892,7 @@ def reserve_release(repo, tag, sha, upstream, patchset, version, config, pr=None
         if any(previous.get(key) != value for key, value in identity.items() if key != "config_sha"):
             raise ValueError("Draft release source identity changed")
         release = api(f"repos/{repo}/releases/{existing['id']}", method="PATCH",
-                      data={"body": marker})
+                      data={"body": marker, "tag_name": tag})
     else:
         release = api(f"repos/{repo}/releases", method="POST", data={
             "tag_name": tag, "target_commitish": sha, "draft": True, "prerelease": False,
@@ -4734,18 +4734,19 @@ def ensure_forward_release(repo, version, upstream, *, release_id=None):
             or (current_version == old_version and upstream != previous_upstream)):
         raise ValueError("Refusing an older stable version or a retagged same-version source")
 
-def withdraw_candidate_release(repo, release_id):
+def withdraw_candidate_release(repo, release_id, *, tag):
     last_error = "candidate remains published"
     for _ in range(3):
         try:
             api(f"repos/{repo}/releases/{release_id}", method="PATCH",
-                data={"draft": True, "make_latest": "false"})
+                data={"draft": True, "make_latest": "false", "tag_name": tag})
         except Exception as error:
             last_error = str(error)
         # A failed PATCH response is ambiguous; read back even after failure.
         try:
             current = api(f"repos/{repo}/releases/{release_id}")
-            if current.get("id") == release_id and current.get("draft") is True:
+            if (current.get("id") == release_id and current.get("draft") is True
+                    and current.get("tag_name") == tag):
                 return
             last_error = "candidate withdrawal was not confirmed by native metadata"
         except Exception as error:
@@ -4757,18 +4758,19 @@ def withdraw_candidate_release(repo, release_id):
         f"explicit maintenance escalation. Last error: {last_error}")
 
 
-def publish_checked_draft(repo, release_id, notes, validate):
+def publish_checked_draft(repo, release_id, notes, validate, *, tag):
     # GitHub has no transaction spanning release publication and PR/ref state.
     # Check at the boundary, then compensate any failed post-publication check.
     validate(False)
     try:
         api(f"repos/{repo}/releases/{release_id}", method="PATCH",
-            data={"body": notes, "draft": False, "make_latest": "true"})
+            data={"body": notes, "draft": False, "make_latest": "true",
+                  "tag_name": tag})
         validate(True)
     except Exception:
         # Also withdraw after an ambiguous PATCH error: the server may have
         # applied the request even when its response did not reach the runner.
-        withdraw_candidate_release(repo, release_id)
+        withdraw_candidate_release(repo, release_id, tag=tag)
         if os.environ.get("MAINTENANCE_CANDIDATE"):
             restore_publication_baseline(repo, release_id)
         raise
@@ -4904,7 +4906,8 @@ def publish(directory):
         if shared and published:
             advance_published_baseline(repo, identity["release_id"])
 
-    publish_checked_draft(repo, identity["release_id"], notes, validate_boundary)
+    publish_checked_draft(repo, identity["release_id"], notes, validate_boundary,
+                          tag=tag)
     minor = False  # Both review scopes were checked at the publication boundary.
     close_published_reviews(repo, review_sha, upstream,
                             f"review/{review_sha}" if shared else f"review/{upstream}-{patchset}",

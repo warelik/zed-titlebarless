@@ -159,7 +159,7 @@ class NativeBaselinePublicationTests(unittest.TestCase):
                             draft = data["draft"]
                             events.append(("release", draft))
                             return {}
-                        return {"id": 9, "draft": draft}
+                        return {"id": 9, "draft": draft, "tag_name": "verified-tag"}
                     self.assertEqual(route, endpoint)
                     self.assertEqual(token, "owner-token")
                     if method == "PATCH":
@@ -188,7 +188,8 @@ class NativeBaselinePublicationTests(unittest.TestCase):
                       patch.object(maintenance, "load", return_value=Mock()),
                       patch.object(release, "api", side_effect=native),
                       self.assertRaisesRegex(RuntimeError, "lost checkpoint response")):
-                    release.publish_checked_draft(repo, 9, "notes", validate)
+                    release.publish_checked_draft(repo, 9, "notes", validate,
+                                                  tag="verified-tag")
                 self.assertTrue(draft)
                 self.assertEqual(current["value"], previous["value"])
                 self.assertEqual(events[:2], [("release", False), ("release", True)])
