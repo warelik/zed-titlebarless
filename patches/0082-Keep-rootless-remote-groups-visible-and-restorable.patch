@@ -1,0 +1,95 @@
+From c0276391a54bd830d563625ec7852539569607da Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 04:56:50 +0000
+Subject: [PATCH] Keep rootless remote groups visible and restorable
+
+---
+ crates/sidebar/src/sidebar.rs       |  2 +-
+ crates/sidebar/src/sidebar_tests.rs |  6 +++++
+ crates/workspace/src/workspace.rs   | 35 ++++++++++++++++++++++++++++-
+ 3 files changed, 41 insertions(+), 2 deletions(-)
+
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index 67d61f75ff..a60264d506 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -1664,7 +1664,7 @@ impl Sidebar {
+                     .has_notification
+                     .then_some(terminal.metadata.terminal_id)
+             }));
+-            if group_key.path_list().paths().is_empty() {
++            if group_key.is_empty() {
+                 continue;
+             }
+ 
+diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
+index 46c77266cf..193a88f40e 100644
+--- a/crates/sidebar/src/sidebar_tests.rs
++++ b/crates/sidebar/src/sidebar_tests.rs
+@@ -17962,6 +17962,12 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
+             && mw.workspaces().any(|workspace| workspace == &remote_workspace)
+     }));
+     multi_workspace.read_with(cx, |mw, cx| mw.assert_project_group_key_integrity(cx).unwrap());
++    let remote_key = remote_workspace.read_with(cx, |workspace, cx| workspace.project_group_key(cx));
++    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
++    cx.run_until_parked();
++    assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.entries.iter().any(|entry| {
++        matches!(entry, ListEntry::ProjectHeader { key, .. } if key == &remote_key)
++    })));
+ }
+ 
+ #[gpui::test]
+diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
+index cb871b5c4f..426ed3676f 100644
+--- a/crates/workspace/src/workspace.rs
++++ b/crates/workspace/src/workspace.rs
+@@ -10543,7 +10543,7 @@ pub async fn apply_restored_multiworkspace_state(
+         let mut resolved_groups: Vec<SerializedProjectGroupState> = Vec::new();
+         for serialized in project_groups.iter().cloned() {
+             let SerializedProjectGroupState { key, expanded } = serialized.into_restored_state();
+-            if key.path_list().paths().is_empty() {
++            if key.is_empty() {
+                 continue;
+             }
+             let mut resolved_paths = Vec::new();
+@@ -12687,6 +12687,39 @@ mod tests {
+     use util::path;
+     use util::rel_path::rel_path;
+ 
++    #[gpui::test]
++    async fn test_restore_preserves_rootless_remote_project_groups(cx: &mut TestAppContext) {
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs.clone(), [], cx).await;
++        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
++        let remote_key = |host: &str| ProjectGroupKey::new(
++            Some(remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
++                host: host.into(), ..Default::default()
++            })),
++            PathList::default(),
++        );
++        let first = remote_key("first-host");
++        let second = remote_key("second-host");
++        let state = MultiWorkspaceState {
++            project_groups: vec![
++                SerializedProjectGroup::from_group(&first, false),
++                SerializedProjectGroup::from_group(&ProjectGroupKey::default(), true),
++                SerializedProjectGroup::from_group(&second, true),
++                SerializedProjectGroup::from_group(&first, true),
++            ],
++            ..MultiWorkspaceState::default()
++        };
++        apply_restored_multiworkspace_state(window, &state, fs, &mut cx.to_async()).await;
++        window.read_with(cx, |multi_workspace, cx| {
++            let groups = multi_workspace.project_groups(cx);
++            assert_eq!(groups.iter().map(|group| &group.key).collect::<Vec<_>>(),
++                       vec![&first, &second]);
++            assert!(!groups[0].expanded);
++            assert!(groups[1].expanded);
++        }).unwrap();
++    }
++
+     #[test]
+     fn test_render_window_title_format_omits_empty_segments() {
+         let context = WindowTitleContext {

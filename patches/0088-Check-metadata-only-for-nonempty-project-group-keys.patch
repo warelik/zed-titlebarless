@@ -1,0 +1,47 @@
+From f2112adb1f701b0b6be28fa993083cd8774c918d Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 12:30:00 +0000
+Subject: [PATCH] Check project metadata only for nonempty project-group keys
+
+---
+ crates/sidebar/src/sidebar_tests.rs     | 7 +++++++
+ crates/workspace/src/multi_workspace.rs | 5 +++++
+ 2 files changed, 12 insertions(+)
+
+diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
+index cff74beabb..06da740472 100644
+--- a/crates/sidebar/src/sidebar_tests.rs
++++ b/crates/sidebar/src/sidebar_tests.rs
+@@ -17993,6 +17993,13 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
+     }));
+     multi_workspace.read_with(cx, |mw, cx| mw.assert_project_group_key_integrity(cx).unwrap());
+     let remote_key = remote_workspace.read_with(cx, |workspace, cx| workspace.project_group_key(cx));
++    assert!(!remote_key.is_empty(), "rootless remote workspaces keep their host identity");
++    multi_workspace.read_with(cx, |mw, cx| {
++        assert!(mw.project_group_keys().contains(&remote_key),
++            "the retained remote workspace still requires its project-group metadata");
++        assert!(mw.workspace().read(cx).project_group_key(cx).is_empty(),
++            "the local fixture has no project group");
++    });
+     sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+     cx.run_until_parked();
+     assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.entries.iter().any(|entry| {
+diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
+index 759d835406..f25dd82247 100644
+--- a/crates/workspace/src/multi_workspace.rs
++++ b/crates/workspace/src/multi_workspace.rs
+@@ -1725,6 +1725,11 @@ impl MultiWorkspace {
+             );
+ 
+             let live_key = workspace.read(cx).project_group_key(cx);
++            // pin may retain a rootless local workspace, while
++            // ensure_project_group_state deliberately omits empty keys.
++            if live_key.is_empty() {
++                continue;
++            }
+             anyhow::ensure!(
+                 self.project_groups
+                     .iter()
+-- 
+2.43.0

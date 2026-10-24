@@ -32,6 +32,86 @@ def request(head=SEED, attempt=1, age=0):
 
 
 class RepairBoundaryTests(unittest.TestCase):
+    def test_application_repair_can_register_only_its_derived_regressions(self):
+        path = "patches/0009-fix.patch"
+        manifest_path = "patches/source.json"
+        before = {"schema": 1, "baseline_tag": "v1.24.2",
+                  "test_cases": [["workspace", "test_historical"]],
+                  "regression_cases": [["workspace", "test_preserved"]]}
+        valid = {**before, "regression_cases": [["workspace", "test_new"], ["workspace", "test_preserved"]]}
+        patch_text = ("diff --git a/crates/workspace/src/tests.rs b/crates/workspace/src/tests.rs\n"
+                      "+++ b/crates/workspace/src/tests.rs\n+#[gpui::test]\n+async fn test_new() {}\n")
+        mutations = [valid, {**valid, "test_cases": []}, {**valid, "baseline_tag": "v0.0.0"},
+                     before, {**valid, "regression_cases": valid["regression_cases"] + [["workspace", "test_unrelated"]]}]
+        for index, after in enumerate(mutations):
+            with self.subTest(case=index):
+                def run(*args, **kwargs):
+                    if args[:2] == ("git", "rev-parse"):
+                        return CONFIG
+                    if args[:2] == ("git", "diff"):
+                        return path + "\n" + manifest_path
+                    if args[:2] == ("git", "ls-tree"):
+                        return "100644 blob " + HEAD + "\t" + args[-1]
+                    if args[:2] == ("git", "show"):
+                        if args[2] == f"{CONFIG}:{manifest_path}":
+                            return json.dumps(before)
+                        if args[2] == f"{HEAD}:{manifest_path}":
+                            return json.dumps(after)
+                        if args[2] == f"{HEAD}:{path}":
+                            return patch_text
+                        self.fail("Unexpected source read")
+                    return ""
+                with patch.object(release, "run", side_effect=run):
+                    if index == 0:
+                        self.assertEqual(release.repair_changes(STATE), ([path, manifest_path], False))
+                    else:
+                        with self.assertRaises(ValueError):
+                            release.repair_changes(STATE)
+
+    def test_shared_patch_registration_precedes_review_for_direct_and_repair_candidates(self):
+        for repaired in (False, True):
+            for registered in (False, True):
+                with self.subTest(repaired=repaired, registered=registered), \
+                        tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    patch_path = root / "new.patch"
+                    patch_path.write_text(
+                        "diff --git a/crates/workspace/src/tests.rs b/crates/workspace/src/tests.rs\n"
+                        "+++ b/crates/workspace/src/tests.rs\n"
+                        "+#[gpui::test]\n+async fn test_new_workspace_case() {}\n")
+                    state = {**STATE, "waiting": False, "policy": False,
+                             "patches": root} if repaired else None
+                    manifest = {"schema": 1, "test_cases": [["workspace", "test_existing_workspace_case"]],
+                                "regression_cases": [["workspace", "test_new_workspace_case"]]
+                                if registered else []}
+                    with (patch.dict(os.environ, ENV, clear=True),
+                          patch.object(release, "api", return_value={"sha": CONFIG}),
+                          patch.object(release, "mirror_main"),
+                          patch.object(release, "proposal", return_value=state),
+                          patch.object(release, "patch_identity", return_value=([patch_path], "e" * 64)),
+                          patch.object(release, "active_snapshot", return_value=UPSTREAM),
+                          patch.object(release, "output"),
+                          patch.object(release, "policy_snapshot", return_value={}),
+                          patch.object(release, "validate_paths", side_effect=RuntimeError("registration accepted")) as next_stage,
+                          patch.object(release, "run", side_effect=lambda *args, **kwargs:
+                                       json.dumps(manifest) if args[:2] == ("git", "show")
+                                       else HEAD if args == ("git", "rev-parse", "HEAD") else "") as run,
+                          patch.object(release, "reserve_release") as reserve):
+                        if registered:
+                            with self.assertRaisesRegex(RuntimeError, "registration accepted"):
+                                release.prepare(root / "app", shared=True)
+                            next_stage.assert_called_once()
+                        else:
+                            with self.assertRaisesRegex(ValueError, "workspace::test_new_workspace_case"):
+                                release.prepare(root / "app", shared=True)
+                            next_stage.assert_not_called()
+                        expected_source = HEAD if repaired else CONFIG
+                        manifest_reads = [call for call in run.call_args_list
+                                          if call.args == ("git", "show", f"{expected_source}:patches/source.json")]
+                        self.assertEqual(len(manifest_reads), 1)
+                        self.assertEqual(manifest_reads[0].kwargs, {"cwd": release.ROOT})
+                        reserve.assert_not_called()
+
     def test_deferred_proposal_preserves_recovery_and_bounded_repair_paths(self):
         # An unresolved repair must not fall back to building the original tree.
         # Expiration remains observable even if the native task never responds.
@@ -167,7 +247,7 @@ class RepairBoundaryTests(unittest.TestCase):
               patch.object(release, "cleanup_closed_pull_refs") as cleanup):
             release.close_recovered_repair(REPO, CONFIG, state=STATE)
         self.assertEqual(api.call_args.kwargs, {"method": "PATCH", "data": {"state": "closed"}})
-        cleanup.assert_called_once_with(REPO, 2, HEAD)
+        cleanup.assert_called_once_with(REPO, 2, HEAD, shared=False)
 
     def test_late_lookup_closes_the_captured_unchanged_blocking_repair(self):
         with (patch.object(release, "repair_pull", return_value=STATE),
@@ -176,7 +256,7 @@ class RepairBoundaryTests(unittest.TestCase):
               patch.object(release, "cleanup_closed_pull_refs") as cleanup):
             release.close_recovered_repair(REPO, CONFIG, expected_head=HEAD)
         self.assertEqual(api.call_args.kwargs, {"method": "PATCH", "data": {"state": "closed"}})
-        cleanup.assert_called_once_with(REPO, 2, HEAD)
+        cleanup.assert_called_once_with(REPO, 2, HEAD, shared=False)
 
     def test_late_lookup_does_not_close_a_repair_advanced_after_preparation(self):
         with (patch.object(release, "repair_pull", return_value={**STATE, "head": SEED}),
@@ -563,7 +643,7 @@ class NativeTaskTests(unittest.TestCase):
         self.assertIn("Failed job: Regression", evidence)
         self.assertIn("Actual assertion failed", evidence)
         self.assertIn("open-sse/utils/example.js:3", evidence)
-        self.assertIn(f"Exact review: https://github.com/{REPO}/pull/1 at {HEAD}", evidence)
+        self.assertIn(f"Complete project review: https://github.com/{REPO}/pull/1 at {HEAD}", evidence)
         self.assertIn("[P1] Formal exact-SHA finding", evidence)
         self.assertIn("[P2] Restore custom call type", evidence)
         self.assertIn("[P2] Native issue finding", evidence)
@@ -1352,7 +1432,8 @@ class AdoptionTests(unittest.TestCase):
 
         with (tempfile.TemporaryDirectory() as directory,
               patch.dict(os.environ, {"GH_TOKEN": "fake", "GITHUB_TOKEN": "fake",
-                  "CODEX_REQUEST_TOKEN": "fake", "NINEROUTER_KEY": "fake", "GITHUB_ENV": "/not-allowed"}),
+                  "CODEX_REQUEST_TOKEN": "fake", "NINEROUTER_KEY": "fake", "GITHUB_ENV": "/not-allowed",
+                  "FORK_MAINTENANCE_ROOT": ""}),
               patch.object(release.subprocess, "run", side_effect=execute),
               patch.object(release, "urlopen") as fetch,
               self.assertRaisesRegex(ValueError, "actionlint archive integrity")):
@@ -1375,6 +1456,7 @@ class AdoptionTests(unittest.TestCase):
                 raise subprocess.TimeoutExpired(args, 180)
             return SimpleNamespace(returncode=0)
         with (tempfile.TemporaryDirectory() as directory,
+              patch.dict(os.environ, {"FORK_MAINTENANCE_ROOT": ""}),
               patch.object(release.subprocess, "run", side_effect=execute),
               patch.object(release, "urlopen", side_effect=AssertionError("Failed policy cannot reach lint")),
               self.assertRaises(subprocess.TimeoutExpired)):
@@ -1390,6 +1472,7 @@ class AdoptionTests(unittest.TestCase):
                 raise subprocess.TimeoutExpired(args, 180)
             return SimpleNamespace(returncode=1, args=args, stdout="", stderr="daemon unavailable")
         with (tempfile.TemporaryDirectory() as directory,
+              patch.dict(os.environ, {"FORK_MAINTENANCE_ROOT": ""}),
               patch.object(release.subprocess, "run", side_effect=execute),
               patch.object(release, "urlopen", side_effect=AssertionError("Cleanup failure blocks lint")),
               self.assertRaises(subprocess.CalledProcessError)):

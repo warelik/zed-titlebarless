@@ -1,0 +1,341 @@
+From a49b580754013add50c9a4377686775c637f6d6e Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 02:21:08 +0000
+Subject: [PATCH] Check saved terminal routes before restoring the agent panel
+
+---
+ crates/agent_ui/src/agent_panel.rs            | 176 ++++++++++++++----
+ .../src/terminal_thread_metadata_store.rs     |  68 +++++++
+ 2 files changed, 212 insertions(+), 32 deletions(-)
+
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index f17ad2d061..07d8623646 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -1378,12 +1378,15 @@ impl AgentPanel {
+                 })
+                 .await;
+ 
+-            let has_open_project = workspace
++            let restoration_project = workspace
+                 .read_with(cx, |workspace, cx| {
+-                    !workspace.root_paths(cx).is_empty()
+-                        || workspace.project().read(cx).is_remote()
++                    (!workspace.root_paths(cx).is_empty()
++                        || workspace.project().read(cx).is_remote())
++                    .then(|| workspace.project().clone())
+                 })
+-                .unwrap_or(false);
++                .ok()
++                .flatten();
++            let has_open_project = restoration_project.is_some();
+             let terminal_id_to_restore = if has_open_project {
+                 serialized_panel
+                     .as_ref()
+@@ -1414,10 +1417,17 @@ impl AgentPanel {
+                 reload_task.await;
+             }
+ 
+-            let terminal_to_restore = if let Some(terminal_id) = terminal_id_to_restore {
++            let terminal_to_restore = if let Some((terminal_id, project)) =
++                terminal_id_to_restore.zip(restoration_project.as_ref())
++            {
+                 cx.update(|_window, cx| {
+-                    TerminalThreadMetadataStore::try_global(cx)
+-                        .and_then(|store| store.read(cx).entry(terminal_id).cloned())
++                    let remote_connection = project.read(cx).remote_connection_options(cx);
++                    TerminalThreadMetadataStore::try_global(cx).and_then(|store| {
++                        store
++                            .read(cx)
++                            .entry_for_remote_connection(terminal_id, remote_connection.as_ref())
++                            .cloned()
++                    })
+                 })
+                 .ok()
+                 .flatten()
+@@ -8652,6 +8662,101 @@ mod tests {
+         });
+     }
+ 
++    #[gpui::test]
++    async fn test_panel_load_preserves_terminal_from_another_remote_connection(
++        cx: &mut TestAppContext,
++    ) {
++        init_test(cx);
++        cx.update(|cx| {
++            agent::ThreadStore::init_global(cx);
++            TerminalThreadMetadataStore::init_global(cx);
++            language_model::LanguageModelRegistry::test(cx);
++        });
++        let fs = FakeFs::new(cx.executor());
++        fs.insert_tree("/project", json!({ "file.txt": "" })).await;
++        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
++        let project = Project::test(fs, [Path::new("/project")], cx).await;
++        let terminal_id = TerminalId::new();
++        let session_name = terminal_id.session_name();
++        let fake = project.update(cx, |project, _| {
++            project.enable_fake_shpool(&[session_name.as_str()])
++        });
++        let remote_connection = remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
++            host: "same-host".into(),
++            args: Some(vec!["-F".into(), "work.conf".into()]),
++            ..Default::default()
++        });
++        cx.update(|cx| {
++            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
++                store.save(
++                    TerminalThreadMetadata {
++                        terminal_id,
++                        title: "Saved remote terminal".into(),
++                        custom_title: None,
++                        created_at: Utc::now(),
++                        worktree_paths: WorktreePaths::default(),
++                        remote_connection: Some(remote_connection.clone()),
++                        working_directory: None,
++                        shpool_context: Some(project::terminals::ShpoolSessionContext::for_test()),
++                    },
++                    cx,
++                );
++            });
++        });
++        let multi_workspace =
++            cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
++        let workspace = multi_workspace
++            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
++            .unwrap();
++        workspace.update(cx, |workspace, _| workspace.set_random_database_id());
++        let workspace_id = workspace
++            .read_with(cx, |workspace, _| workspace.database_id())
++            .unwrap();
++        let kvp = cx.update(|cx| KeyValueStore::global(cx));
++        cx.background_spawn(async move {
++            save_serialized_panel(
++                workspace_id,
++                SerializedAgentPanel {
++                    last_active_terminal_id: Some(terminal_id.to_key_string()),
++                    ..SerializedAgentPanel::default()
++                },
++                kvp,
++            )
++            .await
++            .unwrap();
++        })
++        .await;
++
++        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
++        let async_cx = cx.update(|window, cx| window.to_async(cx));
++        let loaded = AgentPanel::load(workspace.downgrade(), async_cx)
++            .await
++            .expect("panel load should succeed without restoring the foreign terminal");
++        for _ in 0..8 {
++            cx.run_until_parked();
++        }
++        loaded.read_with(cx, |panel, _| {
++            assert!(!panel.has_terminal(terminal_id));
++            assert_ne!(panel.active_terminal_id(), Some(terminal_id));
++        });
++        assert!(fake.has_session(&session_name));
++        assert!(!fake.attach_history().contains(&session_name));
++        assert!(!fake.kill_history().contains(&session_name));
++        cx.update(|_, cx| {
++            let store = TerminalThreadMetadataStore::global(cx);
++            assert_eq!(
++                store
++                    .read(cx)
++                    .entry(terminal_id)
++                    .unwrap()
++                    .remote_connection
++                    .as_ref(),
++                Some(&remote_connection),
++                "rejecting restoration must preserve the saved session and its destination"
++            );
++        });
++    }
++
+     #[gpui::test]
+     async fn test_terminal_restore_working_directory_does_not_read_leased_workspace(
+         cx: &mut TestAppContext,
+@@ -16328,7 +16433,9 @@ mod tests {
+             custom_title: None,
+             created_at: Utc::now(),
+             worktree_paths: WorktreePaths::default(),
+-            remote_connection: None,
++            remote_connection: project.read_with(cx, |project, cx| {
++                project.remote_connection_options(cx)
++            }),
+             working_directory: None,
+         };
+         cx.update(|cx| {
+@@ -16398,7 +16505,7 @@ mod tests {
+             |_, _, _| async { Ok(client::proto::Ack {}) },
+         );
+         drop(old_connection_guard);
+-        let old_remote_client = RemoteClient::connect_mock(old_options, cx).await;
++        let old_remote_client = RemoteClient::connect_mock(old_options.clone(), cx).await;
+         let old_project = cx.update(|cx| {
+             Project::remote(
+                 old_remote_client.clone(),
+@@ -16412,33 +16519,11 @@ mod tests {
+             )
+         });
+ 
+-        let (new_options, new_server_session, new_connection_guard) =
+-            RemoteClient::fake_server(cx, server_cx);
+-        let new_ping_handler = server_cx.new(|_| ());
+-        new_server_session.add_request_handler::<client::proto::Ping, _, _, _>(
+-            new_ping_handler.downgrade(),
+-            |_, _, _| async { Ok(client::proto::Ack {}) },
+-        );
+-        drop(new_connection_guard);
+-        let new_remote_client = RemoteClient::connect_mock(new_options, cx).await;
+-        let new_project = cx.update(|cx| {
+-            Project::remote(
+-                new_remote_client,
+-                params.client.clone(),
+-                params.node_runtime.clone(),
+-                params.user_store.clone(),
+-                params.languages.clone(),
+-                params.fs.clone(),
+-                false,
+-                cx,
+-            )
+-        });
+ 
+         let terminal_id = TerminalId::new();
+         let session_name = terminal_id.session_name();
+         let fake = old_project.update(cx, |project, _| project.enable_fake_shpool(&[]));
+         fake.add_session(session_name.clone());
+-        new_project.update(cx, |project, _| project.set_fake_shpool(fake.clone()));
+         let multi_workspace = cx.add_window({
+             let params = params.clone();
+             let project = old_project.clone();
+@@ -16470,7 +16555,9 @@ mod tests {
+             custom_title: None,
+             created_at: Utc::now(),
+             worktree_paths: WorktreePaths::default(),
+-            remote_connection: None,
++            remote_connection: old_project.read_with(cx, |project, cx| {
++                project.remote_connection_options(cx)
++            }),
+             working_directory: None,
+         };
+         cx.update(|cx| {
+@@ -16507,6 +16594,31 @@ mod tests {
+         });
+         visual_cx.run_until_parked();
+ 
++        let (new_server_session, new_connection_guard) =
++            RemoteClient::fake_server_with_opts(&old_options, cx, server_cx);
++        let new_ping_handler = server_cx.new(|_| ());
++        new_server_session.add_request_handler::<client::proto::Ping, _, _, _>(
++            new_ping_handler.downgrade(),
++            |_, _, _| async { Ok(client::proto::Ack {}) },
++        );
++        drop(new_connection_guard);
++        let new_remote_client = RemoteClient::connect_mock(old_options, cx).await;
++        let new_project = cx.update(|cx| {
++            Project::remote(
++                new_remote_client,
++                params.client.clone(),
++                params.node_runtime.clone(),
++                params.user_store.clone(),
++                params.languages.clone(),
++                params.fs.clone(),
++                false,
++                cx,
++            )
++        });
++
++        new_project.update(cx, |project, _| project.set_fake_shpool(fake.clone()));
++        let visual_cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
++
+         let replacement_workspace = multi_workspace
+             .update(visual_cx, |multi_workspace, window, cx| {
+                 let workspace = cx.new(|cx| {
+diff --git a/crates/agent_ui/src/terminal_thread_metadata_store.rs b/crates/agent_ui/src/terminal_thread_metadata_store.rs
+index 1defb46d44..d1afc5107c 100644
+--- a/crates/agent_ui/src/terminal_thread_metadata_store.rs
++++ b/crates/agent_ui/src/terminal_thread_metadata_store.rs
+@@ -232,6 +232,16 @@ impl TerminalThreadMetadataStore {
+         self.terminals.get(&terminal_id)
+     }
+ 
++    pub(crate) fn entry_for_remote_connection(
++        &self,
++        terminal_id: TerminalId,
++        remote_connection: Option<&RemoteConnectionOptions>,
++    ) -> Option<&TerminalThreadMetadata> {
++        self.entry(terminal_id).filter(|metadata| {
++            same_terminal_remote_connection(metadata.remote_connection.as_ref(), remote_connection)
++        })
++    }
++
+     pub fn entries(&self) -> impl Iterator<Item = &TerminalThreadMetadata> + '_ {
+         self.terminals.values()
+     }
+@@ -1902,6 +1912,64 @@ mod tests {
+         });
+     }
+ 
++    #[gpui::test]
++    async fn test_terminal_id_lookup_requires_matching_ssh_routing_arguments(
++        cx: &mut TestAppContext,
++    ) {
++        init_test(cx);
++        let connection = |configuration: &str| {
++            RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
++                host: "same-host".into(),
++                username: Some("developer".into()),
++                port: Some(22),
++                args: Some(vec!["-F".into(), configuration.into()]),
++                ..Default::default()
++            })
++        };
++        let saved_connection = connection("work.conf");
++        let current_connection = connection("personal.conf");
++        assert!(same_remote_connection_identity(
++            Some(&saved_connection),
++            Some(&current_connection),
++        ));
++
++        let mut saved = metadata("Saved remote terminal", WorktreePaths::default());
++        saved.remote_connection = Some(saved_connection.clone());
++        let saved_id = saved.terminal_id;
++        let local = metadata("Local terminal", WorktreePaths::default());
++        let local_id = local.terminal_id;
++        cx.update(|cx| {
++            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
++                store.save(saved, cx);
++                store.save(local, cx);
++            });
++        });
++        cx.update(|cx| {
++            let store = TerminalThreadMetadataStore::global(cx);
++            let store = store.read(cx);
++            let original = store.entry(saved_id).cloned();
++            assert!(original.is_some());
++            assert_eq!(
++                store.entry_for_remote_connection(saved_id, Some(&saved_connection)),
++                original.as_ref(),
++            );
++            assert!(
++                store
++                    .entry_for_remote_connection(saved_id, Some(&current_connection))
++                    .is_none(),
++                "the same SSH alias with different -F arguments must not restore a saved terminal"
++            );
++            assert!(store.entry_for_remote_connection(saved_id, None).is_none());
++            assert!(store.entry_for_remote_connection(local_id, None).is_some());
++            assert!(
++                store
++                    .entry_for_remote_connection(local_id, Some(&saved_connection))
++                    .is_none()
++            );
++            assert_eq!(store.entry(saved_id), original.as_ref());
++        });
++    }
++
+     #[test]
+     fn test_terminal_remote_identity_normalizes_empty_arguments() {
+         let without = RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {

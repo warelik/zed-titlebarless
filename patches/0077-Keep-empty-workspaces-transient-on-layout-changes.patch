@@ -1,0 +1,103 @@
+From cb28a62f11e54f03b3414341dc831059071bd5bb Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 21:42:25 +0000
+Subject: [PATCH] Keep empty workspaces transient when changing the threads
+ sidebar layout
+
+---
+ crates/workspace/src/multi_workspace.rs       |  9 ++-
+ crates/workspace/src/multi_workspace_tests.rs | 60 +++++++++++++++++++
+ 2 files changed, 68 insertions(+), 1 deletion(-)
+
+diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
+index 5a6c8c99fa..38513f18ce 100644
+--- a/crates/workspace/src/multi_workspace.rs
++++ b/crates/workspace/src/multi_workspace.rs
+@@ -412,7 +412,14 @@ impl MultiWorkspace {
+ 
+                 let in_agent_panel = threads_sidebar_in_agent_panel(cx);
+                 if in_agent_panel != previous_in_agent_panel && multi_workspace_enabled {
+-                    if in_agent_panel {
++                    if in_agent_panel
++                        && !this
++                            .workspace()
++                            .read(cx)
++                            .project_group_key(cx)
++                            .path_list()
++                            .is_empty()
++                    {
+                         this.retain_active_workspace(cx);
+                     }
+                     let sidebar_focus_handle = this
+diff --git a/crates/workspace/src/multi_workspace_tests.rs b/crates/workspace/src/multi_workspace_tests.rs
+index 16013839ea..199ae9ddeb 100644
+--- a/crates/workspace/src/multi_workspace_tests.rs
++++ b/crates/workspace/src/multi_workspace_tests.rs
+@@ -141,6 +141,66 @@ async fn test_initial_agent_panel_retains_nonempty_active_workspace(cx: &mut Tes
+     });
+ }
+ 
++#[gpui::test]
++async fn test_agent_panel_layout_changes_keep_empty_workspace_transient(cx: &mut TestAppContext) {
++    init_test(cx);
++    cx.update(|cx| {
++        let mut settings = AgentSettings::get_global(cx).clone();
++        settings.threads_sidebar.in_agent_panel = false;
++        AgentSettings::override_global(settings, cx);
++    });
++    let fs = FakeFs::new(cx.executor());
++    let project = Project::test(fs, [], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    let workspace = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
++
++    for in_agent_panel in [true, false, true] {
++        cx.update(|_window, cx| {
++            let mut settings = AgentSettings::get_global(cx).clone();
++            settings.threads_sidebar.in_agent_panel = in_agent_panel;
++            AgentSettings::override_global(settings, cx);
++        });
++        cx.run_until_parked();
++        multi_workspace.read_with(cx, |mw, cx| {
++            assert!(mw.multi_workspace_enabled(cx));
++            assert_eq!(mw.workspace(), &workspace);
++            assert_eq!(mw.workspaces().count(), 1);
++            assert!(mw.project_group_keys().is_empty());
++            assert!(!mw.active_workspace_is_retained());
++        });
++    }
++}
++
++#[gpui::test]
++async fn test_agent_panel_layout_changes_retain_nonempty_workspace(cx: &mut TestAppContext) {
++    init_test(cx);
++    cx.update(|cx| {
++        let mut settings = AgentSettings::get_global(cx).clone();
++        settings.threads_sidebar.in_agent_panel = false;
++        AgentSettings::override_global(settings, cx);
++    });
++    let fs = FakeFs::new(cx.executor());
++    fs.insert_tree("/root_a", json!({ "file.txt": "" })).await;
++    let project = Project::test(fs, ["/root_a".as_ref()], cx).await;
++    let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    multi_workspace.read_with(cx, |mw, _cx| assert!(!mw.active_workspace_is_retained()));
++
++    cx.update(|_window, cx| {
++        let mut settings = AgentSettings::get_global(cx).clone();
++        settings.threads_sidebar.in_agent_panel = true;
++        AgentSettings::override_global(settings, cx);
++    });
++    cx.run_until_parked();
++    multi_workspace.read_with(cx, |mw, cx| {
++        assert!(mw.multi_workspace_enabled(cx));
++        assert!(mw.active_workspace_is_retained());
++        assert_eq!(mw.project_group_keys(), vec![key.clone()]);
++    });
++}
++
+ #[gpui::test]
+ async fn test_multi_workspace_collapses_when_agent_is_disabled(cx: &mut TestAppContext) {
+     init_test(cx);

@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OpenAI Codex <noreply@openai.com>
+Date: Tue, 20 Oct 2026 00:00:00 +0000
+Subject: [PATCH] Retain the initial workspace when threads start in the agent panel
+
+Retain the initial nonempty project when the agent panel setting is already enabled at workspace construction. Keep empty workspaces transient, and cover the initial-settings path with a regression.
+---
+ crates/workspace/src/multi_workspace.rs       | 14 +++++++++++++-
+ crates/workspace/src/multi_workspace_tests.rs | 24 ++++++++++++++++++++++++
+ 2 files changed, 37 insertions(+), 1 deletion(-)
+
+diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
+index 172e221e3b1c8f51a1a98128d00d0ae8ed294da0..5a6c8c99fac07bfc2bfe3bcbcf2e4415485443b7 100644
+--- a/crates/workspace/src/multi_workspace.rs
++++ b/crates/workspace/src/multi_workspace.rs
+@@ -436,7 +436,7 @@ impl MultiWorkspace {
+         workspace.update(cx, |workspace, cx| {
+             workspace.set_multi_workspace(weak_self, active_workspace_id.clone(), cx);
+         });
+-        Self {
++        let mut this = Self {
+             window_id: window.window_handle().window_id(),
+             held: vec![HeldWorkspace {
+                 workspace,
+@@ -452,7 +452,19 @@ impl MultiWorkspace {
+             _serialize_task: None,
+             _subscriptions: vec![release_subscription, settings_subscription],
+             previous_focus_handle: None,
++        };
++        if this.multi_workspace_enabled(cx)
++            && threads_sidebar_in_agent_panel(cx)
++            && !this
++                .workspace()
++                .read(cx)
++                .project_group_key(cx)
++                .path_list()
++                .is_empty()
++        {
++            this.retain_active_workspace(cx);
+         }
++        this
+     }
+ 
+     pub fn register_sidebar<T: Sidebar>(&mut self, sidebar: Entity<T>, cx: &mut Context<Self>) {
+diff --git a/crates/workspace/src/multi_workspace_tests.rs b/crates/workspace/src/multi_workspace_tests.rs
+index 218b2e55bb33a63af2ac6c17476fc35c99688e33..16013839ea80e47e9f0ee108494acb0f3461bb15 100644
+--- a/crates/workspace/src/multi_workspace_tests.rs
++++ b/crates/workspace/src/multi_workspace_tests.rs
+@@ -117,6 +117,30 @@ async fn test_sidebar_disabled_when_disable_ai_is_enabled(cx: &mut TestAppContex
+     });
+ }
+ 
++#[gpui::test]
++async fn test_initial_agent_panel_retains_nonempty_active_workspace(cx: &mut TestAppContext) {
++    init_test(cx);
++    cx.update(|cx| {
++        let mut settings = AgentSettings::get_global(cx).clone();
++        settings.threads_sidebar.in_agent_panel = true;
++        AgentSettings::override_global(settings, cx);
++    });
++
++    let fs = FakeFs::new(cx.executor());
++    fs.insert_tree("/root_a", json!({ "file.txt": "" })).await;
++    let project = Project::test(fs, ["/root_a".as_ref()], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++
++    multi_workspace.read_with(cx, |multi_workspace, cx| {
++        assert!(multi_workspace.multi_workspace_enabled(cx));
++        assert!(
++            multi_workspace.active_workspace_is_retained(),
++            "the initial nonempty project must be retained when the threads sidebar starts in the agent panel"
++        );
++    });
++}
++
+ #[gpui::test]
+ async fn test_multi_workspace_collapses_when_agent_is_disabled(cx: &mut TestAppContext) {
+     init_test(cx);

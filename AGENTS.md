@@ -17,6 +17,10 @@ release maintenance.
   merge repair-context files into `downstream`. Do not create release/backup
   branches or a queue of intermediate upstream integrations. Reconstruct sources
   in disposable detached worktrees.
+- Number an appended patch above the largest existing numeric prefix, not from
+  the number of patch files. Before freezing candidate identities, replay the
+  complete filename-sorted series with the workflow Git options and record the
+  resulting commit SHA. Equal trees do not make commit identities interchangeable.
 - Preserve the requested downstream behavior, necessary fixes, compatibility, and
   regression tests. Do not add unsolicited features or develop the fork for its
   own sake.

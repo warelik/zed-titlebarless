@@ -405,6 +405,14 @@
     ],
     [
       "agent_ui",
+      "test_panel_load_preserves_terminal_from_another_remote_connection"
+    ],
+    [
+      "agent_ui",
+      "test_remote_windows_working_directory_uses_project_path_style"
+    ],
+    [
+      "agent_ui",
       "test_ssh_routing_arguments_scope_terminal_project_assignment"
     ],
     [
@@ -414,6 +422,10 @@
     [
       "agent_ui",
       "test_terminal_exit_before_insertion_uses_the_normal_lifecycle"
+    ],
+    [
+      "agent_ui",
+      "test_terminal_id_lookup_requires_matching_ssh_routing_arguments"
     ],
     [
       "agent_ui",
@@ -481,6 +493,14 @@
     ],
     [
       "project",
+      "test_failed_fresh_terminal_does_not_keep_provisional_shpool_context"
+    ],
+    [
+      "project",
+      "test_failed_saved_terminal_keeps_original_shpool_context"
+    ],
+    [
+      "project",
       "test_persistent_terminal_honors_configured_shell_arguments"
     ],
     [
@@ -490,6 +510,18 @@
     [
       "project",
       "test_persistent_terminal_rejects_different_client_for_the_same_socket"
+    ],
+    [
+      "project",
+      "test_project_group_key_distinguishes_rootless_remote_from_empty_local"
+    ],
+    [
+      "project",
+      "test_provisional_context_ownership_survives_overlapping_starts"
+    ],
+    [
+      "project",
+      "test_rootless_remote_group_labels_distinguish_connection_identities"
     ],
     [
       "project",
@@ -522,6 +554,14 @@
     [
       "recent_projects",
       "test_remove_project_group_waits_for_close_consent"
+    ],
+    [
+      "sidebar",
+      "test_agent_panel_retains_rootless_remote_workspace"
+    ],
+    [
+      "sidebar",
+      "test_agent_panel_sidebar_keeps_empty_workspace_transient"
     ],
     [
       "sidebar",
@@ -665,6 +705,14 @@
     ],
     [
       "sidebar",
+      "test_restored_ssh_group_rehydrates_execution_options_before_terminal_matching"
+    ],
+    [
+      "sidebar",
+      "test_rootless_remote_history_is_visible_without_open_project"
+    ],
+    [
+      "sidebar",
       "test_saved_terminal_checks_every_root_and_allows_retry"
     ],
     [
@@ -797,7 +845,19 @@
     ],
     [
       "workspace",
+      "test_agent_panel_layout_changes_keep_empty_workspace_transient"
+    ],
+    [
+      "workspace",
+      "test_agent_panel_layout_changes_retain_nonempty_workspace"
+    ],
+    [
+      "workspace",
       "test_cancel_project_close_preserves_transient_retention"
+    ],
+    [
+      "workspace",
+      "test_initial_agent_panel_retains_nonempty_active_workspace"
     ],
     [
       "workspace",
@@ -806,6 +866,10 @@
     [
       "workspace",
       "test_item_close_guard_rejects_item_dirtied_after_consent"
+    ],
+    [
+      "workspace",
+      "test_project_group_serialization_excludes_connection_secrets"
     ],
     [
       "workspace",
@@ -829,11 +893,23 @@
     ],
     [
       "workspace",
+      "test_restore_preserves_rootless_remote_project_groups"
+    ],
+    [
+      "workspace",
+      "test_restored_remote_groups_keep_live_identity_options"
+    ],
+    [
+      "workspace",
       "test_title_bar_to_status_bar_keeps_title_when_status_bar_hidden"
     ],
     [
       "workspace",
       "test_workspace_close_keeps_edits_made_during_another_consent_prompt"
+    ],
+    [
+      "project",
+      "test_shpool_discovery_uses_requested_root_environment"
     ]
   ]
 }

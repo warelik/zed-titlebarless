@@ -1,0 +1,431 @@
+From 3b242b9d8fb11ac76c7b03f512a2fca9fc1de8ad Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 04:47:22 +0000
+Subject: [PATCH] Retain rootless remote workspaces and protect overlapping
+ context starts
+
+---
+ crates/project/src/project.rs           |  19 ++--
+ crates/project/src/terminals.rs         | 140 ++++++++++++++++++------
+ crates/sidebar/src/sidebar.rs           |   7 +-
+ crates/sidebar/src/sidebar_tests.rs     |  57 ++++++++++
+ crates/workspace/src/multi_workspace.rs |  26 ++---
+ 5 files changed, 184 insertions(+), 65 deletions(-)
+
+diff --git a/crates/project/src/project.rs b/crates/project/src/project.rs
+index 1bde76d7cc..02438a1b0e 100644
+--- a/crates/project/src/project.rs
++++ b/crates/project/src/project.rs
+@@ -1406,10 +1406,7 @@ impl Project {
+ 
+                 buffers_needing_diff: Default::default(),
+                 git_diff_debouncer: DebouncedDelay::new(),
+-                terminals: Terminals {
+-                    local_handles: Vec::new(),
+-                    session_contexts: HashMap::default(),
+-                },
++                terminals: Terminals::default(),
+                 #[cfg(any(test, feature = "test-support"))]
+                 fake_shpool: None,
+                 node: Some(node),
+@@ -1653,10 +1650,7 @@ impl Project {
+                 remote_client: Some(remote.clone()),
+                 buffers_needing_diff: Default::default(),
+                 git_diff_debouncer: DebouncedDelay::new(),
+-                terminals: Terminals {
+-                    local_handles: Vec::new(),
+-                    session_contexts: HashMap::default(),
+-                },
++                terminals: Terminals::default(),
+                 #[cfg(any(test, feature = "test-support"))]
+                 fake_shpool: None,
+                 node: Some(node),
+@@ -1951,10 +1945,7 @@ impl Project {
+                 agent_server_store,
+                 buffers_needing_diff: Default::default(),
+                 git_diff_debouncer: DebouncedDelay::new(),
+-                terminals: Terminals {
+-                    local_handles: Vec::new(),
+-                    session_contexts: HashMap::default(),
+-                },
++                terminals: Terminals::default(),
+                 #[cfg(any(test, feature = "test-support"))]
+                 fake_shpool: None,
+                 node: None,
+@@ -6806,6 +6797,10 @@ impl ProjectGroupKey {
+         &self.paths
+     }
+ 
++    pub fn is_empty(&self) -> bool {
++        self.paths.is_empty() && self.host.is_none()
++    }
++
+     pub fn display_name(
+         &self,
+         path_detail_map: &std::collections::HashMap<PathBuf, usize>,
+diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
+index cb52724d8d..b346d21e75 100644
+--- a/crates/project/src/terminals.rs
++++ b/crates/project/src/terminals.rs
+@@ -25,9 +25,56 @@ use util::{
+ 
+ use crate::{Project, ProjectPath};
+ 
++#[derive(Default)]
+ pub struct Terminals {
+     pub(crate) local_handles: Vec<WeakEntity<terminal::Terminal>>,
+     pub(crate) session_contexts: HashMap<String, ShpoolSessionContext>,
++    provisional_contexts: HashMap<String, Arc<()>>,
++}
++
++impl Terminals {
++    fn reserve_context_start(
++        &mut self,
++        name: &str,
++        context: &ShpoolSessionContext,
++        retain: bool,
++    ) -> Result<Option<Arc<()>>> {
++        anyhow::ensure!(
++            self.session_contexts.get(name).is_none_or(|known| known == context),
++            "persistent session client changed before attachment",
++        );
++        let retained = self.session_contexts.contains_key(name)
++            && !self.provisional_contexts.contains_key(name);
++        self.session_contexts.entry(name.to_string()).or_insert_with(|| context.clone());
++        if retain || retained {
++            self.provisional_contexts.remove(name);
++            Ok(None)
++        } else {
++            Ok(Some(self.provisional_contexts.entry(name.to_string()).or_default().clone()))
++        }
++    }
++
++    fn finish_context_start(
++        &mut self,
++        name: &str,
++        context: &ShpoolSessionContext,
++        reservation: Arc<()>,
++        succeeded: bool,
++    ) {
++        if !self.provisional_contexts.get(name)
++            .is_some_and(|current| Arc::ptr_eq(current, &reservation))
++        {
++            return;
++        }
++        if succeeded {
++            self.provisional_contexts.remove(name);
++        } else if Arc::strong_count(&reservation) == 2 {
++            self.provisional_contexts.remove(name);
++            if self.session_contexts.get(name) == Some(context) {
++                self.session_contexts.remove(name);
++            }
++        }
++    }
+ }
+ 
+ /// The locator of the daemon that actually owns a persistent session.
+@@ -758,6 +805,7 @@ impl Project {
+         mut reserve_context: Option<ShpoolContextReservation>,
+         cx: &mut Context<Self>,
+     ) -> Task<Result<PersistentTerminal>> {
++        let context_was_supplied = context.is_some();
+         let known = self.terminals.session_contexts.get(&session_name).cloned();
+         if context.as_ref().zip(known.as_ref()).is_some_and(|(left, right)| left != right) {
+             return Task::ready(Err(anyhow::anyhow!("persistent session daemon context changed")));
+@@ -834,19 +882,20 @@ impl Project {
+                     cx.update(|cx| reserve(context, cx))?;
+                 }
+             }
+-            let terminal = project
++            let (terminal, reservation) = project
+                 .update(cx, |project, cx| {
+-                    if let Some(context) = &context {
+-                        if project.terminals.session_contexts.get(&session_name)
+-                            .is_some_and(|known| known != context)
+-                        {
+-                            return Task::ready(Err(anyhow::anyhow!(
+-                                "persistent session client changed before attachment"
+-                            )));
++                    let reservation = if let Some(context) = &context {
++                        match project.terminals.reserve_context_start(
++                            &session_name, context,
++                            restoring_existing || context_was_supplied
++                                || session == PersistentSession::Reattached,
++                        ) {
++                            Ok(reservation) => reservation,
++                            Err(error) => return (Task::ready(Err(error)), None),
+                         }
+-                        project.terminals.session_contexts.entry(session_name.clone())
+-                            .or_insert_with(|| context.clone());
+-                    }
++                    } else {
++                        None
++                    };
+                     #[cfg(any(test, feature = "test-support"))]
+                     if let Some(fake) = &project.fake_shpool {
+                         let location = project.terminal_settings_location(cwd.as_deref(), cx);
+@@ -859,7 +908,7 @@ impl Project {
+                                 &settings.shell,
+                             ) {
+                                 Ok(args) => args,
+-                                Err(error) => return Task::ready(Err(error)),
++                                Err(error) => return (Task::ready(Err(error)), reservation),
+                             };
+                             let mut state = fake.state.lock();
+                             state.attach_history.push(command.session_name.clone());
+@@ -881,27 +930,21 @@ impl Project {
+                         );
+                         let terminal = cx.new(|cx| builder.subscribe(cx));
+                         project.terminals.local_handles.push(terminal.downgrade());
+-                        return Task::ready(Ok(terminal));
++                        return (Task::ready(Ok(terminal)), reservation);
+                     }
+ 
+-                    project.create_terminal_shell_internal(cwd, false, command, pty_startup, cx)
+-                })?
+-                .await;
+-            let terminal = match terminal {
+-                Ok(terminal) => terminal,
+-                Err(error) => {
+-                    if !pinned && !restoring_existing {
+-                        project.update(cx, |project, _| {
+-                            if context.as_ref().is_some_and(|context| {
+-                                project.persistent_terminal_context(&session_name) == Some(context)
+-                            }) {
+-                                project.forget_persistent_terminal_context(&session_name);
+-                            }
+-                        })?;
+-                    }
+-                    return Err(error);
+-                }
+-            };
++                    (project.create_terminal_shell_internal(cwd, false, command, pty_startup, cx),
++                     reservation)
++                })?;
++            let result = terminal.await;
++            if let (Some(reservation), Some(context)) = (reservation, context.as_ref()) {
++                project.update(cx, |project, _| {
++                    project.terminals.finish_context_start(
++                        &session_name, context, reservation, result.is_ok(),
++                    );
++                })?;
++            }
++            let terminal = result?;
+             Ok(PersistentTerminal { terminal, session })
+         })
+     }
+@@ -1018,6 +1061,7 @@ impl Project {
+     /// low-level API retains it so repeated kills remain on the same daemon.
+     pub fn forget_persistent_terminal_context(&mut self, session_name: &str) {
+         self.terminals.session_contexts.remove(session_name);
++        self.terminals.provisional_contexts.remove(session_name);
+     }
+ 
+     fn kill_persistent_terminal_session_unbounded(
+@@ -1809,6 +1853,40 @@ mod tests {
+     use gpui::BorrowAppContext;
+     use pretty_assertions::assert_eq;
+ 
++    #[test]
++    fn test_provisional_context_ownership_survives_overlapping_starts() {
++        for (first_succeeds, second_succeeds) in
++            [(true, false), (false, true), (false, false), (true, true)]
++        {
++            let mut terminals = Terminals::default();
++            let context = ShpoolSessionContext::for_test();
++            let first = terminals.reserve_context_start("overlap", &context, false)
++                .unwrap().expect("fresh context must be provisional");
++            let second = terminals.reserve_context_start("overlap", &context, false)
++                .unwrap().expect("overlapping start must share the reservation");
++            assert!(Arc::ptr_eq(&first, &second));
++            terminals.finish_context_start("overlap", &context, first, first_succeeds);
++            terminals.finish_context_start("overlap", &context, second, second_succeeds);
++            assert_eq!(terminals.session_contexts.get("overlap"),
++                (first_succeeds || second_succeeds).then_some(&context));
++            assert!(terminals.provisional_contexts.is_empty());
++        }
++    }
++
++    #[test]
++    fn test_project_group_key_distinguishes_rootless_remote_from_empty_local() {
++        assert!(crate::ProjectGroupKey::default().is_empty());
++        let remote = crate::ProjectGroupKey::new(
++            Some(remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
++                host: "host".into(), ..Default::default()
++            })),
++            crate::PathList::default(),
++        );
++        assert!(remote.path_list().is_empty());
++        assert!(!remote.is_empty());
++    }
++
++
+     fn prepared_cmd_task(command_arg: &str) -> SpawnInTerminal {
+         SpawnInTerminal {
+             command: Some("cmd.exe".to_string()),
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index 909d65875d..67d61f75ff 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -2143,12 +2143,7 @@ impl Sidebar {
+ 
+         if Self::in_agent_panel(cx) {
+             multi_workspace.update(cx, |multi_workspace, cx| {
+-                if !multi_workspace
+-                    .workspace()
+-                    .read(cx)
+-                    .project_group_key(cx)
+-                    .path_list()
+-                    .is_empty()
++                if multi_workspace.active_workspace_has_project(cx)
+                 {
+                     multi_workspace.retain_active_workspace(cx);
+                 }
+diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
+index 7af0390090..46c77266cf 100644
+--- a/crates/sidebar/src/sidebar_tests.rs
++++ b/crates/sidebar/src/sidebar_tests.rs
+@@ -17907,6 +17907,63 @@ fn set_threads_sidebar_in_agent_panel(in_agent_panel: bool, cx: &mut VisualTestC
+     });
+ }
+ 
++#[gpui::test]
++async fn test_agent_panel_retains_rootless_remote_workspace(
++    cx: &mut TestAppContext,
++    server_cx: &mut TestAppContext,
++) {
++    init_test(cx);
++    let params = cx.update(workspace::AppState::test);
++    cx.update(|cx| cx.update_global::<settings::SettingsStore, _>(|store, cx| {
++        store.set_user_settings(
++            r#"{"agent":{"threads_sidebar":{"in_agent_panel":true}}}"#, cx,
++        ).unwrap();
++    }));
++    let (options, server, guard) = remote::RemoteClient::fake_server(cx, server_cx);
++    let ping = server_cx.new(|_| ());
++    server.add_request_handler::<client::proto::Ping, _, _, _>(
++        ping.downgrade(), |_, _, _| async { Ok(client::proto::Ack {}) },
++    );
++    drop(guard);
++    let client = remote::RemoteClient::connect_mock(options, cx).await;
++    let project = cx.update(|cx| project::Project::remote(
++        client, params.client.clone(), params.node_runtime.clone(), params.user_store.clone(),
++        params.languages.clone(), params.fs.clone(), false, cx,
++    ));
++    let (multi_workspace, cx) = cx.add_window_view({
++        let params = params.clone();
++        move |window, cx| {
++            let workspace = cx.new(|cx| workspace::Workspace::new(None, project, params, window, cx));
++            MultiWorkspace::new(workspace, window, cx)
++        }
++    });
++    let remote_workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
++    assert!(remote_workspace.read_with(cx, |workspace, cx| workspace.root_paths(cx).is_empty()));
++    assert!(multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&remote_workspace)));
++    multi_workspace.read_with(cx, |mw, cx| mw.assert_project_group_key_integrity(cx).unwrap());
++    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
++    for enabled in [false, true, false, true] {
++        set_threads_sidebar_in_agent_panel(enabled, cx);
++        cx.run_until_parked();
++        sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
++        cx.run_until_parked();
++        if enabled {
++            assert!(multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&remote_workspace)));
++            multi_workspace.read_with(cx, |mw, cx| mw.assert_project_group_key_integrity(cx).unwrap());
++        }
++    }
++    let local = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
++    multi_workspace.update_in(cx, |mw, window, cx| {
++        let workspace = cx.new(|cx| workspace::Workspace::new(None, local, params, window, cx));
++        mw.activate(workspace, None, window, cx)
++    }).unwrap();
++    assert!(multi_workspace.read_with(cx, |mw, _| {
++        mw.is_workspace_retained(&remote_workspace)
++            && mw.workspaces().any(|workspace| workspace == &remote_workspace)
++    }));
++    multi_workspace.read_with(cx, |mw, cx| mw.assert_project_group_key_integrity(cx).unwrap());
++}
++
+ #[gpui::test]
+ async fn test_agent_panel_sidebar_keeps_empty_workspace_transient(cx: &mut TestAppContext) {
+     init_test(cx);
+diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
+index 38513f18ce..0b4bd1b1ab 100644
+--- a/crates/workspace/src/multi_workspace.rs
++++ b/crates/workspace/src/multi_workspace.rs
+@@ -413,12 +413,7 @@ impl MultiWorkspace {
+                 let in_agent_panel = threads_sidebar_in_agent_panel(cx);
+                 if in_agent_panel != previous_in_agent_panel && multi_workspace_enabled {
+                     if in_agent_panel
+-                        && !this
+-                            .workspace()
+-                            .read(cx)
+-                            .project_group_key(cx)
+-                            .path_list()
+-                            .is_empty()
++                        && this.active_workspace_has_project(cx)
+                     {
+                         this.retain_active_workspace(cx);
+                     }
+@@ -462,12 +457,7 @@ impl MultiWorkspace {
+         };
+         if this.multi_workspace_enabled(cx)
+             && threads_sidebar_in_agent_panel(cx)
+-            && !this
+-                .workspace()
+-                .read(cx)
+-                .project_group_key(cx)
+-                .path_list()
+-                .is_empty()
++            && this.active_workspace_has_project(cx)
+         {
+             this.retain_active_workspace(cx);
+         }
+@@ -726,7 +716,7 @@ impl MultiWorkspace {
+         }
+ 
+         let new_key = workspace.read(cx).project_group_key(cx);
+-        if new_key.path_list().paths().is_empty() {
++        if new_key.is_empty() {
+             return;
+         }
+ 
+@@ -749,6 +739,10 @@ impl MultiWorkspace {
+             .any(|held| held.pinned && held.workspace == *workspace)
+     }
+ 
++    pub fn active_workspace_has_project(&self, cx: &App) -> bool {
++        !self.workspace().read(cx).project_group_key(cx).is_empty()
++    }
++
+     pub fn active_workspace_is_retained(&self) -> bool {
+         self.held[self.displayed_index()].pinned
+     }
+@@ -765,7 +759,7 @@ impl MultiWorkspace {
+ 
+     /// Ensures a project group exists for `key`, creating one if needed.
+     fn ensure_project_group_state(&mut self, key: ProjectGroupKey) {
+-        if key.path_list().paths().is_empty() {
++        if key.is_empty() {
+             return;
+         }
+ 
+@@ -801,7 +795,7 @@ impl MultiWorkspace {
+             return;
+         }
+ 
+-        if new_key.path_list().paths().is_empty() {
++        if new_key.is_empty() {
+             return;
+         }
+ 
+@@ -926,7 +920,7 @@ impl MultiWorkspace {
+     ) {
+         let mut restored: Vec<ProjectGroupState> = Vec::new();
+         for SerializedProjectGroupState { key, expanded } in groups {
+-            if key.path_list().paths().is_empty() {
++            if key.is_empty() {
+                 continue;
+             }
+             if restored.iter().any(|group| group.key == key) {

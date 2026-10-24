@@ -1,0 +1,122 @@
+From cc6031e8e00230d8e1487b26e3d3bcb40bd64816 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 05:07:51 +0000
+Subject: [PATCH] Show remote group history and distinct host labels without
+ open roots
+
+---
+ crates/project/src/project.rs       |  4 +++-
+ crates/project/src/terminals.rs     |  3 +++
+ crates/sidebar/src/sidebar.rs       |  8 +++----
+ crates/sidebar/src/sidebar_tests.rs | 35 +++++++++++++++++++++++++++++
+ 4 files changed, 45 insertions(+), 5 deletions(-)
+
+diff --git a/crates/project/src/project.rs b/crates/project/src/project.rs
+index 02438a1b0e..17ec27a98d 100644
+--- a/crates/project/src/project.rs
++++ b/crates/project/src/project.rs
+@@ -6821,7 +6821,9 @@ impl ProjectGroupKey {
+             }
+         }
+         if names.is_empty() {
+-            "Empty Workspace".into()
++            self.host.as_ref()
++                .map(|host| host.display_name().into())
++                .unwrap_or_else(|| "Empty Workspace".into())
+         } else {
+             names.join(", ").into()
+         }
+diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
+index b346d21e75..2c441bcfc2 100644
+--- a/crates/project/src/terminals.rs
++++ b/crates/project/src/terminals.rs
+@@ -1884,6 +1884,9 @@ mod tests {
+         );
+         assert!(remote.path_list().is_empty());
+         assert!(!remote.is_empty());
++        assert_eq!(remote.display_name(&Default::default()).to_string(), "host");
++        assert_eq!(crate::ProjectGroupKey::default().display_name(&Default::default()).to_string(),
++                   "Empty Workspace");
+     }
+ 
+ 
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index a60264d506..46ab5ea103 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -1490,9 +1490,10 @@ impl Sidebar {
+         let mut seen_thread_ids: HashSet<agent_ui::ThreadId> = HashSet::new();
+         let mut seen_terminal_ids: HashSet<TerminalId> = HashSet::new();
+ 
+-        let has_open_projects = workspaces
+-            .iter()
+-            .any(|ws| !workspace_path_list(ws, cx).paths().is_empty());
++        let groups = mw.project_groups(cx);
++        // Saved groups must remain reachable even without a live workspace.
++        let has_open_projects = groups.iter().any(|group| !group.key.is_empty())
++            || workspaces.iter().any(|ws| !ws.read(cx).project_group_key(cx).is_empty());
+ 
+         let resolve_agent_icon = |agent_id: &AgentId| -> (IconName, Option<SharedString>) {
+             let agent = Agent::from(agent_id.clone());
+@@ -1508,7 +1509,6 @@ impl Sidebar {
+             (icon, icon_from_external_svg)
+         };
+ 
+-        let groups = mw.project_groups(cx);
+         let mut live_notified_terminal_ids: HashSet<TerminalId> = HashSet::new();
+         for workspace in &workspaces {
+             if let Some(agent_panel) = workspace.read(cx).panel::<AgentPanel>(cx) {
+diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
+index 193a88f40e..768e3b422f 100644
+--- a/crates/sidebar/src/sidebar_tests.rs
++++ b/crates/sidebar/src/sidebar_tests.rs
+@@ -17951,6 +17951,7 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
+             assert!(multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&remote_workspace)));
+             multi_workspace.read_with(cx, |mw, cx| mw.assert_project_group_key_integrity(cx).unwrap());
+         }
++        assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.has_open_projects));
+     }
+     let local = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
+     multi_workspace.update_in(cx, |mw, window, cx| {
+@@ -17968,6 +17969,40 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
+     assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.entries.iter().any(|entry| {
+         matches!(entry, ListEntry::ProjectHeader { key, .. } if key == &remote_key)
+     })));
++    assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.has_open_projects));
++}
++
++#[gpui::test]
++async fn test_rootless_remote_history_is_visible_without_open_project(cx: &mut TestAppContext) {
++    init_test(cx);
++    let project = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
++    let remote_key = |host: &str| ProjectGroupKey::new(
++        Some(remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
++            host: host.into(), ..Default::default()
++        })),
++        PathList::default(),
++    );
++    let first = remote_key("first-host");
++    let second = remote_key("second-host");
++    multi_workspace.update(cx, |mw, cx| mw.restore_project_groups(vec![
++        workspace::SerializedProjectGroupState { key: first.clone(), expanded: true },
++        workspace::SerializedProjectGroupState { key: second.clone(), expanded: true },
++    ], cx));
++    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
++    cx.run_until_parked();
++    sidebar.read_with(cx, |sidebar, _| {
++        assert!(sidebar.contents.has_open_projects);
++        let headers = sidebar.contents.entries.iter().filter_map(|entry| match entry {
++            ListEntry::ProjectHeader { key, label, .. } => Some((key, label.to_string())),
++            _ => None,
++        }).collect::<Vec<_>>();
++        assert!(headers.iter().any(|(key, label)| *key == &first && label == "first-host"));
++        assert!(headers.iter().any(|(key, label)| *key == &second && label == "second-host"));
++        assert_ne!(first.display_name(&Default::default()), second.display_name(&Default::default()));
++    });
+ }
+ 
+ #[gpui::test]
