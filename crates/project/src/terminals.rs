@@ -819,9 +819,9 @@ impl Project {
         let legacy_restore = restoring_existing && context.is_none();
         let pinned = context.is_some();
         let probe = match context {
-            Some(context) => self.probe_shpool_in_context(Some(context), true, cx),
-            None if legacy_restore => self.probe_shpool_in_context(None, false, cx),
-            None => self.probe_shpool(cx),
+            Some(context) => self.probe_shpool_in_context_at(Some(context), true, cwd.clone(), cx),
+            None if legacy_restore => self.probe_shpool_in_context_at(None, false, cwd.clone(), cx),
+            None => self.probe_shpool_in_context_at(None, true, cwd.clone(), cx),
         };
         let is_local = self.remote_client.is_none();
         cx.spawn(async move |project, cx| {
@@ -1174,7 +1174,18 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
         allow_daemon_start: bool,
         cx: &mut Context<Self>,
     ) -> Task<Result<Option<ShpoolProbe>>> {
-        let probe = self.probe_shpool_unbounded(context, allow_daemon_start, cx);
+        let cwd = self.first_project_directory(cx);
+        self.probe_shpool_in_context_at(context, allow_daemon_start, cwd, cx)
+    }
+
+    fn probe_shpool_in_context_at(
+        &mut self,
+        context: Option<ShpoolSessionContext>,
+        allow_daemon_start: bool,
+        cwd: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Option<ShpoolProbe>>> {
+        let probe = self.probe_shpool_unbounded(context, allow_daemon_start, cwd, cx);
         let executor = cx.background_executor().clone();
         cx.background_spawn(async move {
             let timeout = executor.timer(SHPOOL_PROBE_TIMEOUT);
@@ -1199,6 +1210,7 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
         &mut self,
         context: Option<ShpoolSessionContext>,
         allow_daemon_start: bool,
+        cwd: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) -> Task<Result<Option<ShpoolProbe>>> {
         if let Some(context) = &context {
@@ -1243,9 +1255,9 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
                 Ok(script) => self.exec_shpool_context_script(script, cx),
                 Err(error) => return Task::ready(Err(error)),
             },
-            None => self.exec_script_in_sh(
+            None => self.exec_script_in_sh_at(
                 if allow_daemon_start { SHPOOL_PROBE_SCRIPT } else { SHPOOL_EXISTING_PROBE_SCRIPT }
-                    .to_string(), cx,
+                    .to_string(), cwd, cx,
             ),
         };
         cx.background_spawn(async move {
@@ -1598,11 +1610,20 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" kill {quoted_name}
         script: String,
         cx: &mut Context<Self>,
     ) -> Task<Result<smol::process::Command>> {
+        let path = self.first_project_directory(cx);
+        self.exec_script_in_sh_at(script, path, cx)
+    }
+
+    fn exec_script_in_sh_at(
+        &self,
+        script: String,
+        path: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<smol::process::Command>> {
         if self.path_style(cx).is_windows() {
             return Task::ready(Err(anyhow::anyhow!("POSIX sh is not supported on Windows")));
         }
 
-        let path = self.first_project_directory(cx);
         let remote_client = self.remote_client.clone();
         let settings = self.terminal_settings(&path, cx).clone();
         let program = "/bin/sh".to_string();
@@ -2745,6 +2766,51 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("posix_item1"));
         assert!(stdout.contains("posix_item2"));
+    }
+
+    #[gpui::test]
+    #[cfg(unix)]
+    async fn test_shpool_discovery_uses_requested_root_environment(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            let store = settings::SettingsStore::test(cx);
+            cx.set_global(store);
+            terminal::terminal_settings::TerminalSettings::register(cx);
+        });
+        let directory = tempfile::TempDir::new().unwrap();
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree(directory.path(), serde_json::json!({
+            "first": {"file": ""}, "second": {"file": ""}
+        })).await;
+        let project = Project::test(fs, [first.as_path(), second.as_path()], cx).await;
+        project.update(cx, |project, cx| {
+            for (path, value) in [(&first, "first"), (&second, "second")] {
+                let worktree = project.find_worktree(path, cx).unwrap().0.read(cx).id();
+                cx.update_global::<settings::SettingsStore, _>(|store, cx| {
+                    store.set_local_settings(worktree,
+                        settings::LocalSettingsPath::InWorktree(RelPath::empty().into()),
+                        settings::LocalSettingsKind::Settings,
+                        Some(&serde_json::json!({"terminal": {"env": {"SHPOOL_TEST_ROOT": value}}}).to_string()),
+                        cx,
+                    ).unwrap();
+                });
+            }
+        });
+        for (path, value) in [(&first, "first"), (&second, "second")] {
+            let mut command = project.update(cx, |project, cx| {
+                project.exec_script_in_sh_at(
+                    "printf '%s|%s' \"$PWD\" \"$SHPOOL_TEST_ROOT\"".to_string(),
+                    Some(path.clone()), cx,
+                )
+            }).await.unwrap();
+            let output = command.output().await.unwrap();
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), format!("{}|{value}", path.display()));
+        }
     }
 
     #[test]
