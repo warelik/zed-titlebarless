@@ -5679,7 +5679,7 @@ impl Sidebar {
             multi_workspace.remove_with_pre_remove(
                 workspaces_to_remove,
                 RemovalIntent::KeepProject,
-                async move |cx| {
+                async move |cx, workspaces_unchanged| {
                     if !Self::consent_to_close_archived_worktree_items(&consent_targets, cx)
                         .await?
                     {
@@ -5714,7 +5714,9 @@ impl Sidebar {
                     let safe_to_stop = gpui::AsyncApp::update(cx, |cx| {
                         let guard = callback_close_guard.borrow();
                         let Some((guard, item_ids)) = guard.as_ref() else { return false };
-                        !guard.changed(cx) && Self::archived_worktree_item_membership_matches(item_ids, cx)
+                        workspaces_unchanged(cx)
+                            && !guard.changed(cx)
+                            && Self::archived_worktree_item_membership_matches(item_ids, cx)
                     });
                     if !safe_to_stop {
                         gpui::AsyncApp::update(cx, |cx| complete_terminal_close_metadata(terminal_id, false, cx));
