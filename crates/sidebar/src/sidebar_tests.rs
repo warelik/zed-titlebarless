@@ -10064,14 +10064,26 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window(cx: &m
     cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
 
     let project_a = project::Project::test(fs.clone(), ["/project-a".as_ref()], cx).await;
-    let project_b = project::Project::test(fs.clone(), ["/project-b".as_ref()], cx).await;
 
     let multi_workspace_a =
         cx.add_window(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
-    let multi_workspace_b =
-        cx.add_window(|window, cx| MultiWorkspace::test_new(project_b, window, cx));
-
     let multi_workspace_a_entity = multi_workspace_a.root(cx).unwrap();
+    let app_state = multi_workspace_a_entity.read_with(cx, |mw, cx| {
+        mw.workspace().read(cx).app_state().clone()
+    });
+    let project_b = cx.update(|cx| project::Project::local(
+        app_state.client.clone(), app_state.node_runtime.clone(), app_state.user_store.clone(),
+        app_state.languages.clone(), fs.clone(), None, project::LocalProjectFlags::default(), cx,
+    ));
+    let (worktree, _) = project_b.update(cx, |project, cx| {
+        project.find_or_create_worktree("/project-b", true, cx)
+    }).await.unwrap();
+    worktree.read_with(cx, |tree, _| tree.as_local().unwrap().scan_complete()).await;
+    let multi_workspace_b = cx.add_window(|window, cx| {
+        let workspace = cx.new(|cx| Workspace::new(None, project_b, app_state, window, cx));
+        MultiWorkspace::new(workspace, window, cx)
+    });
+
     let multi_workspace_b_entity = multi_workspace_b.root(cx).unwrap();
 
     let cx_b = &mut gpui::VisualTestContext::from_window(multi_workspace_b.into(), cx);
@@ -10144,14 +10156,26 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window_with_t
     cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
 
     let project_a = project::Project::test(fs.clone(), ["/project-a".as_ref()], cx).await;
-    let project_b = project::Project::test(fs.clone(), ["/project-b".as_ref()], cx).await;
 
     let multi_workspace_a =
         cx.add_window(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
-    let multi_workspace_b =
-        cx.add_window(|window, cx| MultiWorkspace::test_new(project_b.clone(), window, cx));
-
     let multi_workspace_a_entity = multi_workspace_a.root(cx).unwrap();
+    let app_state = multi_workspace_a_entity.read_with(cx, |mw, cx| {
+        mw.workspace().read(cx).app_state().clone()
+    });
+    let project_b = cx.update(|cx| project::Project::local(
+        app_state.client.clone(), app_state.node_runtime.clone(), app_state.user_store.clone(),
+        app_state.languages.clone(), fs.clone(), None, project::LocalProjectFlags::default(), cx,
+    ));
+    let (worktree, _) = project_b.update(cx, |project, cx| {
+        project.find_or_create_worktree("/project-b", true, cx)
+    }).await.unwrap();
+    worktree.read_with(cx, |tree, _| tree.as_local().unwrap().scan_complete()).await;
+    let multi_workspace_b = cx.add_window(|window, cx| {
+        let workspace = cx.new(|cx| Workspace::new(None, project_b, app_state, window, cx));
+        MultiWorkspace::new(workspace, window, cx)
+    });
+
     let multi_workspace_b_entity = multi_workspace_b.root(cx).unwrap();
 
     let cx_a = &mut gpui::VisualTestContext::from_window(multi_workspace_a.into(), cx);
@@ -17913,6 +17937,8 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
     server_cx: &mut TestAppContext,
 ) {
     init_test(cx);
+    cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+    server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
     let params = cx.update(workspace::AppState::test);
     cx.update(|cx| cx.update_global::<settings::SettingsStore, _>(|store, cx| {
         store.set_user_settings(
@@ -17953,7 +17979,10 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
         }
         assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.has_open_projects));
     }
-    let local = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
+    let local = cx.update(|_, cx| project::Project::local(
+        params.client.clone(), params.node_runtime.clone(), params.user_store.clone(),
+        params.languages.clone(), params.fs.clone(), None, project::LocalProjectFlags::default(), cx,
+    ));
     multi_workspace.update_in(cx, |mw, window, cx| {
         let workspace = cx.new(|cx| workspace::Workspace::new(None, local, params, window, cx));
         mw.activate(workspace, None, window, cx)
