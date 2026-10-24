@@ -151,7 +151,7 @@ Open the Settings Editor and search for “Threads Sidebar Position”. Or add t
 
 **Options**
 
-Numbers from `200` to `800` pixels (inclusive). Values outside this range are clamped to the nearest limit.
+Numbers from `100` to `800` pixels (inclusive). Values outside this range are clamped to the nearest limit.
 
 Open the Settings Editor and search for “Threads Sidebar Default Width”. Or add this to your `settings.json`:
 
@@ -168,6 +168,52 @@ Open the Settings Editor and search for “Threads Sidebar Default Width”. Or 
 Changing this setting immediately updates the sidebar width, even if you previously resized it manually. You can also double-click the divider to reset the sidebar to the configured width.
 
 Widths saved by older versions of Zed are preserved if they differ from the previous default of 300 pixels. A saved width of 300 pixels uses this setting instead.
+
+### Threads Sidebar Compact
+
+- Description: Whether each thread uses a single row at tab-bar height, with details shown on hover.
+- Setting: `agent.threads_sidebar.compact`
+- Default: `false`
+
+**Options**
+
+`boolean` values
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "agent": {
+    "threads_sidebar": {
+      "compact": true
+    }
+  }
+}
+```
+
+### Threads Sidebar in Agent Panel
+
+- Description: Whether projects, threads, and terminals appear as two rows of tabs at the top of the agent panel instead of in the Threads Sidebar.
+- Setting: `agent.threads_sidebar.in_agent_panel`
+- Default: `false`
+
+**Options**
+
+`boolean` values
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "agent": {
+    "threads_sidebar": {
+      "in_agent_panel": true
+    }
+  }
+}
+```
 
 ### Threads Sidebar Auto Open {#agent-threads-sidebar-auto-open}
 
@@ -1631,7 +1677,9 @@ or
   "tab_bar": {
     "show": true,
     "show_nav_history_buttons": true,
-    "show_tab_bar_buttons": true
+    "show_tab_bar_buttons": true,
+    "pinned_tab_chips": false,
+    "unpinned_tab_chips": false
   }
 }
 ```
@@ -1666,6 +1714,48 @@ or
 
 `boolean` values
 
+### Pinned Tab Chips
+
+- Description: Whether pinned tabs are rendered as compact, borderless chips that hug their contents.
+- Setting: `pinned_tab_chips`
+- Default: `false`
+
+**Options**
+
+`boolean` values
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "tab_bar": {
+    "pinned_tab_chips": true
+  }
+}
+```
+
+### Unpinned Tab Chips
+
+- Description: Whether unpinned tabs are rendered as compact, borderless chips that hug their contents.
+- Setting: `unpinned_tab_chips`
+- Default: `false`
+
+**Options**
+
+`boolean` values
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "tab_bar": {
+    "unpinned_tab_chips": true
+  }
+}
+```
+
 ## Editor Tabs
 
 - Description: Configuration for the editor tabs.
@@ -1680,7 +1770,51 @@ or
     "git_status": false,
     "activate_on_close": "history",
     "show_close_button": "hover",
-    "show_diagnostics": "off"
+    "show_diagnostics": "off",
+    "min_width": null,
+    "max_width": null
+  }
+}
+```
+
+### Minimum Width
+
+- Description: Minimum width of an editor tab in pixels. `null` keeps tabs as wide as their title.
+- Setting: `min_width`
+- Default: `null`
+
+**Options**
+
+A pixel value or `null`.
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "tabs": {
+    "min_width": 120
+  }
+}
+```
+
+### Maximum Width
+
+- Description: Maximum width of an editor tab in pixels. Longer titles are truncated in the middle. `null` keeps tabs as wide as their title.
+- Setting: `max_width`
+- Default: `null`
+
+**Options**
+
+A pixel value or `null`.
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "tabs": {
+    "max_width": 240
   }
 }
 ```
@@ -1918,14 +2052,28 @@ When trusted, project settings are synchronized automatically, language and MCP 
     "quick_actions": true,
     "selections_menu": true,
     "agent_review": true,
-    "code_actions": false
+    "code_actions": false,
+    "compact": false
   }
 }
 ```
 
 **Options**
 
-Each option controls displaying of a particular toolbar element. If all elements are hidden, the editor toolbar is not displayed.
+Each display option controls a particular toolbar element. If all elements are hidden, the editor toolbar is not displayed.
+
+- `compact`: Whether to shrink pane toolbars to the height of the tab bar. The default is `false`.
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "toolbar": {
+    "compact": true
+  }
+}
+```
 
 ## Use System Tabs
 
@@ -5385,6 +5533,48 @@ Processing stops at the first regex that matches the terminal line, even if the 
 }
 ```
 
+## Panel Rows Tab Height
+
+- Description: Whether rows in the project, Git, and outline panels use the tab-bar height, aligning them with the tab bar and project panel sticky rows.
+- Setting: `panel_rows_tab_height`
+- Default: `false`
+
+**Options**
+
+`boolean` values
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "panel_rows_tab_height": true
+}
+```
+
+## Shadows
+
+- Description: Controls individual shadows in the user interface.
+- Setting: `shadows`
+Open the Settings Editor and choose **Edit in settings.json**. Configure these
+shadow options in JSON.
+
+- Default:
+
+```json [settings]
+{
+  "shadows": {
+    "project_panel": true,
+    "minimap": true
+  }
+}
+```
+
+**Options**
+
+- `project_panel`: Whether to paint the shadow below sticky folder rows in the project panel.
+- `minimap`: Whether to paint the shadow around the minimap.
+
 ## Theme
 
 - Description: The theme setting can be specified in two forms - either as the name of a theme or as an object containing the `mode`, `dark`, and `light` themes for the Zed UI.
@@ -5508,6 +5698,25 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 - `show_menus`: Whether to show the menus in the titlebar
 - `open_menus_on_hover`: Whether to open title-bar menus on hover. Once a menu is open, hovering always switches between menus.
 - `button_layout`: The layout of window control buttons in the title bar (Linux only). Can be set to `"platform_default"` to follow the system setting, `"standard"` to use Zed's built-in layout, or a custom format like `"close:minimize,maximize"`
+
+## Title Bar to Status Bar
+
+- Description: Whether to hide the title bar and show its contents in the status bar instead (macOS only). Other platforms ignore it, as their window controls are drawn in the title bar
+- Setting: `title_bar_to_status_bar`
+- Default: `false`
+
+**Options**
+
+`boolean` values
+
+Open the Settings Editor and choose **Edit in settings.json**. This option is
+configured in JSON:
+
+```json [settings]
+{
+  "title_bar_to_status_bar": true
+}
+```
 
 ## Window Title Format
 

@@ -66,6 +66,11 @@ impl Render for BasedPyrightBanner {
                                     cx.listener(|this, _, _, cx| {
                                         this.dismissed = true;
                                         Self::set_dismissed(true, cx);
+                                        // Keep the cached location hidden if compact mode
+                                        // is enabled after this banner has been dismissed.
+                                        cx.emit(ToolbarItemEvent::ChangeLocation(
+                                            ToolbarItemLocation::Hidden,
+                                        ));
                                         cx.notify();
                                     }),
                                 ))

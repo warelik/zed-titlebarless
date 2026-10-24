@@ -221,7 +221,8 @@ fn main() {
 
     // `zed --crash-handler` Makes zed operate in minidump crash handler mode
     if let Some(socket) = &args.crash_handler {
-        crashes::crash_server(socket.as_path(), paths::logs_dir().clone());
+        crashes::crash_server(socket.as_path(), args.crash_handler_logs_dir.clone()
+            .unwrap_or_else(|| paths::logs_dir().clone()));
         return;
     }
 
@@ -413,6 +414,7 @@ fn main() {
                 },
                 |pid| paths::temp_dir().join(format!("zed-crash-handler-{pid}")),
                 move |duration| background_executor.timer(duration),
+                paths::logs_dir().clone(),
             )),
         )
     } else {
@@ -1748,6 +1750,8 @@ struct Args {
     /// process communicating over a socket.
     #[arg(long, hide = true)]
     crash_handler: Option<PathBuf>,
+    #[arg(long, hide = true, requires = "crash_handler")]
+    crash_handler_logs_dir: Option<PathBuf>,
 
     /// Run zed in the foreground, only used on Windows, to match the behavior on macOS.
     #[arg(long)]

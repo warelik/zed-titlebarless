@@ -139,7 +139,13 @@ To disable this behavior use:
 
 ### Titlebar
 
+To configure `title_bar_to_status_bar` (macOS only), open the Settings Editor and
+choose **Edit in settings.json**, then add it to your settings:
+
 ```json [settings]
+{
+  // Hide the title bar and show its contents in the status bar instead (macOS only)
+  "title_bar_to_status_bar": false,
   // Control which items are shown/hidden in the title bar
   "title_bar": {
     "show_branch_status_icon": false, // Show git status on branch icon
@@ -152,7 +158,8 @@ To disable this behavior use:
     "show_sign_in": true,             // Show/hide sign-in button
     "show_menus": false,              // Show/hide menus
     "open_menus_on_hover": false      // Automatically open menus on hover
-  },
+  }
+}
 ```
 
 ## Workspace

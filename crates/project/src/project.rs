@@ -20,6 +20,8 @@ pub mod task_inventory;
 pub mod task_store;
 pub mod telemetry_snapshot;
 pub mod terminals;
+#[cfg(any(test, feature = "test-support"))]
+pub use terminals::{FakeShpool, FakeShpoolState, FakeShpoolStore};
 pub mod toolchain_store;
 pub mod trusted_worktrees;
 pub mod worktree_store;
@@ -244,6 +246,8 @@ pub struct Project {
     git_diff_debouncer: DebouncedDelay<Self>,
     remotely_created_models: Arc<Mutex<RemotelyCreatedModels>>,
     terminals: Terminals,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fake_shpool: Option<terminals::FakeShpoolStore>,
     node: Option<NodeRuntime>,
     search_history: SearchHistory,
     search_included_history: SearchHistory,
@@ -1402,9 +1406,9 @@ impl Project {
 
                 buffers_needing_diff: Default::default(),
                 git_diff_debouncer: DebouncedDelay::new(),
-                terminals: Terminals {
-                    local_handles: Vec::new(),
-                },
+                terminals: Terminals::default(),
+                #[cfg(any(test, feature = "test-support"))]
+                fake_shpool: None,
                 node: Some(node),
                 search_history: Self::new_search_history(),
                 environment,
@@ -1646,9 +1650,9 @@ impl Project {
                 remote_client: Some(remote.clone()),
                 buffers_needing_diff: Default::default(),
                 git_diff_debouncer: DebouncedDelay::new(),
-                terminals: Terminals {
-                    local_handles: Vec::new(),
-                },
+                terminals: Terminals::default(),
+                #[cfg(any(test, feature = "test-support"))]
+                fake_shpool: None,
                 node: Some(node),
                 search_history: Self::new_search_history(),
                 environment,
@@ -1662,6 +1666,8 @@ impl Project {
                 downloading_files: Default::default(),
                 last_worktree_paths: WorktreePaths::default(),
             };
+
+            cx.observe(&remote, |_, _, cx| cx.notify()).detach();
 
             // remote server -> local machine handlers
             remote_proto.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &cx.entity());
@@ -1939,9 +1945,9 @@ impl Project {
                 agent_server_store,
                 buffers_needing_diff: Default::default(),
                 git_diff_debouncer: DebouncedDelay::new(),
-                terminals: Terminals {
-                    local_handles: Vec::new(),
-                },
+                terminals: Terminals::default(),
+                #[cfg(any(test, feature = "test-support"))]
+                fake_shpool: None,
                 node: None,
                 search_history: Self::new_search_history(),
                 search_included_history: Self::new_search_history(),
@@ -2117,6 +2123,49 @@ impl Project {
         cx: &mut gpui::TestAppContext,
     ) -> Entity<Project> {
         Self::test_project(fs, root_paths, true, cx).await
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_fake_shpool(&mut self, store: terminals::FakeShpoolStore) {
+        self.fake_shpool = Some(store);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn enable_fake_shpool(&mut self, sessions: &[&str]) -> terminals::FakeShpoolStore {
+        let store = terminals::FakeShpoolStore::with_sessions(
+            sessions.iter().map(|session| session.to_string()),
+        );
+        self.fake_shpool = Some(store.clone());
+        store
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fake_shpool(&self) -> Option<terminals::FakeShpoolStore> {
+        self.fake_shpool.clone()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fake_shpool_killed_sessions(&self) -> Vec<String> {
+        self.fake_shpool
+            .as_ref()
+            .map(|fake| fake.kill_history())
+            .unwrap_or_default()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fake_shpool_attached_sessions(&self) -> Vec<String> {
+        self.fake_shpool
+            .as_ref()
+            .map(|fake| fake.attach_history())
+            .unwrap_or_default()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fake_shpool_attached_args(&self) -> Vec<(String, Vec<String>)> {
+        self.fake_shpool
+            .as_ref()
+            .map(|f| f.attach_args_history())
+            .unwrap_or_default()
     }
 
     #[cfg(feature = "test-support")]
@@ -3911,6 +3960,10 @@ impl Project {
             }
             &remote::RemoteClientEvent::Reconnected => {}
         }
+    }
+
+    pub fn disconnected_from_remote(&mut self, server_not_running: bool, cx: &mut Context<Self>) {
+        cx.emit(Event::DisconnectedFromRemote { server_not_running });
     }
 
     fn on_settings_observer_event(
@@ -6744,6 +6797,10 @@ impl ProjectGroupKey {
         &self.paths
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty() && self.host.is_none()
+    }
+
     pub fn display_name(
         &self,
         path_detail_map: &std::collections::HashMap<PathBuf, usize>,
@@ -6764,7 +6821,18 @@ impl ProjectGroupKey {
             }
         }
         if names.is_empty() {
-            "Empty Workspace".into()
+            self.host.as_ref()
+                .map(|host| {
+                    let identity = remote::remote_connection_identity(host);
+                    match &identity {
+                        remote::RemoteConnectionIdentity::Ssh { username: None, port: None, .. }
+                        | remote::RemoteConnectionIdentity::Wsl { user: None, .. } => {
+                            host.display_name().into()
+                        }
+                        _ => format!("{} ({})", host.display_name(), identity.persistence_key()).into(),
+                    }
+                })
+                .unwrap_or_else(|| "Empty Workspace".into())
         } else {
             names.join(", ").into()
         }

@@ -31,11 +31,12 @@ mod workspace_settings;
 
 pub use dock::Panel;
 pub use multi_workspace::{
-    CloseWorkspaceSidebar, DraggedSidebar, FocusWorkspaceSidebar, MoveProjectDown,
-    MoveProjectToNewWindow, MoveProjectUp, MultiWorkspace, MultiWorkspaceEvent, NewThread,
-    NextProject, NextThread, PreviousProject, PreviousThread, ProjectGroup, ProjectGroupKey,
-    RemovalIntent, SerializedProjectGroupState, Sidebar, SidebarEvent, SidebarHandle,
-    SidebarRenderState, SidebarSide, ToggleWorkspaceSidebar, sidebar_side_context_menu,
+    AgentPanelTabRows, CloseWorkspaceSidebar, DraggedSidebar, FocusWorkspaceSidebar,
+    MoveProjectDown, MoveProjectToNewWindow, MoveProjectUp, MultiWorkspace, MultiWorkspaceEvent,
+    NewThread, NextProject, NextThread, PreviousProject, PreviousThread, ProjectGroup,
+    ProjectGroupKey, RemovalIntent, SerializedProjectGroupState, Sidebar, SidebarEvent,
+    SidebarHandle, SidebarRenderState, SidebarSide, ToggleWorkspaceSidebar,
+    sidebar_side_context_menu, threads_sidebar_in_agent_panel,
 };
 pub use path_list::{PathList, SerializedPathList};
 pub use remote::{
@@ -71,8 +72,8 @@ use gpui::{
 };
 pub use history_manager::*;
 pub use item::{
-    FollowableItem, FollowableItemHandle, Item, ItemHandle, ItemSettings, PreviewTabsSettings,
-    ProjectItem, SerializableItem, SerializableItemHandle, WeakItemHandle,
+    FollowableItem, FollowableItemHandle, Item, ItemCloseGuard, ItemHandle, ItemSettings,
+    PreviewTabsSettings, ProjectItem, SerializableItem, SerializableItemHandle, WeakItemHandle,
 };
 use itertools::Itertools;
 use language::{Buffer, LanguageRegistry, Rope, language_settings::all_language_settings};
@@ -324,6 +325,118 @@ static ZED_WINDOW_POSITION: LazyLock<Option<Point<Pixels>>> = LazyLock::new(|| {
         .as_deref()
         .and_then(parse_pixel_position_env_var)
 });
+
+/// Whether the title bar's contents live in the status bar. Only macOS supports this: Windows and
+/// Linux draw their window controls in the title bar, so it has to stay there.
+pub fn title_bar_in_status_bar(cx: &App) -> bool {
+    cfg!(target_os = "macos")
+        && WorkspaceSettings::get_global(cx).title_bar_to_status_bar
+        && StatusBarSettings::get_global(cx).show
+}
+
+/// Where stock Zed puts the traffic lights; the title bar is centred on them.
+pub const TRAFFIC_LIGHT_INSET: Pixels = px(9.);
+
+pub fn panel_row_height(cx: &App) -> Option<Pixels> {
+    ThemeSettings::get_global(cx)
+        .panel_rows_tab_height
+        .then(|| ui::Tab::container_height(cx))
+}
+
+/// Without the title bar the traffic lights are centred between the window's top edge and the
+/// bottom border of the tab-height header beside them, as far from the left edge as from the top.
+/// The button size depends on the macOS SDK, so it is only known once the window exists; until
+/// then (and with the title bar in place) they keep the stock inset. The headers' reserved width
+/// (`TRAFFIC_LIGHT_PADDING`) assumes that stock inset, so the centred lights leave up to ~2.5px
+/// more room before the first tab (compact density): not worth reading the live size every frame.
+pub fn traffic_light_inset(_window: &Window, _cx: &App) -> Pixels {
+    #[cfg(target_os = "macos")]
+    {
+        match _window.traffic_light_size() {
+            Some(button) if title_bar_in_status_bar(_cx) => {
+                // A header shorter than the buttons (tiny UI font) would push them off the window.
+                ((ui::Tab::content_height(_cx) - button.height) / 2.).max(px(0.))
+            }
+            _ => TRAFFIC_LIGHT_INSET,
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        TRAFFIC_LIGHT_INSET
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn update_traffic_light_position(window: &Window, cx: &App) {
+    let inset = traffic_light_inset(window, cx);
+    window.set_traffic_light_position(point(inset, inset));
+}
+
+/// Without the title bar the traffic lights overlay the workspace's top-left corner,
+/// unless the sidebar beside them holds them in its header.
+pub fn traffic_lights_overlay_workspace(window: &Window, cx: &App) -> bool {
+    if !title_bar_in_status_bar(cx) || window.is_fullscreen() || window.is_simple_fullscreen() {
+        return false;
+    }
+    let sidebar = window
+        .root::<MultiWorkspace>()
+        .flatten()
+        .map(|multi_workspace| multi_workspace.read(cx).sidebar_render_state(cx))
+        .unwrap_or_default();
+    !(sidebar.open && sidebar.side == SidebarSide::Left)
+}
+
+/// Lets a drag that starts on `element` move the window, as the title bar does.
+#[track_caller]
+pub fn move_window_on_drag(
+    element: Stateful<Div>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Stateful<Div> {
+    let drag_started = window.use_state(cx, |_, _| false);
+    element
+        .on_mouse_down(MouseButton::Left, {
+            let drag_started = drag_started.clone();
+            move |_, _, cx| drag_started.update(cx, |started, _| *started = true)
+        })
+        .on_mouse_up(MouseButton::Left, {
+            let drag_started = drag_started.clone();
+            move |_, _, cx| drag_started.update(cx, |started, _| *started = false)
+        })
+        .on_mouse_down_out({
+            let drag_started = drag_started.clone();
+            move |_, _, cx| drag_started.update(cx, |started, _| *started = false)
+        })
+        .on_mouse_move(move |event, window, cx| {
+            if drag_started.update(cx, |started, _| std::mem::take(started)) && event.dragging() {
+                window.start_window_move();
+            }
+        })
+}
+
+/// Makes `element` an empty stretch of the title bar again: a drag moves the window and a
+/// double-click zooms it. Not for areas whose double-click already does something else.
+#[track_caller]
+pub fn title_bar_area(element: Stateful<Div>, window: &mut Window, cx: &mut App) -> Stateful<Div> {
+    move_window_on_drag(element, window, cx).on_click(|event, window, _| {
+        if event.click_count() == 2 {
+            window.titlebar_double_click();
+        }
+    })
+}
+
+/// A tab-bar-high strip that keeps the traffic lights off the content below it, for headers that
+/// have no tab bar of their own to hold the spacer: the left dock, zoomed panels and a top-left
+/// pane that shows no tab bar.
+#[track_caller]
+pub(crate) fn traffic_light_row(window: &mut Window, cx: &mut App) -> Stateful<Div> {
+    title_bar_area(div().id("traffic-light-spacer"), window, cx)
+        .flex_none()
+        .h(ui::Tab::container_height(cx))
+        .bg(cx.theme().colors().tab_bar_background)
+        .border_b_1()
+        .border_color(cx.theme().colors().border)
+}
 
 pub trait TerminalProvider {
     fn spawn(
@@ -1611,6 +1724,12 @@ pub struct Workspace {
     /// the window, used to skip title recomputation when unrelated settings
     /// change.
     last_window_title_settings: Option<(String, String)>,
+    /// Last seen `title_bar_in_status_bar`, to notice when it is toggled.
+    title_bar_to_status_bar: bool,
+    /// The header height the traffic lights were last centred in. UI font size shortcuts change
+    /// it without touching the settings.
+    #[cfg(target_os = "macos")]
+    traffic_light_header_height: Pixels,
     dirty_items: HashMap<EntityId, Subscription>,
     active_call: Option<(GlobalAnyActiveCall, Vec<Subscription>)>,
     leader_updates_tx: mpsc::UnboundedSender<(PeerId, proto::UpdateFollowers)>,
@@ -2022,6 +2141,21 @@ impl Workspace {
                 if last_title_settings != Some(title_settings) {
                     this.update_window_title(window, cx);
                 }
+
+                let title_bar_to_status_bar = title_bar_in_status_bar(cx);
+                let title_bar_toggled = this.title_bar_to_status_bar != title_bar_to_status_bar;
+                this.title_bar_to_status_bar = title_bar_to_status_bar;
+                // The header the buttons are centred in follows the UI font size and density.
+                #[cfg(target_os = "macos")]
+                {
+                    if title_bar_toggled || title_bar_to_status_bar {
+                        this.traffic_light_header_height = ui::Tab::content_height(cx);
+                        update_traffic_light_position(window, cx);
+                    }
+                }
+                if title_bar_toggled {
+                    cx.notify();
+                }
             }),
             cx.subscribe_in(
                 &project.read(cx).git_store().clone(),
@@ -2082,6 +2216,13 @@ impl Workspace {
             this.show_initial_notifications(cx);
         });
 
+        #[cfg(target_os = "macos")]
+        {
+            if title_bar_in_status_bar(cx) {
+                update_traffic_light_position(window, cx);
+            }
+        }
+
         let mut center = PaneGroup::new(center_pane.clone());
         center.set_is_center(true);
         center.mark_positions(cx);
@@ -2118,6 +2259,9 @@ impl Workspace {
             window_edited: false,
             last_window_title: None,
             last_window_title_settings: None,
+            title_bar_to_status_bar: title_bar_in_status_bar(cx),
+            #[cfg(target_os = "macos")]
+            traffic_light_header_height: ui::Tab::content_height(cx),
             dirty_items: Default::default(),
             active_call,
             database_id: workspace_id,
@@ -3325,6 +3469,9 @@ impl Workspace {
     }
 
     pub fn set_titlebar_item(&mut self, item: AnyView, _: &mut Window, cx: &mut Context<Self>) {
+        self.status_bar.update(cx, |status_bar, cx| {
+            status_bar.set_titlebar_item(item.clone(), cx)
+        });
         self.titlebar_item = Some(item);
         cx.notify();
     }
@@ -3629,6 +3776,24 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<bool>> {
+        self.prepare_to_close_internal(close_intent, true, window, cx)
+    }
+
+    pub(crate) fn prepare_to_remove(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<bool>> {
+        self.prepare_to_close_internal(CloseIntent::ReplaceWindow, false, window, cx)
+    }
+
+    fn prepare_to_close_internal(
+        &mut self,
+        close_intent: CloseIntent,
+        remove_session: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<bool>> {
         let active_call = self.active_global_call();
 
         cx.spawn_in(window, async move |this, cx| {
@@ -3744,7 +3909,8 @@ impl Workspace {
 
             // If we're not quitting, but closing, we remove the workspace from
             // the current session.
-            if close_intent != CloseIntent::Quit
+            if remove_session
+                && close_intent != CloseIntent::Quit
                 && !save_last_workspace
                 && save_result.as_ref().is_ok_and(|&res| res)
             {
@@ -8760,7 +8926,7 @@ impl Workspace {
         };
 
         let mut parts = Vec::new();
-        if self.titlebar_item.is_some() {
+        if self.titlebar_item.is_some() && !self.title_bar_to_status_bar {
             // The title bar is an ARIA toolbar, so region navigation lands on
             // its first control rather than the toolbar container.
             parts.push(FocusablePart::toolbar(self.titlebar_focus_handle.clone()));
@@ -9569,6 +9735,10 @@ impl Render for Workspace {
             && self.active_item(cx).is_some();
         let pad_zoomed_pane =
             self.centered_layout && self.zoomed.is_some() && self.zoomed_position.is_none();
+        let titlebar_item = self
+            .titlebar_item
+            .clone()
+            .filter(|_| !self.title_bar_to_status_bar);
         let render_padding = |size| {
             (size > 0.0).then(|| {
                 div()
@@ -9595,6 +9765,18 @@ impl Render for Workspace {
         };
         let centered_paddings = render_centered_paddings(pad_center_pane);
         let zoomed_paddings = render_centered_paddings(pad_zoomed_pane);
+        // The zoom shortcuts change the UI font size without touching the settings, so the
+        // settings observer cannot see the header (and the buttons' centre) move.
+        #[cfg(target_os = "macos")]
+        {
+            if title_bar_in_status_bar(cx) {
+                let header_height = ui::Tab::content_height(cx);
+                if self.traffic_light_header_height != header_height {
+                    self.traffic_light_header_height = header_height;
+                    update_traffic_light_position(window, cx);
+                }
+            }
+        }
         let ui_font = theme_settings::setup_ui_font(window, cx);
 
         let theme = cx.theme().clone();
@@ -9632,7 +9814,7 @@ impl Render for Workspace {
             // a tab group: region navigation lands on the first control (per
             // the ARIA toolbar pattern), Tab steps through them, and arrow keys
             // move between them once focus is inside.
-            .when_some(self.titlebar_item.clone(), |this, item| {
+            .when_some(titlebar_item, |this, item| {
                 this.child(
                     div()
                         .id("titlebar-region")
@@ -9684,7 +9866,7 @@ impl Render for Workspace {
                             .flex()
                             .flex_col()
                             .overflow_hidden()
-                            .border_t_1()
+                            .when(!self.title_bar_to_status_bar, |this| this.border_t_1())
                             .border_b_1()
                             .border_color(colors.border)
                             .child({
@@ -10035,6 +10217,25 @@ impl Render for Workspace {
                                         })
                                         .into_any_element(),
                                 };
+                                let traffic_lights = traffic_lights_overlay_workspace(window, cx)
+                                    && !self.zoomed_position.is_some_and(|position| {
+                                        self.dock_at_position(position)
+                                            .read(cx)
+                                            .active_panel()
+                                            .is_some_and(|panel| {
+                                                panel.holds_traffic_lights(window, cx)
+                                            })
+                                    });
+                                let zoomed_element =
+                                    if traffic_lights && self.zoomed_position.is_some() {
+                                        v_flex()
+                                            .size_full()
+                                            .child(traffic_light_row(window, cx))
+                                            .child(div().flex_1().min_h_0().child(zoomed_element))
+                                            .into_any_element()
+                                    } else {
+                                        zoomed_element
+                                    };
                                 let overlay = div()
                                     .occlude()
                                     .absolute()
@@ -10049,13 +10250,20 @@ impl Render for Workspace {
                                     return Some(overlay);
                                 }
 
-                                Some(match self.zoomed_position {
+                                let overlay = match self.zoomed_position {
                                     Some(DockPosition::Left) => overlay.right_2().border_r_1(),
                                     Some(DockPosition::Right) => overlay.left_2().border_l_1(),
                                     Some(DockPosition::Bottom) => overlay.top_2().border_t_1(),
                                     None => {
                                         overlay.top_2().bottom_2().left_2().right_2().border_1()
                                     }
+                                };
+                                // The traffic lights are centred in a header that starts at the
+                                // window's top edge, as it does unzoomed.
+                                Some(if traffic_lights {
+                                    overlay.top_0().border_t_0()
+                                } else {
+                                    overlay
                                 })
                             }))
                             .children(self.render_notifications(window, cx)),
@@ -10354,7 +10562,7 @@ pub async fn apply_restored_multiworkspace_state(
         let mut resolved_groups: Vec<SerializedProjectGroupState> = Vec::new();
         for serialized in project_groups.iter().cloned() {
             let SerializedProjectGroupState { key, expanded } = serialized.into_restored_state();
-            if key.path_list().paths().is_empty() {
+            if key.is_empty() {
                 continue;
             }
             let mut resolved_paths = Vec::new();
@@ -10371,7 +10579,7 @@ pub async fn apply_restored_multiworkspace_state(
                 }
             }
             let resolved = ProjectGroupKey::new(key.host(), PathList::new(&resolved_paths));
-            if !resolved_groups.iter().any(|g| g.key == resolved) {
+            if !resolved_groups.iter().any(|g| g.key.matches(&resolved)) {
                 resolved_groups.push(SerializedProjectGroupState {
                     key: resolved,
                     expanded,
@@ -12498,6 +12706,121 @@ mod tests {
     use util::path;
     use util::rel_path::rel_path;
 
+    #[gpui::test]
+    async fn test_restore_preserves_rootless_remote_project_groups(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs.clone(), [], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let remote_key = |host: &str| ProjectGroupKey::new(
+            Some(remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+                host: host.into(), ..Default::default()
+            })),
+            PathList::default(),
+        );
+        let first = remote_key("first-host");
+        let second = remote_key("second-host");
+        let state = MultiWorkspaceState {
+            project_groups: vec![
+                SerializedProjectGroup::from_group(&first, false),
+                SerializedProjectGroup::from_group(&ProjectGroupKey::default(), true),
+                SerializedProjectGroup::from_group(&second, true),
+                SerializedProjectGroup::from_group(&first, true),
+            ],
+            ..MultiWorkspaceState::default()
+        };
+        apply_restored_multiworkspace_state(window, &state, fs, &mut cx.to_async()).await;
+        window.read_with(cx, |multi_workspace, cx| {
+            let groups = multi_workspace.project_groups(cx);
+            assert_eq!(groups.iter().map(|group| &group.key).collect::<Vec<_>>(),
+                       vec![&first, &second]);
+            assert!(!groups[0].expanded);
+            assert!(groups[1].expanded);
+        }).unwrap();
+    }
+
+    #[test]
+    fn test_project_group_serialization_excludes_connection_secrets() {
+        let ssh = remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+            host: "host".into(), username: Some("user".into()), port: Some(2222),
+            password: Some("fixture_ssh_credential".into()),
+            args: Some(vec!["fixture_proxy_credential".into()]),
+            nickname: Some("label".into()), ..Default::default()
+        });
+        let docker = remote::RemoteConnectionOptions::Docker(remote::DockerConnectionOptions {
+            name: "container".into(), container_id: "container-id".into(), remote_user: "user".into(),
+            use_podman: true, upload_binary_over_docker_exec: true,
+            remote_env: std::collections::BTreeMap::from([
+                ("ACCESS_TOKEN".into(), "fixture_docker_credential".into()),
+            ]),
+        });
+        for host in [ssh, docker] {
+            let key = ProjectGroupKey::new(Some(host.clone()), PathList::default());
+            let regular = SerializedProjectGroup::from_group(&key, false);
+            let legacy = SerializedProjectGroup {
+                path_list: PathList::default().serialize(),
+                location: SerializedWorkspaceLocation::Remote(host), expanded: false,
+            };
+            for group in [regular, legacy] {
+                let encoded = serde_json::to_string(&group).unwrap();
+                for value in ["fixture_ssh_credential", "fixture_proxy_credential", "fixture_docker_credential"] {
+                    assert!(!encoded.contains(value));
+                }
+                let restored = group.into_restored_state();
+                assert!(!restored.expanded);
+                assert!(restored.key.matches(&key));
+                match restored.key.host().unwrap() {
+                    remote::RemoteConnectionOptions::Ssh(options) => {
+                        assert!(options.password.is_none());
+                        assert!(options.args.is_none());
+                        assert_eq!(options.username.as_deref(), Some("user"));
+                        assert_eq!(options.port, Some(2222));
+                    }
+                    remote::RemoteConnectionOptions::Docker(options) => {
+                        assert!(options.remote_env.is_empty());
+                        assert!(options.use_podman);
+                        assert_eq!(options.container_id, "container-id");
+                    }
+                    _ => panic!("fixture must remain the same connection kind"),
+                }
+            }
+            assert_eq!(key.host().is_some(), true);
+        }
+    }
+
+    #[gpui::test]
+    async fn test_restored_remote_groups_keep_live_identity_options(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs.clone(), [], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let key = |nickname: &str, argument: &str, upload| ProjectGroupKey::new(
+            Some(remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+                host: "host".into(), username: Some("user".into()), port: Some(22),
+                nickname: Some(nickname.into()), args: Some(vec![argument.into()]),
+                upload_binary_over_ssh: upload, ..Default::default()
+            })),
+            PathList::default(),
+        );
+        let previous = key("old-label", "old-routing", false);
+        let current = key("current-label", "current-routing", true);
+        assert!(previous.matches(&current));
+        window.update(cx, |multi_workspace, _, cx| multi_workspace.restore_project_groups(vec![
+            SerializedProjectGroupState { key: current.clone(), expanded: true },
+        ], cx)).unwrap();
+        let state = MultiWorkspaceState {
+            project_groups: vec![SerializedProjectGroup::from_group(&previous, false)],
+            ..MultiWorkspaceState::default()
+        };
+        apply_restored_multiworkspace_state(window, &state, fs, &mut cx.to_async()).await;
+        window.read_with(cx, |multi_workspace, cx| {
+            let groups = multi_workspace.project_groups(cx);
+            assert_eq!(groups.len(), 1);
+            assert_eq!(groups[0].key, current);
+            assert!(!groups[0].expanded);
+        }).unwrap();
+    }
+
     #[test]
     fn test_render_window_title_format_omits_empty_segments() {
         let context = WindowTitleContext {
@@ -13014,6 +13337,152 @@ mod tests {
             cx.window_title().as_deref(),
             Some(format!("Zed — root1, root2 — one — {expected_file_path}").as_str())
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_title_bar_to_status_bar(enabled: bool, cx: &mut VisualTestContext) {
+        cx.update(|_, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.workspace.title_bar_to_status_bar = Some(enabled);
+                })
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    async fn test_title_bar_to_status_bar(cx: &mut TestAppContext) {
+        struct TestTitleBar;
+        impl Render for TestTitleBar {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_4().debug_selector(|| "test_title_bar".into())
+            }
+        }
+
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_titlebar_item(cx.new(|_| TestTitleBar).into(), window, cx);
+        });
+
+        let title_bar_top = |enabled, cx: &mut VisualTestContext| {
+            set_title_bar_to_status_bar(enabled, cx);
+            cx.debug_bounds("test_title_bar")
+                .expect("title bar contents should be rendered")
+                .top()
+        };
+        let in_title_bar = title_bar_top(false, cx);
+        assert!(title_bar_top(true, cx) > in_title_bar + px(100.));
+        assert_eq!(title_bar_top(false, cx), in_title_bar);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    async fn test_title_bar_to_status_bar_keeps_title_when_status_bar_hidden(
+        cx: &mut TestAppContext,
+    ) {
+        struct TestTitleBar;
+        impl Render for TestTitleBar {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_4().debug_selector(|| "test_title_bar".into())
+            }
+        }
+
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_titlebar_item(cx.new(|_| TestTitleBar).into(), window, cx);
+        });
+        cx.run_until_parked();
+
+        set_title_bar_to_status_bar(false, cx);
+        let title_bar_top = cx
+            .debug_bounds("test_title_bar")
+            .expect("title bar contents should be rendered")
+            .top();
+        set_title_bar_to_status_bar(true, cx);
+        cx.update(|_, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.status_bar.get_or_insert_default().show = Some(false);
+                })
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.debug_bounds("test_title_bar")
+                .expect("hidden status bar must retain title bar contents")
+                .top(),
+            title_bar_top
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    async fn test_title_bar_to_status_bar_reserves_traffic_lights(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        add_an_item_to_active_pane(cx, &workspace, 1);
+
+        let first_tab_left = |enabled, cx: &mut VisualTestContext| {
+            set_title_bar_to_status_bar(enabled, cx);
+            cx.debug_bounds("TAB-0")
+                .expect("the tab should be rendered")
+                .left()
+        };
+        let without_spacer = first_tab_left(false, cx);
+        assert!(first_tab_left(true, cx) >= without_spacer + px(ui::utils::TRAFFIC_LIGHT_PADDING));
+    }
+
+    #[gpui::test]
+    async fn test_tab_width_bounds(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        add_an_item_to_active_pane(cx, &workspace, 1);
+        add_an_item_to_active_pane(cx, &workspace, 2);
+
+        let tab_width =
+            |min_width: Option<f32>, max_width: Option<f32>, cx: &mut VisualTestContext| {
+                cx.update(|_, cx| {
+                    SettingsStore::update_global(cx, |store, cx| {
+                        store.update_user_settings(cx, |settings| {
+                            let tabs = settings.tabs.get_or_insert_default();
+                            tabs.min_width = min_width.map(Into::into);
+                            tabs.max_width = max_width.map(Into::into);
+                        })
+                    });
+                });
+                cx.run_until_parked();
+                cx.debug_bounds("TAB-0")
+                    .expect("the tab should be rendered")
+                    .size
+                    .width
+            };
+        let natural = tab_width(None, None, cx);
+        assert_eq!(
+            tab_width(Some(natural.as_f32() + 100.), None, cx),
+            natural + px(100.)
+        );
+        assert_eq!(
+            tab_width(None, Some(natural.as_f32() - 10.), cx),
+            natural - px(10.)
+        );
+        assert_eq!(tab_width(None, None, cx), natural);
     }
 
     #[gpui::test]

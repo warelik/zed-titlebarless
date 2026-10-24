@@ -118,6 +118,90 @@ async fn test_sidebar_disabled_when_disable_ai_is_enabled(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+async fn test_initial_agent_panel_retains_nonempty_active_workspace(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(|cx| {
+        let mut settings = AgentSettings::get_global(cx).clone();
+        settings.threads_sidebar.in_agent_panel = true;
+        AgentSettings::override_global(settings, cx);
+    });
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file.txt": "" })).await;
+    let project = Project::test(fs, ["/root_a".as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+    multi_workspace.read_with(cx, |multi_workspace, cx| {
+        assert!(multi_workspace.multi_workspace_enabled(cx));
+        assert!(
+            multi_workspace.active_workspace_is_retained(),
+            "the initial nonempty project must be retained when the threads sidebar starts in the agent panel"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_agent_panel_layout_changes_keep_empty_workspace_transient(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(|cx| {
+        let mut settings = AgentSettings::get_global(cx).clone();
+        settings.threads_sidebar.in_agent_panel = false;
+        AgentSettings::override_global(settings, cx);
+    });
+    let fs = FakeFs::new(cx.executor());
+    let project = Project::test(fs, [], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+
+    for in_agent_panel in [true, false, true] {
+        cx.update(|_window, cx| {
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.threads_sidebar.in_agent_panel = in_agent_panel;
+            AgentSettings::override_global(settings, cx);
+        });
+        cx.run_until_parked();
+        multi_workspace.read_with(cx, |mw, cx| {
+            assert!(mw.multi_workspace_enabled(cx));
+            assert_eq!(mw.workspace(), &workspace);
+            assert_eq!(mw.workspaces().count(), 1);
+            assert!(mw.project_group_keys().is_empty());
+            assert!(!mw.active_workspace_is_retained());
+        });
+    }
+}
+
+#[gpui::test]
+async fn test_agent_panel_layout_changes_retain_nonempty_workspace(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(|cx| {
+        let mut settings = AgentSettings::get_global(cx).clone();
+        settings.threads_sidebar.in_agent_panel = false;
+        AgentSettings::override_global(settings, cx);
+    });
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file.txt": "" })).await;
+    let project = Project::test(fs, ["/root_a".as_ref()], cx).await;
+    let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    multi_workspace.read_with(cx, |mw, _cx| assert!(!mw.active_workspace_is_retained()));
+
+    cx.update(|_window, cx| {
+        let mut settings = AgentSettings::get_global(cx).clone();
+        settings.threads_sidebar.in_agent_panel = true;
+        AgentSettings::override_global(settings, cx);
+    });
+    cx.run_until_parked();
+    multi_workspace.read_with(cx, |mw, cx| {
+        assert!(mw.multi_workspace_enabled(cx));
+        assert!(mw.active_workspace_is_retained());
+        assert_eq!(mw.project_group_keys(), vec![key.clone()]);
+    });
+}
+
+#[gpui::test]
 async fn test_multi_workspace_collapses_when_agent_is_disabled(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
@@ -715,6 +799,125 @@ async fn test_remove_fallback_via_find_or_create_skips_removed_workspaces(cx: &m
             "the removed workspace should be gone"
         );
     });
+}
+
+#[gpui::test]
+async fn test_remove_with_pre_remove_runs_guard_after_consent_before_detach(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "file.txt": "" })).await;
+    let project = Project::test(fs, ["/root".as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace =
+        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+    let original_session = workspace.read_with(cx, |workspace, _| workspace.session_id());
+    assert!(original_session.is_some());
+    let dirty_item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_item_to_active_pane(Box::new(dirty_item.clone()), None, true, window, cx);
+    });
+
+    let guard_calls = Rc::new(Cell::new(0));
+    let remove_task = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        let guard_calls = guard_calls.clone();
+        multi_workspace.remove_with_pre_remove(
+            [workspace.clone()],
+            RemovalIntent::CloseProject,
+            async move |_, _| {
+                guard_calls.set(guard_calls.get() + 1);
+                Ok(true)
+            },
+            window,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt());
+    assert_eq!(guard_calls.get(), 0, "guard must wait for close consent");
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(!remove_task.await.expect("cancelled removal should succeed"));
+    assert_eq!(
+        guard_calls.get(),
+        0,
+        "cancelled consent must skip the guard"
+    );
+    assert!(multi_workspace.read_with(cx, |multi_workspace, _| {
+        multi_workspace
+            .workspaces()
+            .any(|candidate| candidate == &workspace)
+    }));
+
+    dirty_item.update(cx, |item, cx| {
+        item.is_dirty = false;
+        cx.notify();
+    });
+    let remove_task = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.remove_with_pre_remove(
+            [workspace.clone()],
+            RemovalIntent::CloseProject,
+            async |_, _| anyhow::bail!("guard refused removal"),
+            window,
+            cx,
+        )
+    });
+    assert!(remove_task.await.is_err());
+    assert_eq!(workspace.read_with(cx, |workspace, _| workspace.session_id()), original_session);
+    assert!(multi_workspace.read_with(cx, |multi_workspace, _| {
+        multi_workspace
+            .workspaces()
+            .any(|candidate| candidate == &workspace)
+    }));
+
+    let remove_task = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.remove_with_pre_remove(
+            [workspace.clone()],
+            RemovalIntent::CloseProject,
+            async |_, _| Ok(false),
+            window,
+            cx,
+        )
+    });
+    assert!(!remove_task.await.expect("refused removal should succeed"));
+    assert_eq!(workspace.read_with(cx, |workspace, _| workspace.session_id()), original_session);
+    assert!(multi_workspace.read_with(cx, |multi_workspace, _| {
+        multi_workspace
+            .workspaces()
+            .any(|candidate| candidate == &workspace)
+    }));
+
+    let guard_calls = Rc::new(Cell::new(0));
+    let weak_multi_workspace = multi_workspace.downgrade();
+    let guarded_workspace = workspace.clone();
+    let remove_task = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        let guard_calls = guard_calls.clone();
+        multi_workspace.remove_with_pre_remove(
+            [workspace.clone()],
+            RemovalIntent::CloseProject,
+            async move |cx, _workspaces_unchanged| {
+                assert!(weak_multi_workspace.read_with(cx, |multi_workspace, _| {
+                    multi_workspace
+                        .workspaces()
+                        .any(|candidate| candidate == &guarded_workspace)
+                })?);
+                guard_calls.set(guard_calls.get() + 1);
+                Ok(true)
+            },
+            window,
+            cx,
+        )
+    });
+    assert!(remove_task.await.expect("guarded removal should succeed"));
+    assert_eq!(workspace.read_with(cx, |workspace, _| workspace.session_id()), None);
+    assert_eq!(guard_calls.get(), 1);
+    assert!(!multi_workspace.read_with(cx, |multi_workspace, _| {
+        multi_workspace
+            .workspaces()
+            .any(|candidate| candidate == &workspace)
+    }));
 }
 
 #[gpui::test]
@@ -1730,4 +1933,370 @@ async fn test_nearest_retained_workspace_skips_disconnected_workspace(cx: &mut T
             "a disconnected workspace should not be selected as a fallback"
         );
     });
+}
+
+#[gpui::test]
+async fn test_item_close_guard_rejects_item_dirtied_after_consent(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    let project = Project::test(fs, [], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let item = cx.new(|cx| TestItem::new(cx));
+    multi_workspace.update_in(cx, |_multi_workspace, window, cx| {
+        let mut guard = ItemCloseGuard::new(vec![Box::new(item.clone())], window, cx);
+        item.update(cx, |item, _| item.is_dirty = true);
+        assert!(!guard.accept_consent(cx));
+    });
+    assert!(item.read_with(cx, |item, _| item.is_dirty));
+}
+
+#[gpui::test]
+async fn test_item_close_guard_preserves_discard_and_saved_formatting(cx: &mut TestAppContext) {
+    use crate::item::ItemEvent;
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    let project = Project::test(fs, [], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
+    let mut discard = multi_workspace.update_in(cx, |_, window, cx| {
+        ItemCloseGuard::new(vec![Box::new(item.clone())], window, cx)
+    });
+    cx.update(|_, cx| {
+        assert!(discard.accept_consent(cx), "an explicitly discarded unchanged buffer is accepted");
+    });
+    let mut saved_then_edited = multi_workspace.update_in(cx, |_, window, cx| {
+        ItemCloseGuard::new(vec![Box::new(item.clone())], window, cx)
+    });
+    // User edits and prompt responses are separate event turns. Let the
+    // window-scoped item subscriptions observe them before accepting consent.
+    item.update(cx, |item, cx| { item.is_dirty = false; cx.emit(ItemEvent::UpdateTab); });
+    item.update(cx, |item, cx| { item.is_dirty = true; cx.emit(ItemEvent::Edit); });
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        assert!(!saved_then_edited.accept_consent(cx), "an edit during another prompt remains unsaved");
+    });
+    let mut formatting = multi_workspace.update_in(cx, |_, window, cx| {
+        ItemCloseGuard::new(vec![Box::new(item.clone())], window, cx)
+    });
+    item.update(cx, |item, cx| { item.is_dirty = true; cx.emit(ItemEvent::Edit); });
+    item.update(cx, |item, cx| { item.is_dirty = false; cx.emit(ItemEvent::UpdateTab); });
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        assert!(formatting.accept_consent(cx), "saved formatting is part of accepted save consent");
+        assert!(!formatting.changed(cx));
+    });
+    item.update(cx, |item, cx| { item.is_dirty = true; cx.emit(ItemEvent::Edit); });
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        assert!(formatting.changed(cx), "edits after consent still refuse destructive cleanup");
+    });
+}
+
+#[gpui::test]
+async fn test_workspace_close_keeps_edits_made_during_another_consent_prompt(cx: &mut TestAppContext) {
+    use crate::item::ItemEvent;
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/first", json!({"file.txt": ""})).await;
+    fs.insert_tree("/second", json!({"file.txt": ""})).await;
+    let first_project = Project::test(fs.clone(), ["/first".as_ref()], cx).await;
+    let second_project = Project::test(fs, ["/second".as_ref()], cx).await;
+    let (multi_workspace, cx) = setup_multi_workspace(&[first_project, second_project], cx);
+    let workspaces = multi_workspace.read_with(cx, |mw, _| mw.workspaces().cloned().collect::<Vec<_>>());
+    assert_eq!(workspaces.len(), 2);
+    let first_item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
+    let second_item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
+    for (workspace, item) in workspaces.iter().zip([first_item.clone(), second_item]) {
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx);
+        });
+    }
+    let callback_called = Rc::new(Cell::new(false));
+    let task = multi_workspace.update_in(cx, |mw, window, cx| {
+        let called = callback_called.clone();
+        mw.remove_with_pre_remove(workspaces.clone(), RemovalIntent::CloseProject,
+            async move |_, _| { called.set(true); Ok(true) }, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Don't Save");
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt());
+    first_item.update(cx, |item, cx| {
+        item.state = "work written during the second prompt".into();
+        item.is_dirty = true;
+        cx.emit(ItemEvent::Edit);
+    });
+    cx.simulate_prompt_answer("Don't Save");
+    cx.run_until_parked();
+    assert!(!task.await.unwrap());
+    assert!(!callback_called.get(), "a known unsafe close must not start session termination");
+    assert_eq!(multi_workspace.read_with(cx, |mw, _| mw.workspaces().count()), 2);
+    assert!(first_item.read_with(cx, |item, _| item.is_dirty));
+}
+
+
+#[gpui::test]
+async fn test_remove_with_pre_remove_keeps_edits_made_during_guard(cx: &mut TestAppContext) {
+    use crate::item::ItemEvent;
+    use futures::channel::oneshot;
+
+    init_test(cx);
+    cx.update(|cx| crate::register_serializable_item::<TestItem>(cx));
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/guard-root", json!({ "file.txt": "" }))
+        .await;
+    let project = Project::test(fs, ["/guard-root".as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace =
+        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+    let original_item = cx.new(|cx| {
+        TestItem::new(cx)
+            .with_dirty(true)
+            .with_serialize(|| Some(gpui::Task::ready(Ok(()))))
+    });
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_item_to_active_pane(Box::new(original_item.clone()), None, true, window, cx);
+    });
+
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let remove_task = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.remove_with_pre_remove(
+            [workspace.clone()],
+            RemovalIntent::CloseProject,
+            async move |cx, workspaces_unchanged| {
+                let _ = started_tx.send(());
+                let _ = release_rx.await;
+                assert!(!gpui::AsyncApp::update(cx, |cx| workspaces_unchanged(cx)),
+                    "the destructive callback must see edits to the whole workspace before stopping a session");
+                Ok(true)
+            },
+            window,
+            cx,
+        )
+    });
+    started_rx.await.expect("guard should start after consent");
+    assert!(original_item.read_with(cx, |item, _| item.is_dirty));
+
+    original_item.update(cx, |item, cx| {
+        item.state = "edited while terminal stopped".into();
+        item.is_dirty = true;
+        cx.emit(ItemEvent::Edit);
+    });
+    release_tx.send(()).expect("guard should still be waiting");
+
+    assert!(
+        !remove_task
+            .await
+            .expect("changed removal should be refused")
+    );
+    assert!(multi_workspace.read_with(cx, |multi_workspace, _| {
+        multi_workspace
+            .workspaces()
+            .any(|candidate| candidate == &workspace)
+    }));
+    original_item.read_with(cx, |item, _| {
+        assert_eq!(item.state, "edited while terminal stopped");
+        assert!(item.is_dirty);
+    });
+    workspace.read_with(cx, |workspace, cx| {
+        let item_ids = workspace
+            .panes()
+            .iter()
+            .flat_map(|pane| pane.read(cx).items().map(|item| item.item_id()))
+            .collect::<Vec<_>>();
+        assert!(item_ids.contains(&original_item.entity_id()));
+    });
+    assert!(
+        !cx.has_pending_prompt(),
+        "changed state must not prompt again"
+    );
+
+    // Exercise membership changes independently so the edit event above cannot
+    // mask a failure to notice a newly opened item.
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/membership-root", json!({ "file.txt": "" }))
+        .await;
+    let project = Project::test(fs, ["/membership-root".as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace =
+        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+    let original_item = cx.new(|cx| TestItem::new(cx));
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_item_to_active_pane(Box::new(original_item.clone()), None, true, window, cx);
+    });
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let remove_task = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.remove_with_pre_remove(
+            [workspace.clone()],
+            RemovalIntent::CloseProject,
+            async move |_, _| {
+                let _ = started_tx.send(());
+                let _ = release_rx.await;
+                Ok(true)
+            },
+            window,
+            cx,
+        )
+    });
+    started_rx.await.expect("guard should start after consent");
+    let new_item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_item_to_active_pane(Box::new(new_item.clone()), None, true, window, cx);
+    });
+    release_tx.send(()).expect("guard should still be waiting");
+    assert!(!remove_task.await.expect("new item should refuse removal"));
+    assert!(multi_workspace.read_with(cx, |multi_workspace, _| {
+        multi_workspace
+            .workspaces()
+            .any(|candidate| candidate == &workspace)
+    }));
+    workspace.read_with(cx, |workspace, cx| {
+        let item_ids = workspace
+            .panes()
+            .iter()
+            .flat_map(|pane| pane.read(cx).items().map(|item| item.item_id()))
+            .collect::<Vec<_>>();
+        assert!(item_ids.contains(&original_item.entity_id()));
+        assert!(item_ids.contains(&new_item.entity_id()));
+    });
+    assert!(
+        !cx.has_pending_prompt(),
+        "membership change must not prompt again"
+    );
+}
+
+
+#[gpui::test]
+async fn test_remove_project_group_preserves_row_when_close_is_cancelled(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/project-a", json!({"file.txt": ""})).await;
+    fs.insert_tree("/project-b", json!({})).await;
+    let project_a = Project::test(fs.clone(), ["/project-a".as_ref()], cx).await;
+    let project_b = Project::test(fs, ["/project-b".as_ref()], cx).await;
+    let key_a = project_a.read_with(cx, |project, cx| project.project_group_key(cx));
+    let (multi_workspace, cx) = setup_multi_workspace(&[project_a, project_b], cx);
+    let workspace = multi_workspace.read_with(cx, |mw, cx| {
+        mw.workspaces_for_project_group(&key_a, cx)[0].clone()
+    });
+    multi_workspace.update_in(cx, |mw, window, cx| mw.activate(workspace.clone(), None, window, cx));
+    let dirty = cx.new(|cx| TestItem::new(cx).with_dirty(true));
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_item_to_active_pane(Box::new(dirty.clone()), None, true, window, cx);
+    });
+    let before = multi_workspace.read_with(cx, |mw, _| mw.project_group_keys());
+    let task = multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.remove_project_group(&key_a, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt());
+    assert_eq!(multi_workspace.read_with(cx, |mw, _| mw.project_group_keys()), before);
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(!task.await.unwrap());
+    assert_eq!(multi_workspace.read_with(cx, |mw, _| mw.project_group_keys()), before);
+    assert!(dirty.read_with(cx, |item, _| item.is_dirty));
+    assert!(multi_workspace.read_with(cx, |mw, _| mw.workspaces().any(|held| held == &workspace)));
+
+    let task = multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.remove_project_group(&key_a, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Don't Save");
+    cx.run_until_parked();
+    assert!(task.await.unwrap());
+    assert!(multi_workspace.read_with(cx, |mw, _| mw.group_state_by_key(&key_a).is_none()));
+    assert!(multi_workspace.read_with(cx, |mw, _| mw.workspaces().all(|held| held != &workspace)));
+}
+
+#[gpui::test]
+async fn test_remove_project_group_keeps_workspace_opened_during_consent(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/project", json!({"file.txt": ""})).await;
+    let project = Project::test(fs, ["/project".as_ref()], cx).await;
+    let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+    let (multi_workspace, cx) = setup_multi_workspace(&[project.clone()], cx);
+    let original = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    let dirty = cx.new(|cx| TestItem::new(cx).with_dirty(true));
+    original.update_in(cx, |workspace, window, cx| {
+        workspace.add_item_to_active_pane(Box::new(dirty), None, true, window, cx);
+    });
+    let task = multi_workspace.update_in(cx, |mw, window, cx| mw.remove_project_group(&key, window, cx));
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt());
+    let opened = multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project.clone(), window, cx)
+    });
+    cx.simulate_prompt_answer("Don't Save");
+    cx.run_until_parked();
+    assert!(task.await.unwrap());
+    multi_workspace.read_with(cx, |mw, cx| {
+        assert!(mw.group_state_by_key(&key).is_some());
+        assert!(mw.workspaces_for_project_group(&key, cx).contains(&opened));
+        assert!(!mw.workspaces_for_project_group(&key, cx).contains(&original));
+    });
+}
+
+#[gpui::test]
+async fn test_remove_unloaded_project_group_still_removes_its_row(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/open", json!({})).await;
+    let project = Project::test(fs, ["/open".as_ref()], cx).await;
+    let (multi_workspace, cx) = setup_multi_workspace(&[project], cx);
+    let key = ProjectGroupKey::new(None, PathList::new(&[PathBuf::from("/unloaded")]));
+    multi_workspace.update(cx, |mw, _| {
+        mw.test_add_project_group(ProjectGroup {key: key.clone(), workspaces: Vec::new(), expanded: true});
+    });
+    let task = multi_workspace.update_in(cx, |mw, window, cx| mw.remove_project_group(&key, window, cx));
+    assert!(!task.await.unwrap(), "no loaded workspace was detached");
+    assert!(multi_workspace.read_with(cx, |mw, _| mw.group_state_by_key(&key).is_none()));
+}
+
+
+#[gpui::test]
+async fn test_cancel_project_close_preserves_transient_retention(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/transient", json!({"file.txt": ""})).await;
+    let project = Project::test(fs, ["/transient".as_ref()], cx).await;
+    let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+    let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+        MultiWorkspace::test_new(project, window, cx)
+    });
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    let dirty = cx.new(|cx| TestItem::new(cx).with_dirty(true));
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_item_to_active_pane(Box::new(dirty), None, true, window, cx);
+    });
+    assert!(!multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&workspace)));
+    let before = multi_workspace.read_with(cx, |mw, _| mw.project_group_keys());
+    let task = multi_workspace.update_in(cx, |mw, window, cx| mw.remove_project_group(&key, window, cx));
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt());
+    assert!(!multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&workspace)));
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(!task.await.unwrap());
+    assert!(!multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&workspace)));
+    assert_eq!(multi_workspace.read_with(cx, |mw, _| mw.project_group_keys()), before);
+
+    // An explicit user retention made while a second close is pending survives.
+    let task = multi_workspace.update_in(cx, |mw, window, cx| mw.remove_project_group(&key, window, cx));
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt());
+    multi_workspace.update(cx, |mw, cx| mw.retain_active_workspace(cx));
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(!task.await.unwrap());
+    assert!(multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&workspace)));
 }
