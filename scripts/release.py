@@ -4883,7 +4883,8 @@ def publish(directory):
         "macOS Apple Silicon; ad-hoc signed, not notarized. The shipped DMG and "
         "matching symbols passed the preserved regressions and artifact inspection. "
         "No running editor or remote session is restarted by this workflow.\n\n"
-        + (ROOT / "RELEASE_NOTES.md").read_text())
+        + (ROOT / "RELEASE_NOTES.md").read_text()
+        + "\n\n" + marker)
     def validate_boundary(published):
         if published:
             current = api(f"repos/{repo}/releases/{identity['release_id']}")

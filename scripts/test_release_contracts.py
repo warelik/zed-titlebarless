@@ -288,6 +288,22 @@ class ReleaseReservationTests(unittest.TestCase):
         ):
             self.reserve(None)
 
+    def test_withdrawn_notes_body_keeps_identity_and_author_refusals(self):
+        withdrawn_notes = "Publication notes left by a withdrawn candidate\n\n"
+        changed = self.draft(identity={**self.identity(), "candidate_sha": "e" * 40})
+        changed["body"] = withdrawn_notes + changed["body"]
+        foreign = self.draft(author={"login": "somebody"})
+        foreign["body"] = withdrawn_notes + foreign["body"]
+        for record in (changed, foreign):
+            with (
+                self.subTest(record=record),
+                patch.object(release, "pages", return_value=[record]),
+                patch.object(release, "api") as api,
+                self.assertRaises(ValueError),
+            ):
+                self.reserve(record)
+            api.assert_not_called()
+
 
 class BuildIdentityTests(unittest.TestCase):
     def environment(self, **changes):
@@ -579,6 +595,17 @@ class PublishedReleaseTests(unittest.TestCase):
             verify.assert_called_once()
             close_reviews.assert_called_once()
             self.assertEqual(close_repair.call_args.kwargs["expected_head"], "f" * 40)
+            marker = (
+                "<!-- zed-candidate:v1 "
+                + json.dumps(marker_identity, sort_keys=True)
+                + " -->"
+            )
+            published_body = next(
+                data["body"]
+                for _path, method, data, _token in api_calls
+                if method == "PATCH" and data.get("draft") is False
+            )
+            self.assertEqual(published_body.count(marker), 1)
 
     def test_corrupt_local_asset_cannot_publish(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -628,6 +655,132 @@ class PublishedReleaseTests(unittest.TestCase):
             ):
                 release.publish(directory)
             run.assert_not_called()
+
+    def test_withdrawn_publication_reserves_again_with_the_same_native_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            identity, _, _, _, assets, tag = metadata_fixture(directory)
+            marker_identity = {
+                key: identity[key]
+                for key in (
+                    "schema",
+                    "candidate_sha",
+                    "upstream_sha",
+                    "patchset_sha256",
+                    "version",
+                    "config_sha",
+                )
+            }
+            marker = (
+                "<!-- zed-candidate:v1 "
+                + json.dumps(marker_identity, sort_keys=True)
+                + " -->"
+            )
+            record = {
+                "id": identity["release_id"],
+                "draft": True,
+                "prerelease": False,
+                "tag_name": tag,
+                "target_commitish": identity["candidate_sha"],
+                "author": {"login": "maintainer"},
+                "body": marker,
+                "assets": [assets["Zed.dmg"]],
+            }
+            release_path = (
+                f"repos/{identity['repository']}/releases/{identity['release_id']}"
+            )
+
+            def api(path, *, method="GET", data=None, token=None):
+                if path == release_path:
+                    if method == "PATCH":
+                        record.update(data)
+                    return record
+                if path == f"repos/{identity['repository']}/commits/downstream":
+                    return {"sha": identity["config_sha"]}
+                if path == f"repos/{identity['repository']}/git/refs" and method == "POST":
+                    return {"ref": f"refs/tags/{tag}"}
+                if path == f"repos/{identity['repository']}/git/ref/tags/{tag}":
+                    return {
+                        "object": {
+                            "type": "commit",
+                            "sha": identity["candidate_sha"],
+                        }
+                    }
+                return {}
+
+            def run(*args, **kwargs):
+                if args[:3] == ("gh", "release", "upload"):
+                    record["assets"] = list(assets.values())
+                return ""
+
+            reviews = iter(
+                [(True, "reviewed")] * 3
+                + [(False, "a newer review superseded the publication")]
+            )
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "GITHUB_REPOSITORY": identity["repository"],
+                        "GITHUB_SHA": identity["config_sha"],
+                        "RELEASE_TAG": tag,
+                        "CANDIDATE_PR": "7",
+                        "DELTA_PR": "8",
+                    },
+                    clear=True,
+                ),
+                patch.object(release, "build_identity", return_value=identity),
+                patch.object(release, "api", side_effect=api),
+                patch.object(release, "pages", return_value=[]),
+                patch.object(
+                    release,
+                    "check_review",
+                    side_effect=lambda *args, **kwargs: next(reviews),
+                ),
+                patch.object(release, "ensure_forward_release"),
+                patch.object(release, "verify_published_release"),
+                patch.object(release, "minor_findings", return_value=[]),
+                patch.object(release, "run", side_effect=run),
+                self.assertRaisesRegex(
+                    ValueError, "Publication review was invalidated"
+                ),
+            ):
+                release.publish(directory)
+
+            self.assertTrue(record["draft"])
+            self.assertEqual(record["id"], identity["release_id"])
+            self.assertEqual(record["tag_name"], tag)
+            self.assertEqual(
+                record["target_commitish"], identity["candidate_sha"]
+            )
+            self.assertEqual(record["assets"], list(assets.values()))
+            self.assertEqual(record["body"].count(marker), 1)
+
+            with (
+                patch.object(release, "pages", return_value=[record]),
+                patch.object(release, "api", side_effect=api),
+                patch.object(release, "ensure_forward_release") as forward,
+            ):
+                self.assertEqual(
+                    release.reserve_release(
+                        identity["repository"],
+                        tag,
+                        identity["candidate_sha"],
+                        identity["upstream_sha"],
+                        identity["patchset_sha256"],
+                        identity["version"],
+                        identity["config_sha"],
+                    ),
+                    identity["release_id"],
+                )
+            self.assertEqual(record["body"], marker)
+            forward.assert_called_once_with(
+                identity["repository"],
+                identity["version"],
+                identity["upstream_sha"],
+                release_id=identity["release_id"],
+            )
 
 
 class WorkflowContractTests(unittest.TestCase):
