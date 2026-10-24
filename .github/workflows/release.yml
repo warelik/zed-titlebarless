@@ -18,6 +18,10 @@ on:
       delta_pr:
         description: Completed configuration-delta review PR for bootstrap
         required: false
+      artifact_recovery:
+        description: Exact validated run/attempt to publish with the current checked controller
+        type: string
+        required: false
   push:
     branches: [downstream]
     paths: ["patches/**", "scripts/**", ".github/workflows/release.yml"]
@@ -93,6 +97,9 @@ jobs:
       artifact_run_id: ${{ steps.snapshot.outputs.artifact_run_id }}
       artifact_run_attempt: ${{ steps.snapshot.outputs.artifact_run_attempt }}
       artifact_workflow_sha: ${{ steps.snapshot.outputs.artifact_workflow_sha }}
+      artifact_config: ${{ steps.snapshot.outputs.artifact_config }}
+      checked_policy: ${{ steps.snapshot.outputs.checked_policy }}
+      publication_config: ${{ steps.snapshot.outputs.publication_config }}
     steps:
       - name: Require The Trusted Default Branch
         env:
@@ -161,6 +168,7 @@ jobs:
           DELTA_SHA: ${{ needs.verify-bootstrap-bundle.result == 'success' && needs.verify-bootstrap-bundle.outputs.policy_ref || '' }}
           DELTA_BASE: ${{ needs.verify-bootstrap-bundle.result == 'success' && needs.verify-bootstrap-bundle.outputs.delta_base || '' }}
           BOOTSTRAP_MAINTENANCE_CANDIDATE: ${{ needs.verify-bootstrap-bundle.outputs.maintenance_candidate }}
+          ARTIFACT_RECOVERY: ${{ github.event_name == 'workflow_dispatch' && inputs.artifact_recovery || '' }}
         run: |
           python3 -B - <<'PY'
           import json, os, pathlib, sys
@@ -433,7 +441,8 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare.outputs.release }}
           RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
           REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}
-          CONFIG_SHA: ${{ needs.land.outputs.config || github.sha }}
+          CONFIG_SHA: ${{ needs.prepare.outputs.artifact_config || needs.land.outputs.config || github.sha }}
+          PUBLICATION_CONFIG_SHA: ${{ needs.prepare.outputs.publication_config || needs.land.outputs.config || github.sha }}
           REVIEW_CONFIG_SHA: ${{ needs.prepare.outputs.candidate_config }}
           MAINTENANCE_CANDIDATE: ${{ needs.prepare.outputs.maintenance_candidate }}
           MAINTENANCE_BASELINE: ${{ needs.prepare.outputs.maintenance_baseline }}
@@ -560,7 +569,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.candidate_config }}
+          ref: ${{ needs.prepare.outputs.checked_policy || needs.prepare.outputs.candidate_config }}
           path: checked
           persist-credentials: false
       - uses: actions/checkout@v4
@@ -648,7 +657,7 @@ jobs:
         id: pin
         env:
           GH_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
-          POLICY_REF: ${{ needs.prepare.outputs.candidate_config }}
+          POLICY_REF: ${{ needs.prepare.outputs.checked_policy || needs.prepare.outputs.candidate_config }}
         run: |
           [[ "$POLICY_REF" =~ ^[0-9a-f]{40}$ ]]
           gh variable set ZED_TRUSTED_POLICY --repo "$GITHUB_REPOSITORY" --body "$POLICY_REF"

@@ -803,6 +803,238 @@ class PublishedReleaseTests(unittest.TestCase):
             )
 
 
+    def recovery_fixture(self, directory):
+        identity, _, _, _, assets, tag = metadata_fixture(directory)
+        publication = "0" * 40
+        candidate = {"schema": 1, "repository": identity["repository"],
+                     "application_sha": identity["candidate_sha"],
+                     "configuration_sha": identity["config_sha"],
+                     "upstream_sha": identity["upstream_sha"],
+                     "patchset_sha256": identity["patchset_sha256"],
+                     "recipe_sha256": "e" * 64, "platform": "macos/aarch64"}
+        marker_identity = {key: identity[key] for key in (
+            "schema", "candidate_sha", "upstream_sha", "patchset_sha256",
+            "version", "config_sha")}
+        marker = ("<!-- zed-candidate:v1 " + json.dumps(marker_identity, sort_keys=True)
+                  + " -->")
+        record = {"id": identity["release_id"], "draft": True, "prerelease": False,
+                  "tag_name": tag, "target_commitish": identity["candidate_sha"],
+                  "author": {"login": "maintainer"}, "body": marker,
+                  "assets": [assets["Zed.dmg"]]}
+        release_path = f"repos/{identity['repository']}/releases/{identity['release_id']}"
+        api_calls = []
+
+        def api(path, *, method="GET", data=None, token=None):
+            api_calls.append((path, method, data))
+            if path == release_path:
+                if method == "PATCH":
+                    record.update(data)
+                    if "tag_name" not in data:
+                        record["tag_name"] = "untagged-native"
+                return record
+            if path == f"repos/{identity['repository']}/commits/downstream":
+                return {"sha": publication}
+            if path == f"repos/{identity['repository']}/actions/variables/ZED_TRUSTED_POLICY":
+                return {"name": "ZED_TRUSTED_POLICY", "value": publication}
+            if path == f"repos/{identity['repository']}/git/refs" and method == "POST":
+                return {"ref": f"refs/tags/{tag}"}
+            if path == f"repos/{identity['repository']}/git/ref/tags/{tag}":
+                return {"object": {"type": "commit", "sha": identity["candidate_sha"]}}
+            return {}
+
+        environment = {
+            "GITHUB_REPOSITORY": identity["repository"],
+            "GITHUB_SHA": publication,
+            "RELEASE_TAG": tag,
+            "CANDIDATE_PR": "7",
+            "DELTA_PR": "8",
+            "REVIEW_CONFIG_SHA": identity["config_sha"],
+            "CONFIG_SHA": identity["config_sha"],
+            "PUBLICATION_CONFIG_SHA": publication,
+            "MAINTENANCE_CANDIDATE": json.dumps(candidate),
+            "MAINTENANCE_BASELINE": json.dumps({"variable": {"value": json.dumps(
+                {"publication": {"published_at": "2026-10-19T10:00:00Z"}})}}),
+            "ARTIFACT_RECEIPT_PATH": "/unused/receipt",
+            "ARTIFACT_VALIDATED_RUN_ID": "41",
+            "ARTIFACT_VALIDATED_RUN_ATTEMPT": "2",
+            "ARTIFACT_VALIDATED_WORKFLOW_SHA": identity["config_sha"],
+            "FULL_REVIEW_SHA": "f" * 40,
+            "DELTA_SHA": "0" * 40,
+            "DELTA_BASE": "1" * 40,
+        }
+        return identity, assets, tag, marker, record, api, api_calls, environment, publication
+
+    def test_recovery_publish_keeps_original_identity_under_the_checked_controller(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (identity, assets, tag, marker, record, api, api_calls,
+             environment, publication) = self.recovery_fixture(Path(temporary))
+
+            def run(*args, **kwargs):
+                if args[:3] == ("gh", "release", "upload"):
+                    record["assets"] = list(assets.values())
+                return ""
+
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch.object(release, "build_identity", return_value=identity),
+                patch.object(release, "api", side_effect=api),
+                patch.object(release, "pages", return_value=[]),
+                patch.object(release, "check_shared_publication"),
+                patch.object(release, "verify_artifact_receipt") as receipt,
+                patch.object(release, "publication_review_status",
+                             return_value=(True, "reviewed")),
+                patch.object(release, "publication_minor_findings", return_value=[]),
+                patch.object(release, "ensure_forward_release"),
+                patch.object(release, "verify_published_release"),
+                patch.object(release, "advance_published_baseline"),
+                patch.object(release, "close_published_reviews"),
+                patch.object(release, "close_recovered_repair") as close_repair,
+                patch.object(release, "run", side_effect=run),
+            ):
+                release.publish(Path(temporary))
+            self.assertFalse(record["draft"])
+            self.assertEqual(record["tag_name"], tag)
+            self.assertEqual(record["target_commitish"], identity["candidate_sha"])
+            self.assertEqual(record["body"].count(marker), 1)
+            self.assertTrue(all(
+                data.get("tag_name") == tag
+                for _path, method, data in api_calls if method == "PATCH"))
+            self.assertEqual(close_repair.call_args.args[1], publication)
+            self.assertEqual(receipt.call_args.args[2]["configuration_sha"],
+                             identity["config_sha"])
+            self.assertEqual(receipt.call_args.args[2]["application_sha"],
+                             identity["candidate_sha"])
+            self.assertEqual(receipt.call_args.kwargs, {
+                "run_id": 41, "run_attempt": 2,
+                "workflow_sha": identity["config_sha"]})
+
+    def test_recovery_publish_refuses_unbound_or_moved_controller_identities(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (identity, assets, tag, marker, record, api, api_calls,
+             environment, publication) = self.recovery_fixture(Path(temporary))
+            variants = [
+                {"MAINTENANCE_CANDIDATE": ""},
+                {"REVIEW_CONFIG_SHA": "f" * 40},
+                {"GITHUB_SHA": "9" * 40},
+            ]
+            for changes in variants:
+                with (
+                    self.subTest(changes=changes),
+                    patch.dict(os.environ, environment | changes, clear=True),
+                    patch.object(release, "build_identity", return_value=identity),
+                    patch.object(release, "api", side_effect=api),
+                    patch.object(release, "check_shared_publication"),
+                    patch.object(release, "verify_artifact_receipt"),
+                    patch.object(release, "run") as run,
+                    self.assertRaisesRegex(ValueError, "checked controller pin"),
+                ):
+                    release.publish(Path(temporary))
+                run.assert_not_called()
+                self.assertFalse(any(method == "PATCH" for _, method, _ in api_calls))
+                api_calls.clear()
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch.object(release, "build_identity", return_value=identity),
+                patch.object(
+                    release, "api",
+                    side_effect=lambda path, **kwargs: {"value": "9" * 40}
+                    if "ZED_TRUSTED_POLICY" in path else api(path, **kwargs)),
+                patch.object(release, "check_shared_publication"),
+                patch.object(release, "verify_artifact_receipt"),
+                patch.object(release, "run") as run,
+                self.assertRaisesRegex(ValueError, "checked controller pin"),
+            ):
+                release.publish(Path(temporary))
+            run.assert_not_called()
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch.object(release, "build_identity", return_value=identity),
+                patch.object(
+                    release, "api",
+                    side_effect=lambda path, **kwargs: {"sha": "9" * 40}
+                    if path.endswith("commits/downstream") else api(path, **kwargs)),
+                patch.object(release, "check_shared_publication"),
+                patch.object(release, "verify_artifact_receipt"),
+                patch.object(release, "run") as run,
+                self.assertRaisesRegex(ValueError, "stale candidate"),
+            ):
+                release.publish(Path(temporary))
+            run.assert_not_called()
+
+    def recovery_pin_fixture(self, directory, extra_good_pins):
+        (identity, assets, tag, marker, record, api, api_calls,
+         environment, publication) = self.recovery_fixture(directory)
+        pin_values = iter([publication] * (extra_good_pins + 1) + ["9" * 40])
+        original_api = api
+
+        def api_with_pin_flip(path, *, method="GET", data=None, token=None):
+            if path.endswith("actions/variables/ZED_TRUSTED_POLICY"):
+                return {"name": "ZED_TRUSTED_POLICY", "value": next(pin_values)}
+            return original_api(path, method=method, data=data, token=token)
+
+        def run(*args, **kwargs):
+            if args[:3] == ("gh", "release", "upload"):
+                record["assets"] = list(assets.values())
+            return ""
+
+        return (identity, tag, record, api_calls, api_with_pin_flip,
+                environment, run)
+
+    def test_recovery_publish_never_exposes_the_draft_when_the_pin_flips_preboundary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (identity, tag, record, api_calls, api_flipped, environment,
+             run) = self.recovery_pin_fixture(Path(temporary), 0)
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch.object(release, "build_identity", return_value=identity),
+                patch.object(release, "api", side_effect=api_flipped),
+                patch.object(release, "pages", return_value=[]),
+                patch.object(release, "check_shared_publication"),
+                patch.object(release, "verify_artifact_receipt"),
+                patch.object(release, "publication_review_status",
+                             return_value=(True, "reviewed")),
+                patch.object(release, "publication_minor_findings", return_value=[]),
+                patch.object(release, "ensure_forward_release"),
+                patch.object(release, "verify_published_release"),
+                patch.object(release, "restore_publication_baseline") as restore,
+                patch.object(release, "run", side_effect=run),
+                self.assertRaisesRegex(ValueError, "pin changed during publication"),
+            ):
+                release.publish(Path(temporary))
+            restore.assert_not_called()
+            self.assertTrue(record["draft"])
+            self.assertFalse(any(
+                data.get("draft") is False
+                for _path, method, data in api_calls if method == "PATCH"))
+
+    def test_recovery_publish_withdraws_when_the_checked_pin_changes_at_the_boundary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (identity, tag, record, api_calls, api_flipped, environment,
+             run) = self.recovery_pin_fixture(Path(temporary), 1)
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch.object(release, "build_identity", return_value=identity),
+                patch.object(release, "api", side_effect=api_flipped),
+                patch.object(release, "pages", return_value=[]),
+                patch.object(release, "check_shared_publication"),
+                patch.object(release, "verify_artifact_receipt"),
+                patch.object(release, "publication_review_status",
+                             return_value=(True, "reviewed")),
+                patch.object(release, "publication_minor_findings", return_value=[]),
+                patch.object(release, "ensure_forward_release"),
+                patch.object(release, "verify_published_release"),
+                patch.object(release, "restore_publication_baseline") as restore,
+                patch.object(release, "run", side_effect=run),
+                self.assertRaisesRegex(ValueError, "pin changed during publication"),
+            ):
+                release.publish(Path(temporary))
+            restore.assert_called_once_with(
+                identity["repository"], identity["release_id"])
+            self.assertTrue(record["draft"])
+            self.assertEqual(record["tag_name"], tag)
+            self.assertEqual(record["body"].count("<!-- zed-candidate:v1 "), 1)
+
+
 class WorkflowContractTests(unittest.TestCase):
     def setUp(self):
         self.workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
@@ -847,6 +1079,26 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("Publication is not live installation", self.readme)
         self.assertIn("one-time install or their next ordinary higher-upstream-version update", self.readme)
         self.assertIn("immutable five-asset release", self.readme)
+
+    def test_artifact_recovery_input_outputs_and_checked_controller_wiring(self):
+        self.assertIn("artifact_recovery:", self.workflow)
+        self.assertIn("ARTIFACT_RECOVERY: ${{ github.event_name == 'workflow_dispatch' "
+                      "&& inputs.artifact_recovery || '' }}", self.workflow)
+        self.assertIn("artifact_config: ${{ steps.snapshot.outputs.artifact_config }}",
+                      self.workflow)
+        self.assertIn("checked_policy: ${{ steps.snapshot.outputs.checked_policy }}",
+                      self.workflow)
+        self.assertIn("publication_config: ${{ steps.snapshot.outputs.publication_config }}",
+                      self.workflow)
+        self.assertIn("ref: ${{ needs.prepare.outputs.checked_policy || "
+                      "needs.prepare.outputs.candidate_config }}", self.workflow)
+        self.assertIn("POLICY_REF: ${{ needs.prepare.outputs.checked_policy || "
+                      "needs.prepare.outputs.candidate_config }}", self.workflow)
+        self.assertIn("CONFIG_SHA: ${{ needs.prepare.outputs.artifact_config || "
+                      "needs.land.outputs.config || github.sha }}", self.workflow)
+        self.assertIn("PUBLICATION_CONFIG_SHA: ${{ needs.prepare.outputs.publication_config || "
+                      "needs.land.outputs.config || github.sha }}", self.workflow)
+        self.assertIn("needs.prepare.outputs.artifact_reuse != 'true'", self.workflow)
 
     def test_review_wait_and_total_repair_budget_are_distinct_and_bounded(self):
         self.assertEqual(release.REVIEW_WAIT_SECONDS, 7200)

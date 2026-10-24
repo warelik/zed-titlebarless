@@ -975,6 +975,61 @@ class SharedZedReviewTests(unittest.TestCase):
             release.merge_history_items([native], [conflicting], "dispositions")
 
 
+class ValidatedArtifactCandidateTests(unittest.TestCase):
+    def candidate(self, **changes):
+        return {"schema": 1, "repository": "owner/zed", "upstream_sha": "a" * 40,
+                "application_sha": "b" * 40, "configuration_sha": "c" * 40,
+                "patchset_sha256": "d" * 64, "recipe_sha256": "e" * 64,
+                "platform": "macos/aarch64"} | changes
+
+    def history(self, sources, *, complete=True):
+        return {"complete": complete,
+                "attempts": [{"candidate": source,
+                              "run": {"id": 41, "run_attempt": 2}}
+                             for source in sources]}
+
+    def test_exact_attempt_returns_its_source_with_only_configuration_difference(self):
+        candidate = self.candidate()
+        source = self.candidate(configuration_sha="f" * 40)
+        module = Mock()
+        with patch.object(release.maintenance, "load", return_value=module):
+            self.assertIs(release.validated_artifact_candidate(
+                candidate, self.history([source]), 41, 2), source)
+        module.candidate_identity.assert_called_once_with(source)
+
+    def test_incomplete_missing_and_duplicate_attempts_are_rejected(self):
+        candidate = self.candidate()
+        source = self.candidate(configuration_sha="f" * 40)
+        with patch.object(release.maintenance, "load", return_value=Mock()):
+            for incomplete in (False, None, "true", 1):
+                with self.subTest(complete=incomplete), self.assertRaisesRegex(
+                        ValueError, "complete native attempt history"):
+                    release.validated_artifact_candidate(
+                        candidate, self.history([source], complete=incomplete), 41, 2)
+            with self.assertRaisesRegex(ValueError, "exactly one"):
+                release.validated_artifact_candidate(
+                    candidate, self.history([source]), 42, 2)
+            with self.assertRaisesRegex(ValueError, "exactly one"):
+                release.validated_artifact_candidate(
+                    candidate, self.history([source], complete=True), 41, 1)
+            with self.assertRaisesRegex(ValueError, "exactly one"):
+                release.validated_artifact_candidate(
+                    candidate, self.history([source, source]), 41, 2)
+
+    def test_every_source_field_beyond_configuration_is_bound(self):
+        candidate = self.candidate()
+        for key, value in (("schema", 2), ("repository", "other/zed"),
+                           ("upstream_sha", "f" * 40), ("application_sha", "f" * 40),
+                           ("patchset_sha256", "0" * 64), ("recipe_sha256", "0" * 64),
+                           ("platform", "linux/x86_64")):
+            source = self.candidate(configuration_sha="f" * 40, **{key: value})
+            with (self.subTest(key=key),
+                  patch.object(release.maintenance, "load", return_value=Mock()),
+                  self.assertRaisesRegex(ValueError, "differs from the assembled")):
+                release.validated_artifact_candidate(
+                    candidate, self.history([source]), 41, 2)
+
+
 class SharedFinalArtifactReuseTests(unittest.TestCase):
     def test_final_reservation_readback_ignores_cosmetic_views_but_not_protocol_mutation(self):
         record = {"id": 7, "body": "exact protocol", "created_at": "2026-10-23T10:00:00Z",
@@ -1010,6 +1065,79 @@ class SharedFinalArtifactReuseTests(unittest.TestCase):
             native.assert_not_called()
         self.assertEqual(module.authorize_final.call_count, 2)
         module.authorize_final.assert_called_with(candidate, history)
+
+    def test_recovery_snapshot_is_used_without_recollecting_and_requires_the_exact_attempt(self):
+        candidate = {"schema": 1, "repository": "owner/zed", "upstream_sha": "a" * 40,
+                     "application_sha": "b" * 40, "configuration_sha": "c" * 40,
+                     "patchset_sha256": "d" * 64, "recipe_sha256": "e" * 64,
+                     "platform": "macos/aarch64"}
+        history = {"complete": True, "baseline": {"publication": {
+                       "published_at": "2026-10-19T10:00:00Z"}}, "attempts": []}
+        for decision in ({"decision": "allow"}, {"decision": "wait"},
+                         {"decision": "policy-only"}, {"decision": "reuse"},
+                         {"decision": "already-validated",
+                          "validated_run": {"id": 42, "run_attempt": 1}}):
+            module = Mock()
+            module.authorize_final.return_value = decision
+            with (self.subTest(decision=decision["decision"]),
+                  patch.dict(os.environ, {"GITHUB_RUN_ID": "90", "GITHUB_RUN_ATTEMPT": "1"},
+                             clear=True),
+                  patch.object(release, "final_attempt_history",
+                               side_effect=AssertionError("history must not be recollected")),
+                  patch.object(release, "reservations_from_history_comments", return_value=[]),
+                  patch.object(release.maintenance, "load", return_value=module),
+                  patch.object(release, "api") as native,
+                  self.assertRaisesRegex(ValueError, "exact earlier validated run")):
+                release.authorize_shared_final(
+                    candidate, {}, allow_reuse=True, history_snapshot=(history, []),
+                    required_validated_run=(41, 2))
+            native.assert_not_called()
+
+    def test_recovery_accepts_only_the_exact_already_validated_original_attempt(self):
+        candidate = {"schema": 1, "repository": "owner/zed", "upstream_sha": "a" * 40,
+                     "application_sha": "b" * 40, "configuration_sha": "c" * 40,
+                     "patchset_sha256": "d" * 64, "recipe_sha256": "e" * 64,
+                     "platform": "macos/aarch64"}
+        marker = {"schema": 1, "candidate_id": "1" * 64, "run_id": 41, "run_attempt": 2,
+                  "workflow_sha": "9" * 40}
+        body = ("Native reservation for one exact final Zed application attempt.\n"
+                "<!-- fork-candidate:v1 " + json.dumps(candidate, sort_keys=True,
+                separators=(",", ":")) + " -->\n<!-- fork-final:v1 "
+                + json.dumps(marker, sort_keys=True, separators=(",", ":")) + " -->")
+        comments = [{"id": 51, "body": body, "created_at": "2026-10-20T10:00:00Z",
+                     "updated_at": "2026-10-20T10:00:00Z",
+                     "user": {"login": "owner", "type": "User"}}]
+        names = release.candidate_artifact_names(candidate["application_sha"], 41, 2)
+        artifacts = [{"id": index + 1, "name": name, "expired": False,
+                      "size_in_bytes": 100, "digest": "sha256:" + "0" * 64,
+                      "workflow_run": {"id": 41}}
+                     for index, name in enumerate(names.values())]
+        history = {"complete": True, "baseline": {"publication": {
+                       "published_at": "2026-10-19T10:00:00Z"}}, "attempts": []}
+        module = Mock()
+        module.candidate_identity.return_value = "1" * 64
+        module.authorize_final.return_value = {
+            "decision": "already-validated", "candidate_id": "1" * 64,
+            "validated_run": {"id": 41, "run_attempt": 2}}
+        with (patch.dict(os.environ, {"GITHUB_RUN_ID": "90", "GITHUB_RUN_ATTEMPT": "1"},
+                         clear=True),
+              patch.object(release, "final_attempt_history",
+                           side_effect=AssertionError("history must not be recollected")),
+              patch.object(release, "reservations_from_history_comments", return_value=[]),
+              patch.object(release.maintenance, "load", return_value=module),
+              patch.object(release, "api", return_value={
+                  "total_count": 2, "artifacts": artifacts}) as native):
+            decision = release.authorize_shared_final(
+                candidate, {}, history_snapshot=(history, comments),
+                required_validated_run=(41, 2))
+        self.assertEqual(decision["decision"], "already-validated")
+        self.assertEqual(decision["validated_run"], {"id": 41, "run_attempt": 2})
+        self.assertEqual(decision["artifact_workflow_sha"], "9" * 40)
+        self.assertEqual(decision["artifact_names"], names)
+        self.assertEqual(decision["artifact_ids"],
+                         {name: item["id"] for name, item in zip(names.values(), artifacts)})
+        native.assert_called_once_with(
+            "repos/owner/zed/actions/runs/41/artifacts?per_page=100")
 
     def test_repair_workflow_source_uses_exact_native_files_and_cached_source_keys(self):
         repo, head, base = "owner/zed", "a" * 40, "b" * 40
@@ -2107,6 +2235,165 @@ class UnfinishedSourceSnapshotTests(unittest.TestCase):
                 release.prepare(Path(temporary) / "application", shared=True)
             latest.assert_not_called()
             native.assert_called_once_with(f"repos/{repo}/commits/downstream")
+
+    def test_recovery_reprepares_the_exact_original_candidate_and_run(self):
+        repo, old, new = "owner/zed", "c" * 40, "0" * 40
+        application, upstream, patchset = "a" * 40, "b" * 40, "d" * 64
+        candidate = {"schema": 1, "repository": repo, "upstream_sha": upstream,
+                     "application_sha": application, "configuration_sha": old,
+                     "patchset_sha256": patchset, "recipe_sha256": "e" * 64,
+                     "platform": "macos/aarch64"}
+        history = {"complete": True, "attempts": [
+            {"candidate": candidate, "run": {"id": 41, "run_attempt": 2}}]}
+        baseline = {"endpoint": "e", "variable": {"value": json.dumps(
+            {"publication": {"published_at": "2026-10-19T10:00:00Z"}})}}
+        context, review_pr, delta_pr = "f" * 40, 11, 12
+        tag = release.release_tag("1.24.2", upstream, patchset, application)
+        draft = {"id": 9, "tag_name": tag, "draft": True}
+        pull = {"number": review_pr, "state": "open",
+                "head": {"sha": context}, "base": {"ref": f"review-base/{upstream}"}}
+
+        def run(*args, **kwargs):
+            if args == ("git", "init", str(app)):
+                (app / "crates" / "zed").mkdir(parents=True)
+                (app / "crates" / "zed" / "Cargo.toml").write_text(
+                    '[package]\nversion = "1.24.2"\n')
+                return ""
+            if args == ("git", "rev-parse", "HEAD"):
+                return application
+            if args[:2] == ("git", "show") and args[2].endswith("Cargo.toml"):
+                return '[package]\nversion = "1.24.2"\n'
+            if args[:2] == ("git", "diff"):
+                return ""
+            return ""
+
+        def native(path, **kwargs):
+            if path == f"repos/{repo}/commits/downstream":
+                return {"sha": new}
+            if path == f"repos/{release.UPSTREAM}/commits/v1.24.2":
+                return {"sha": upstream}
+            return {}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary) / "application"
+            module = Mock()
+            module.candidate_identity.return_value = "1" * 64
+            outputs = {}
+            with (patch.dict(os.environ, {
+                      "GITHUB_REPOSITORY": repo, "GITHUB_SHA": new,
+                      "GITHUB_RUN_ID": "90", "GITHUB_RUN_ATTEMPT": "1",
+                      "ZED_TRUSTED_POLICY_SHA": new,
+                      "ARTIFACT_RECOVERY": "41/2"}, clear=True),
+                  patch.object(release, "output", side_effect=lambda **kw: outputs.update(kw)),
+                  patch.object(release, "api", side_effect=native) as native_api,
+                  patch.object(release, "pages", side_effect=lambda path, **kw: (
+                      [draft] if path == f"repos/{repo}/releases"
+                      else [pull] if "pulls?" in path else [])),
+                  patch.object(release, "proposal",
+                               side_effect=AssertionError("no proposal in recovery")) as proposal,
+                  patch.object(release, "patch_identity",
+                               return_value=([Path(temporary)], patchset)),
+                  patch.object(release, "active_snapshot", return_value=None),
+                  patch.object(release, "select_upstream",
+                               return_value=("v1.24.2", upstream)),
+                  patch.object(release, "minor_findings", return_value=[]),
+                  patch.object(release, "pending_source_snapshot",
+                               side_effect=AssertionError("no pending lookup")) as pending,
+                  patch.object(release, "adopted_review_configuration",
+                               side_effect=AssertionError("no adoption")) as adopted,
+                  patch.object(release, "missing_patch_regressions", return_value=set()),
+                  patch.object(release, "validate_paths"),
+                  patch.object(release, "policy_snapshot", return_value={}),
+                  patch.object(release, "verify_upstream_recipes"),
+                  patch.object(release, "maintenance_candidate", return_value={
+                      **candidate, "configuration_sha": new}),
+                  patch.object(release, "accepted_baseline",
+                               return_value=(baseline, candidate, {})),
+                  patch.object(release, "final_attempt_history",
+                               return_value=(history, [])) as collect,
+                  patch.object(release, "review_context_commit", return_value=context),
+                  patch.object(release, "push_review_refs"),
+                  patch.object(release, "check_review", return_value=(True, "ready")),
+                  patch.object(release, "verified_policy_bundle", return_value=False),
+                  patch.object(release.maintenance, "load", return_value=module),
+                  patch.object(release, "delta_review",
+                               return_value=(delta_pr, "1" * 40, old, True, "ready")) as delta,
+                  patch.object(release, "current_review_comments", return_value=[]),
+                  patch.object(release, "review_history_from_comments", return_value=({}, {})),
+                  patch.object(release, "review_dispositions_from_comments", return_value=[]),
+                  patch.object(release, "maintenance_pair", return_value={
+                      "state": "ready", "complete": False, "findings": [],
+                      "known_findings": [], "review_dispositions": []}),
+                  patch.object(release, "verify_executing_product_recipe") as recipe,
+                  patch.object(release, "authorize_shared_final", return_value={
+                      "decision": "already-validated",
+                      "validated_run": {"id": 41, "run_attempt": 2},
+                      "artifact_workflow_sha": old}) as authorize,
+                  patch.object(release, "ensure_forward_release"),
+                  patch.object(release, "reserve_release", return_value=9) as reserve,
+                  patch.object(release, "owner_token", return_value="owner"),
+                  patch.object(release, "run", side_effect=run)):
+                release.prepare(app, shared=True)
+        proposal.assert_not_called()
+        pending.assert_not_called()
+        adopted.assert_not_called()
+        collect.assert_called_once()
+        recipe.assert_called_once_with(candidate, new)
+        self.assertEqual(delta.call_args.args[:3], (repo, old, application))
+        self.assertEqual(delta.call_args.kwargs["candidate"], candidate)
+        self.assertEqual(delta.call_args.kwargs["accepted"], baseline)
+        self.assertEqual(authorize.call_args.kwargs["history_snapshot"], (history, []))
+        self.assertEqual(authorize.call_args.kwargs["required_validated_run"], (41, 2))
+        self.assertEqual(authorize.call_args.args[0], candidate)
+        request_bodies = [
+            call.kwargs["data"]["body"] for call in native_api.call_args_list
+            if call.args[0] == f"repos/{repo}/issues/{review_pr}/comments"
+            and call.kwargs.get("method") == "POST"
+        ]
+        self.assertEqual(len(request_bodies), 1)
+        self.assertIn(f"<!-- zed-full:{context}:{old} -->", request_bodies[0])
+        self.assertEqual(reserve.call_args.args[6], old)
+        self.assertTrue(outputs["ready"])
+        self.assertEqual(outputs["candidate_config"], old)
+        self.assertEqual(outputs["artifact_config"], old)
+        self.assertEqual(outputs["checked_policy"], new)
+        self.assertEqual(outputs["publication_config"], new)
+        self.assertEqual(json.loads(outputs["maintenance_candidate"]), candidate)
+        self.assertEqual((outputs["artifact_run_id"], outputs["artifact_run_attempt"]), (41, 2))
+        self.assertEqual(outputs["artifact_workflow_sha"], old)
+        self.assertTrue(outputs["artifact_reuse"])
+
+    def test_recovery_input_requires_checked_shared_trusted_controller(self):
+        repo, candidate = "owner/zed", {"repository": "owner/zed"}
+        for changes in (
+            {"ARTIFACT_RECOVERY": "41/x"},
+            {"ARTIFACT_RECOVERY": "0/1"},
+            {"ARTIFACT_RECOVERY": "1 2/3"},
+            {"ARTIFACT_RECOVERY": "41/0"},
+            {"ARTIFACT_RECOVERY": "41/2", "ZED_TRUSTED_POLICY_SHA": "f" * 40},
+            {"ARTIFACT_RECOVERY": "41/2", "BOOTSTRAP_MAINTENANCE_CANDIDATE": "{}"},
+        ):
+            with (self.subTest(changes=changes), tempfile.TemporaryDirectory() as temporary,
+                  patch.dict(os.environ, {
+                      "GITHUB_REPOSITORY": repo, "GITHUB_SHA": "0" * 40,
+                      "ZED_TRUSTED_POLICY_SHA": "0" * 40, **changes}, clear=True),
+                  patch.object(release, "output"),
+                  patch.object(release, "api", return_value={"sha": "0" * 40}),
+                  patch.object(release, "proposal") as proposal,
+                  self.assertRaisesRegex(ValueError, "checked trusted controller")):
+                release.prepare(Path(temporary) / "application", shared=True)
+            proposal.assert_not_called()
+        with (tempfile.TemporaryDirectory() as temporary,
+              patch.dict(os.environ, {
+                  "GITHUB_REPOSITORY": repo, "GITHUB_SHA": "0" * 40,
+                  "ZED_TRUSTED_POLICY_SHA": "0" * 40, "ARTIFACT_RECOVERY": "41/2"},
+                  clear=True),
+              patch.object(release, "output"),
+              patch.object(release, "api", return_value={"sha": "0" * 40}),
+              patch.object(release, "proposal") as proposal,
+              self.assertRaisesRegex(ValueError, "checked trusted controller")):
+            release.prepare(Path(temporary) / "application")
+        proposal.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -1734,8 +1734,34 @@ def verify_executing_product_recipe(candidate, workflow_sha):
         raise ValueError("Executing workflow recipe differs from the reviewed candidate; adopt the checked policy before building")
 
 
-def authorize_shared_final(candidate, baseline_proof, *, allow_reuse=False, full_pr=None):
-    history, comments = final_attempt_history(candidate, baseline_proof)
+def validated_artifact_candidate(candidate, history, run_id, run_attempt):
+    """Select the exact earlier validated source for one native heavy attempt."""
+    if history.get("complete") is not True:
+        raise ValueError("Artifact recovery requires the complete native attempt history")
+    matches = [
+        attempt for attempt in history.get("attempts", [])
+        if isinstance(attempt, dict) and isinstance(attempt.get("run"), dict)
+        and attempt["run"].get("id") == run_id
+        and attempt["run"].get("run_attempt") == run_attempt]
+    if len(matches) != 1:
+        raise ValueError("Artifact recovery requires exactly one matching validated attempt")
+    source = matches[0].get("candidate")
+    if not isinstance(source, dict):
+        raise ValueError("Validated artifact attempt has no candidate identity")
+    maintenance.load().candidate_identity(source)
+    product = ("schema", "repository", "upstream_sha", "application_sha",
+               "patchset_sha256", "recipe_sha256", "platform")
+    if any(source.get(key) != candidate.get(key) for key in product):
+        raise ValueError("Validated artifact source differs from the assembled candidate")
+    return source
+
+
+def authorize_shared_final(candidate, baseline_proof, *, allow_reuse=False, full_pr=None,
+                           history_snapshot=None, required_validated_run=None):
+    if history_snapshot is not None:
+        history, comments = history_snapshot
+    else:
+        history, comments = final_attempt_history(candidate, baseline_proof)
     current_key = (int(os.environ["GITHUB_RUN_ID"]), int(os.environ["GITHUB_RUN_ATTEMPT"]))
     if any((record.get("run_id"), record.get("run_attempt")) == current_key
            for record in reservations_from_history_comments(
@@ -1748,6 +1774,13 @@ def authorize_shared_final(candidate, baseline_proof, *, allow_reuse=False, full
         allowed.add("reuse")
     if decision.get("decision") not in allowed:
         raise ValueError("Shared final validation is blocked: " + json.dumps(decision, sort_keys=True))
+    if required_validated_run is not None:
+        validated = decision.get("validated_run")
+        if (decision.get("decision") != "already-validated"
+                or not isinstance(validated, dict)
+                or (validated.get("id"), validated.get("run_attempt"))
+                   != required_validated_run):
+            raise ValueError("Artifact recovery requires the exact earlier validated run attempt")
     if (decision.get("decision") == "allow" and decision.get("grant_id") is None
             and _successful_product_attempt_under_other_config(candidate, history)):
         raise ValueError(
@@ -3913,13 +3946,24 @@ def prepare(app, *, shared=False):
         return
     # Source selection fetches the exact upstream directly. Mirror housekeeping
     # must not block a release or trigger unrelated upstream workflows.
-    state = proposal(repo, config, app.parent, shared=shared)
+    recovery = os.environ.get("ARTIFACT_RECOVERY", "")
+    if recovery:
+        match = re.fullmatch(r"([1-9][0-9]*)/([1-9][0-9]*)", recovery)
+        if (match is None or not shared
+                or config != os.environ.get("ZED_TRUSTED_POLICY_SHA")
+                or os.environ.get("BOOTSTRAP_MAINTENANCE_CANDIDATE")):
+            raise ValueError("Artifact recovery requires the checked trusted controller")
+        recovery_run = (int(match[1]), int(match[2]))
+    else:
+        recovery_run = None
+    state = proposal(repo, config, app.parent, shared=shared) if recovery_run is None else None
     if state and state["waiting"]:
         return
     patches, patchset = patch_identity(state["patches"] if state else ROOT / "patches")
     held_upstream = None if state else active_snapshot(repo, patchset)
     unfinished = (pending_source_snapshot(repo, config, patchset)
-                  if shared and not state and held_upstream is None else None)
+                  if shared and not state and held_upstream is None
+                  and recovery_run is None else None)
     upstream = (state["upstream"] if state else held_upstream
                 or (unfinished["candidate"]["upstream_sha"] if unfinished else None)
                 or select_upstream()[1])
@@ -3976,7 +4020,7 @@ def prepare(app, *, shared=False):
         expected_bootstrap = strict_json(bootstrap_candidate, "Verified bootstrap candidate")
         if expected_bootstrap != shared_candidate:
             raise ValueError("Prepared source differs from the native private policy bundle candidate")
-    elif shared and not state:
+    elif shared and not state and recovery_run is None:
         adopted_config = adopted_review_configuration(repo, config, shared_candidate)
         if adopted_config is not None:
             review_config = adopted_config
@@ -3987,6 +4031,15 @@ def prepare(app, *, shared=False):
     if accepted_proof is not None:
         accepted_value = strict_json(accepted_proof["variable"]["value"], "Accepted baseline")
         published_at = accepted_value["publication"]["published_at"]
+    recovery_history = None
+    if recovery_run is not None:
+        # Recovery binds the frozen attempt ledger to its exact original
+        # candidate and configuration; every later identity then stays original.
+        recovery_history = final_attempt_history(shared_candidate, accepted_proof)
+        recovered = validated_artifact_candidate(
+            shared_candidate, recovery_history[0], *recovery_run)
+        review_config = recovered["configuration_sha"]
+        shared_candidate = recovered
     full_sha = review_context_commit(app, shared_candidate) if shared else sha
     if unfinished and (shared_candidate != unfinished["candidate"]
                        or full_sha != unfinished["review_sha"]):
@@ -4039,7 +4092,7 @@ def prepare(app, *, shared=False):
     pull = pulls[0] if pulls else api(f"repos/{repo}/pulls", method="POST", data={
         "title": f"Review Zed {version} plus downstream patches", "head": head, "base": base,
         "body": (f"One upstream snapshot: `{UPSTREAM}@{upstream}`.\n\n"
-                 f"Patch configuration: `{repo}@{state['head'] if state else config}`; "
+                 f"Patch configuration: `{repo}@{review_config}`; "
                  f"patch SHA-256: `{patchset}`.\n\nApplication commit: `{sha}`.\n\n"
                  + (f"Review context commit: `{full_sha}`; it has the exact application tree and "
                     "the application commit as its sole parent.\n\n" if shared else "")
@@ -4062,7 +4115,7 @@ def prepare(app, *, shared=False):
                and full_marker in _metadata_scan_body(comment, owner, published_at=published_at)
                and shared_marker in _metadata_scan_body(comment, owner, published_at=published_at)
                for comment in comments):
-        request = request_text(sha, upstream, f"{repo}@{state['head'] if state else config}")
+        request = request_text(sha, upstream, f"{repo}@{review_config}")
         if shared:
             request = request.replace(f"<!-- zed-codex:{sha} -->", marker)
             request = request.replace(f"<!-- zed-full:{sha}:", f"<!-- zed-full:{full_sha}:")
@@ -4200,7 +4253,8 @@ def prepare(app, *, shared=False):
             policy_verified = True
         verify_executing_product_recipe(shared_candidate, os.environ["GITHUB_SHA"])
         decision = authorize_shared_final(
-            shared_candidate, accepted_proof, allow_reuse=bool(bootstrap_candidate), full_pr=pr)
+            shared_candidate, accepted_proof, allow_reuse=bool(bootstrap_candidate), full_pr=pr,
+            history_snapshot=recovery_history, required_validated_run=recovery_run)
         if decision.get("decision") == "wait":
             output(ready=False, followup=False, pr=pr,
                    reason=decision.get("reason", "Waiting for the active final workflow"))
@@ -4232,6 +4286,10 @@ def prepare(app, *, shared=False):
            release=release, pr=pr, followup=False, candidate_config=review_config,
            already_published=bool(existing), policy_verified=policy_verified,
            full_review_sha=full_sha,
+           artifact_config=(shared_candidate["configuration_sha"]
+                            if recovery_run is not None else ""),
+           checked_policy=config if recovery_run is not None else "",
+           publication_config=config if recovery_run is not None else "",
            **({"maintenance_baseline": json.dumps(accepted_proof, sort_keys=True, separators=(",", ":")),
                "final_candidate": (maintenance.load().candidate_identity(shared_candidate)
                                    if decision.get("decision") == "allow" else ""),
@@ -4801,6 +4859,16 @@ def publish(directory):
             run_id=int(os.environ["ARTIFACT_VALIDATED_RUN_ID"]),
             run_attempt=int(os.environ["ARTIFACT_VALIDATED_RUN_ATTEMPT"]),
             workflow_sha=os.environ["ARTIFACT_VALIDATED_WORKFLOW_SHA"])
+    publication_config = os.environ.get("PUBLICATION_CONFIG_SHA", config)
+    if not SHA.fullmatch(publication_config or ""):
+        raise ValueError("Expected a full publication configuration commit")
+    if publication_config != config and (
+            not shared or candidate.get("configuration_sha") != config
+            or os.environ.get("REVIEW_CONFIG_SHA") != config
+            or publication_config != os.environ["GITHUB_SHA"]
+            or api(f"repos/{repo}/actions/variables/ZED_TRUSTED_POLICY").get("value")
+               != publication_config):
+        raise ValueError("Publication recovery requires the exact checked controller pin")
     release = api(f"repos/{repo}/releases/{identity['release_id']}")
     if shared and release.get("draft"):
         check_shared_publication(repo, config, sha, upstream, patchset)
@@ -4822,10 +4890,10 @@ def publish(directory):
         close_published_reviews(repo, review_sha, upstream,
                                 f"review/{review_sha}" if shared else f"review/{upstream}-{patchset}",
                                 shared=shared)
-        close_recovered_repair(repo, config, has_minor=minor,
+        close_recovered_repair(repo, publication_config, has_minor=minor,
                                expected_head=os.environ.get("REPAIR_HEAD"))
         return
-    if api(f"repos/{repo}/commits/downstream")["sha"] != config:
+    if api(f"repos/{repo}/commits/downstream")["sha"] != publication_config:
         raise ValueError("Configuration changed during the build; do not publish a stale candidate")
     ready, reason = publication_review_status(repo, int(os.environ["CANDIDATE_PR"]), review_sha, upstream,
                                  published_at=published_at)
@@ -4872,7 +4940,7 @@ def publish(directory):
         raise ValueError("Release tag is not the exact reviewed application commit")
     ready, reason = publication_review_status(repo, int(os.environ["CANDIDATE_PR"]), review_sha, upstream,
                                  published_at=published_at)
-    if not ready or api(f"repos/{repo}/commits/downstream")["sha"] != config:
+    if not ready or api(f"repos/{repo}/commits/downstream")["sha"] != publication_config:
         raise ValueError(f"Publication was invalidated after upload: {reason}")
     check_delta_for_publication(repo, config)
     if publication_minor_findings(repo, int(os.environ["CANDIDATE_PR"]), review_sha):
@@ -4880,7 +4948,9 @@ def publish(directory):
     notes = (
         f"Upstream `{UPSTREAM}@{upstream}`; application `{sha}`; "
         f"configuration `{config}`; patch SHA-256 `{patchset}`.\n\n"
-        f"Complete-project review: https://github.com/{repo}/pull/{os.environ['CANDIDATE_PR']}\n"
+        + (f"Published by checked controller `{publication_config}`.\n\n"
+           if publication_config != config else "")
+        + f"Complete-project review: https://github.com/{repo}/pull/{os.environ['CANDIDATE_PR']}\n"
         f"Unshipped-change review: https://github.com/{repo}/pull/{os.environ['DELTA_PR']}\n\n"
         "macOS Apple Silicon; ad-hoc signed, not notarized. The shipped DMG and "
         "matching symbols passed the preserved regressions and artifact inspection. "
@@ -4901,7 +4971,11 @@ def publish(directory):
         check_delta_for_publication(repo, config)
         if publication_minor_findings(repo, int(os.environ["CANDIDATE_PR"]), review_sha):
             raise ValueError("Publication full-project review has unresolved findings")
-        if api(f"repos/{repo}/commits/downstream")["sha"] != config:
+        if (publication_config != config
+                and api(f"repos/{repo}/actions/variables/ZED_TRUSTED_POLICY").get("value")
+                != publication_config):
+            raise ValueError("Checked controller pin changed during publication")
+        if api(f"repos/{repo}/commits/downstream")["sha"] != publication_config:
             raise ValueError("Publication configuration was invalidated")
         if shared and published:
             advance_published_baseline(repo, identity["release_id"])
@@ -4912,7 +4986,7 @@ def publish(directory):
     close_published_reviews(repo, review_sha, upstream,
                             f"review/{review_sha}" if shared else f"review/{upstream}-{patchset}",
                             shared=shared)
-    close_recovered_repair(repo, config, has_minor=minor,
+    close_recovered_repair(repo, publication_config, has_minor=minor,
                            expected_head=os.environ.get("REPAIR_HEAD"))
 
 def main():
