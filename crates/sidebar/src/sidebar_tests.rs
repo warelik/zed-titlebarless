@@ -17993,6 +17993,13 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
     }));
     multi_workspace.read_with(cx, |mw, cx| mw.assert_project_group_key_integrity(cx).unwrap());
     let remote_key = remote_workspace.read_with(cx, |workspace, cx| workspace.project_group_key(cx));
+    assert!(!remote_key.is_empty(), "rootless remote workspaces keep their host identity");
+    multi_workspace.read_with(cx, |mw, cx| {
+        assert!(mw.project_group_keys().contains(&remote_key),
+            "the retained remote workspace still requires its project-group metadata");
+        assert!(mw.workspace().read(cx).project_group_key(cx).is_empty(),
+            "the local fixture has no project group");
+    });
     sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
     cx.run_until_parked();
     assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.entries.iter().any(|entry| {

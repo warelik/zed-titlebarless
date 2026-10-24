@@ -1725,6 +1725,11 @@ impl MultiWorkspace {
             );
 
             let live_key = workspace.read(cx).project_group_key(cx);
+            // pin may retain a rootless local workspace, while
+            // ensure_project_group_state deliberately omits empty keys.
+            if live_key.is_empty() {
+                continue;
+            }
             anyhow::ensure!(
                 self.project_groups
                     .iter()
