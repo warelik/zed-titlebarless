@@ -813,6 +813,8 @@ async fn test_remove_with_pre_remove_runs_guard_after_consent_before_detach(
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
     let workspace =
         multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+    let original_session = workspace.read_with(cx, |workspace, _| workspace.session_id());
+    assert!(original_session.is_some());
     let dirty_item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
     workspace.update_in(cx, |workspace, window, cx| {
         workspace.add_item_to_active_pane(Box::new(dirty_item.clone()), None, true, window, cx);
@@ -824,7 +826,7 @@ async fn test_remove_with_pre_remove_runs_guard_after_consent_before_detach(
         multi_workspace.remove_with_pre_remove(
             [workspace.clone()],
             RemovalIntent::CloseProject,
-            async move |_| {
+            async move |_, _| {
                 guard_calls.set(guard_calls.get() + 1);
                 Ok(true)
             },
@@ -857,12 +859,13 @@ async fn test_remove_with_pre_remove_runs_guard_after_consent_before_detach(
         multi_workspace.remove_with_pre_remove(
             [workspace.clone()],
             RemovalIntent::CloseProject,
-            async |_| anyhow::bail!("guard refused removal"),
+            async |_, _| anyhow::bail!("guard refused removal"),
             window,
             cx,
         )
     });
     assert!(remove_task.await.is_err());
+    assert_eq!(workspace.read_with(cx, |workspace, _| workspace.session_id()), original_session);
     assert!(multi_workspace.read_with(cx, |multi_workspace, _| {
         multi_workspace
             .workspaces()
@@ -873,12 +876,13 @@ async fn test_remove_with_pre_remove_runs_guard_after_consent_before_detach(
         multi_workspace.remove_with_pre_remove(
             [workspace.clone()],
             RemovalIntent::CloseProject,
-            async |_| Ok(false),
+            async |_, _| Ok(false),
             window,
             cx,
         )
     });
     assert!(!remove_task.await.expect("refused removal should succeed"));
+    assert_eq!(workspace.read_with(cx, |workspace, _| workspace.session_id()), original_session);
     assert!(multi_workspace.read_with(cx, |multi_workspace, _| {
         multi_workspace
             .workspaces()
@@ -893,7 +897,7 @@ async fn test_remove_with_pre_remove_runs_guard_after_consent_before_detach(
         multi_workspace.remove_with_pre_remove(
             [workspace.clone()],
             RemovalIntent::CloseProject,
-            async move |cx| {
+            async move |cx, _workspaces_unchanged| {
                 assert!(weak_multi_workspace.read_with(cx, |multi_workspace, _| {
                     multi_workspace
                         .workspaces()
@@ -907,6 +911,7 @@ async fn test_remove_with_pre_remove_runs_guard_after_consent_before_detach(
         )
     });
     assert!(remove_task.await.expect("guarded removal should succeed"));
+    assert_eq!(workspace.read_with(cx, |workspace, _| workspace.session_id()), None);
     assert_eq!(guard_calls.get(), 1);
     assert!(!multi_workspace.read_with(cx, |multi_workspace, _| {
         multi_workspace
@@ -2012,7 +2017,7 @@ async fn test_workspace_close_keeps_edits_made_during_another_consent_prompt(cx:
     let task = multi_workspace.update_in(cx, |mw, window, cx| {
         let called = callback_called.clone();
         mw.remove_with_pre_remove(workspaces.clone(), RemovalIntent::CloseProject,
-            async move |_| { called.set(true); Ok(true) }, window, cx)
+            async move |_, _| { called.set(true); Ok(true) }, window, cx)
     });
     cx.run_until_parked();
     assert!(cx.has_pending_prompt());
@@ -2063,9 +2068,11 @@ async fn test_remove_with_pre_remove_keeps_edits_made_during_guard(cx: &mut Test
         multi_workspace.remove_with_pre_remove(
             [workspace.clone()],
             RemovalIntent::CloseProject,
-            async move |_| {
+            async move |cx, workspaces_unchanged| {
                 let _ = started_tx.send(());
                 let _ = release_rx.await;
+                assert!(!gpui::AsyncApp::update(cx, |cx| workspaces_unchanged(cx)),
+                    "the destructive callback must see edits to the whole workspace before stopping a session");
                 Ok(true)
             },
             window,
@@ -2129,7 +2136,7 @@ async fn test_remove_with_pre_remove_keeps_edits_made_during_guard(cx: &mut Test
         multi_workspace.remove_with_pre_remove(
             [workspace.clone()],
             RemovalIntent::CloseProject,
-            async move |_| {
+            async move |_, _| {
                 let _ = started_tx.send(());
                 let _ = release_rx.await;
                 Ok(true)
