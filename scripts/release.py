@@ -4225,12 +4225,16 @@ def prepare(app, *, shared=False):
                     (delta_pr, "delta", delta_sha, delta_base)):
                 marker = maintenance_marker(shared_candidate, scope, review_sha, review_base)
                 comments = pages(f"repos/{repo}/issues/{number}/comments")
-                requested_at.extend(item["created_at"] for item in comments
+                requests = [item for item in comments
                     if item.get("user", {}).get("login") == owner
                     and item.get("user", {}).get("type") == "User"
-                    and marker in _metadata_scan_body(item, owner, published_at=published_at))
-            if len(requested_at) != 2:
-                raise ValueError("Both immutable native review request timestamps are required")
+                    and marker in _metadata_scan_body(item, owner, published_at=published_at)]
+                if not requests:
+                    raise ValueError("Both immutable native review request timestamps are required")
+                request = max(requests, key=lambda item: (item["created_at"], item["id"]))
+                if request.get("updated_at") != request.get("created_at"):
+                    raise ValueError("The newest exact owner review request was edited")
+                requested_at.append(request["created_at"])
             pending_review(max(requested_at))
             return
         if pair.get("state") != "ready":

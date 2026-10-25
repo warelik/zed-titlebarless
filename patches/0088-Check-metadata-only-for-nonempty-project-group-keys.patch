@@ -1,16 +1,115 @@
-From f2112adb1f701b0b6be28fa993083cd8774c918d Mon Sep 17 00:00:00 2001
+From 09db0e80b1e7f257ab767e41bfc917a481079f81 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 12:30:00 +0000
 Subject: [PATCH] Check project metadata only for nonempty project-group keys
 
 ---
- crates/sidebar/src/sidebar_tests.rs     | 7 +++++++
- crates/workspace/src/multi_workspace.rs | 5 +++++
- 2 files changed, 12 insertions(+)
+ crates/agent_ui/src/agent_panel.rs      | 45 +++++++++++++++++++++++--
+ crates/sidebar/src/sidebar_tests.rs     |  7 ++++
+ crates/workspace/src/multi_workspace.rs |  5 +++
+ 3 files changed, 54 insertions(+), 3 deletions(-)
 
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index a56c833f51f37deec16309bf81ad786b233500da..c46d32978d7689c81b81c34b567d994665256fb1 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -4458,7 +4458,7 @@ impl AgentPanel {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
+-        if !self.has_open_project(cx) {
++        if !self.has_open_project(cx) && !self.supports_terminal(cx) {
+             return;
+         }
+ 
+@@ -7128,7 +7128,9 @@ impl AgentPanel {
+                             .child(rows.projects)
+                             .end_children(sandbox_status)
+                             .end_child(rows.add_project)
+-                            .when(can_create_entries, |this| this.end_child(new_thread_menu))
++                            .when(can_create_entries || supports_terminal, |this| {
++                                this.end_child(new_thread_menu)
++                            })
+                             .end_child(full_screen_button)
+                             .end_child(self.render_panel_options_menu(window, cx)),
+                     )
+@@ -7166,7 +7168,9 @@ impl AgentPanel {
+                         .flex_none()
+                         .gap_1()
+                         .children(sandbox_status)
+-                        .when(can_create_entries, |this| this.child(new_thread_menu))
++                        .when(can_create_entries || supports_terminal, |this| {
++                            this.child(new_thread_menu)
++                        })
+                         .child(full_screen_button)
+                         .child(self.render_panel_options_menu(window, cx)),
+                 )
+@@ -10951,6 +10955,11 @@ mod tests {
+         let project = Project::test(fs, [], cx).await;
+         let multi_workspace =
+             cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
++        let workspace = multi_workspace
++            .read_with(cx, |multi_workspace, _cx| {
++                multi_workspace.workspace().clone()
++            })
++            .unwrap();
+         let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
+         let sidebar = register_test_sidebar(true, &mut cx);
+ 
+@@ -10966,6 +10975,15 @@ mod tests {
+             assert!(AgentPanel::sidebar_tab_rows(window, cx).is_none(),
+                 "the rendering path must reject replacement rows without an active project group");
+         });
++        let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
++            cx.new(|cx| AgentPanel::new(workspace, window, cx))
++        });
++        panel.update_in(&mut cx, |panel, window, cx| {
++            assert!(!panel.has_open_project(cx));
++            assert!(!panel.supports_terminal(cx));
++            panel.toggle_new_thread_menu(&ToggleNewThreadMenu, window, cx);
++            assert!(!panel.new_thread_menu_handle.is_deployed());
++        });
+     }
+ 
+     async fn setup_panel(cx: &mut TestAppContext) -> (Entity<AgentPanel>, VisualTestContext) {
+@@ -16468,6 +16486,12 @@ mod tests {
+         .await;
+ 
+         let cx = &mut VisualTestContext::from_window(remote_multi_workspace.into(), cx);
++        cx.update(|_, cx| {
++            let mut settings = AgentSettings::get_global(cx).clone();
++            settings.threads_sidebar.in_agent_panel = true;
++            AgentSettings::override_global(settings, cx);
++        });
++        let _sidebar = register_test_sidebar(true, cx);
+         let async_cx = cx.update(|window, cx| window.to_async(cx));
+         let loaded = AgentPanel::load(workspace.downgrade(), async_cx)
+             .await
+@@ -16487,6 +16511,21 @@ mod tests {
+                 "restored active terminal must be active even if remote workspace root_paths is empty"
+             );
+         });
++        workspace.update_in(cx, |workspace, window, cx| {
++            workspace.add_panel(loaded.clone(), window, cx);
++            workspace.focus_panel::<AgentPanel>(window, cx);
++        });
++        cx.run_until_parked();
++        loaded.update_in(cx, |panel, window, cx| {
++            assert!(!panel.has_open_project(cx));
++            assert!(panel.supports_terminal(cx));
++            panel.toggle_new_thread_menu(&ToggleNewThreadMenu, window, cx);
++        });
++        cx.run_until_parked();
++        loaded.read_with(cx, |panel, _cx| {
++            assert!(panel.new_thread_menu_handle.is_deployed());
++        });
++        assert!(cx.debug_bounds("MENU_ITEM-Terminal").is_some());
+         assert_eq!(
+             fake.attach_history().len(),
+             1,
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index cff74beabb..06da740472 100644
+index cff74beabb4ee75f0fce6186c824098e3b2b863a..06da74047206431e5ac88964fe608128aab43ac3 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
 @@ -17993,6 +17993,13 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
@@ -28,7 +127,7 @@ index cff74beabb..06da740472 100644
      cx.run_until_parked();
      assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.entries.iter().any(|entry| {
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 759d835406..f25dd82247 100644
+index 759d835406f591966a6cf81a5ac09ed952b5bb59..f25dd822472f943f397624d22cd121ba1e37ad89 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -1725,6 +1725,11 @@ impl MultiWorkspace {
@@ -43,5 +142,3 @@ index 759d835406..f25dd82247 100644
              anyhow::ensure!(
                  self.project_groups
                      .iter()
--- 
-2.43.0

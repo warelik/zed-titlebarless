@@ -21,7 +21,8 @@ class BatchedReviewTests(unittest.TestCase):
                           bootstrap=False, mismatched_bootstrap=False, adopted_config=None,
                           reuse_artifact=False, bootstrap_decision="reuse",
                           bootstrap_bundle_verified=True, bootstrap_bundle_malformed=False,
-                          cleanup_failure=False, published_config=None, mirror_failure=False):
+                          cleanup_failure=False, published_config=None, mirror_failure=False,
+                          shared_pair_state="ready", review_requests=None):
         config, upstream, candidate = "a" * 40, "b" * 40, "c" * 40
         shared_candidate = {"schema": 1, "repository": "maintainer/zed-fork",
                             "upstream_sha": upstream, "application_sha": candidate,
@@ -44,6 +45,11 @@ class BatchedReviewTests(unittest.TestCase):
                 return ""
 
             def pages(path):
+                if review_requests is not None:
+                    if path == "repos/maintainer/zed-fork/issues/1/comments":
+                        return review_requests["full"]
+                    if path == "repos/maintainer/zed-fork/issues/2/comments":
+                        return review_requests["delta"]
                 if "/releases" in path:
                     tag = release.release_tag("1.24.2", upstream, "d" * 64, candidate)
                     if published:
@@ -90,10 +96,11 @@ class BatchedReviewTests(unittest.TestCase):
                 "ensure_forward_release": None, "push_review_refs": None,
                 "check_review": full, "delta_review": (2, "e" * 40, config, *delta),
                 "minor_findings": list(findings), "review_records": list(findings),
-                "retire_superseded_reviews": None, "pending_review": None,
+                "retire_superseded_reviews": None,
                 "verify_published_release": None,
             }.items():
                 stack.enter_context(patch.object(release, name, return_value=value))
+            pending = stack.enter_context(patch.object(release, "pending_review", return_value=None))
             if mirror_failure:
                 stack.enter_context(patch.object(release, "mirror_main", side_effect=PermissionError(
                     "Mirror write denied; pinned source remains available")))
@@ -126,7 +133,7 @@ class BatchedReviewTests(unittest.TestCase):
                 context_commit = stack.enter_context(patch.object(
                     release, "review_context_commit", return_value=candidate))
                 stack.enter_context(patch.object(release, "maintenance_pair", return_value={
-                    "state": "ready", "findings": [], "known_findings": [],
+                    "state": shared_pair_state, "findings": [], "known_findings": [],
                     "review_dispositions": [], "fresh_findings": []}))
                 final_decision = ({"decision": bootstrap_decision}
                                   if bootstrap else
@@ -171,7 +178,115 @@ class BatchedReviewTests(unittest.TestCase):
             self.last_context_calls = context_commit.call_args_list if shared else []
             self.last_authorize_calls = authorize.call_count if shared else 0
             self.last_authorize_kwargs = authorize.call_args.kwargs if shared and authorize.call_args else {}
+            self.last_pending_calls = pending.call_args_list
             return outputs, final.call_count, reserve.call_count, failure
+
+    def test_shared_waiting_uses_latest_immutable_owner_request_per_scope(self):
+        owner = {"login": "maintainer", "type": "User", "id": 1}
+        requests = {}
+        for scope, sha, base, stamps in (
+                ("full", "c" * 40, "b" * 40,
+                 ("2026-10-19T10:01:00Z", "2026-10-19T10:04:00Z")),
+                ("delta", "e" * 40, "a" * 40,
+                 ("2026-10-19T10:05:00Z", "2026-10-19T10:02:00Z"))):
+            marker = "<!-- fork-review:v1 " + json.dumps({
+                "schema": 1, "candidate_id": "f" * 64, "scope": scope,
+                "review_sha": sha, "base_sha": base},
+                sort_keys=True, separators=(",", ":")) + " -->"
+            requests[scope] = [
+                {"id": index, "body": marker, "user": owner,
+                 "created_at": stamp, "updated_at": stamp}
+                for index, stamp in enumerate(stamps, 1)]
+        outputs, final, reserve, failure = self.prepare_candidate(
+            (False, "pending"), (False, "pending"), shared=True,
+            shared_pair_state="waiting", review_requests=requests)
+        self.assertFalse(outputs["ready"])
+        self.assertIsNone(failure)
+        self.assertEqual((final, reserve, self.last_authorize_calls), (0, 0, 0))
+        self.assertEqual(len(self.last_pending_calls), 1)
+        self.assertEqual(self.last_pending_calls[0].args, ("2026-10-19T10:05:00Z",))
+
+    def test_shared_waiting_ignores_newer_foreign_requests(self):
+        owner = {"login": "maintainer", "type": "User", "id": 1}
+        requests = {}
+        for scope, sha, base, stamp in (
+                ("full", "c" * 40, "b" * 40, "2026-10-19T10:01:00Z"),
+                ("delta", "e" * 40, "a" * 40, "2026-10-19T10:02:00Z")):
+            marker = "<!-- fork-review:v1 " + json.dumps({
+                "schema": 1, "candidate_id": "f" * 64, "scope": scope,
+                "review_sha": sha, "base_sha": base},
+                sort_keys=True, separators=(",", ":")) + " -->"
+            requests[scope] = [
+                {"id": 1, "body": marker, "user": owner,
+                 "created_at": stamp, "updated_at": stamp},
+                {"id": 2, "body": marker,
+                 "user": {"login": "other", "type": "User", "id": 2},
+                 "created_at": "2026-10-19T10:09:00Z",
+                 "updated_at": "2026-10-19T10:09:00Z"},
+            ]
+        outputs, final, reserve, failure = self.prepare_candidate(
+            (False, "pending"), (False, "pending"), shared=True,
+            shared_pair_state="waiting", review_requests=requests)
+        self.assertFalse(outputs["ready"])
+        self.assertIsNone(failure)
+        self.assertEqual((final, reserve, self.last_authorize_calls), (0, 0, 0))
+        self.assertEqual(len(self.last_pending_calls), 1)
+        self.assertEqual(self.last_pending_calls[0].args, ("2026-10-19T10:02:00Z",))
+
+    def test_shared_waiting_requires_an_owner_request_in_each_scope(self):
+        owner = {"login": "maintainer", "type": "User", "id": 1}
+        for missing_scope in ("full", "delta"):
+            with self.subTest(missing_scope=missing_scope):
+                requests = {}
+                for scope, sha, base in (
+                        ("full", "c" * 40, "b" * 40),
+                        ("delta", "e" * 40, "a" * 40)):
+                    marker = "<!-- fork-review:v1 " + json.dumps({
+                        "schema": 1, "candidate_id": "f" * 64, "scope": scope,
+                        "review_sha": sha, "base_sha": base},
+                        sort_keys=True, separators=(",", ":")) + " -->"
+                    requests[scope] = [] if scope == missing_scope else [
+                        {"id": 1, "body": marker, "user": owner,
+                         "created_at": "2026-10-19T10:01:00Z",
+                         "updated_at": "2026-10-19T10:01:00Z"}]
+                outputs, final, reserve, failure = self.prepare_candidate(
+                    (False, "pending"), (False, "pending"), shared=True,
+                    shared_pair_state="waiting", review_requests=requests)
+                self.assertFalse(outputs["ready"])
+                self.assertEqual(failure, "Both immutable native review request timestamps are required")
+                self.assertEqual(self.last_pending_calls, [])
+                self.assertEqual((final, reserve, self.last_authorize_calls), (0, 0, 0))
+
+    def test_shared_waiting_rejects_the_newest_edited_owner_request(self):
+        owner = {"login": "maintainer", "type": "User", "id": 1}
+        for edited_scope in ("full", "delta"):
+            for tied_creation in (False, True):
+                with self.subTest(edited_scope=edited_scope, tied_creation=tied_creation):
+                    requests = {}
+                    for scope, sha, base in (
+                            ("full", "c" * 40, "b" * 40),
+                            ("delta", "e" * 40, "a" * 40)):
+                        marker = "<!-- fork-review:v1 " + json.dumps({
+                            "schema": 1, "candidate_id": "f" * 64, "scope": scope,
+                            "review_sha": sha, "base_sha": base},
+                            sort_keys=True, separators=(",", ":")) + " -->"
+                        requests[scope] = [
+                            {"id": 1, "body": marker, "user": owner,
+                             "created_at": "2026-10-19T10:01:00Z",
+                             "updated_at": "2026-10-19T10:01:00Z"}]
+                    original = requests[edited_scope][0]
+                    requests[edited_scope].append({
+                        **original, "id": 2,
+                        "created_at": original["created_at"] if tied_creation
+                        else "2026-10-19T10:02:00Z",
+                        "updated_at": "2026-10-19T10:03:00Z"})
+                    outputs, final, reserve, failure = self.prepare_candidate(
+                        (False, "pending"), (False, "pending"), shared=True,
+                        shared_pair_state="waiting", review_requests=requests)
+                    self.assertFalse(outputs["ready"])
+                    self.assertEqual(failure, "The newest exact owner review request was edited")
+                    self.assertEqual(self.last_pending_calls, [])
+                    self.assertEqual((final, reserve, self.last_authorize_calls), (0, 0, 0))
 
     def test_upstream_recipe_drift_stops_before_reservation_and_heavy_receipt(self):
         outputs, final, reserve, failure = self.prepare_candidate(
