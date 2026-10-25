@@ -3902,6 +3902,24 @@ def mirror_main(repo):
     if updated["object"]["sha"] != upstream:
         raise ValueError("Upstream mirror did not reach the selected commit")
 
+def reserved_draft_identity(repo, draft, tag, sha, upstream, patchset, version):
+    matches = re.findall(r"<!-- zed-candidate:v1 (\{[^\n]+\}) -->", draft.get("body") or "")
+    if (not draft["draft"] or draft["target_commitish"] != sha
+            or draft.get("prerelease") is not False or len(matches) != 1
+            or draft.get("author", {}).get("login") not in
+            {repo.split("/")[0], "github-actions[bot]"}):
+        raise ValueError("Existing release is not this workflow's unpublished candidate")
+    previous = json.loads(matches[0])
+    identity = {"schema": 1, "candidate_sha": sha, "upstream_sha": upstream,
+                "patchset_sha256": patchset, "version": version}
+    if any(previous.get(key) != value for key, value in identity.items()):
+        raise ValueError("Draft release source identity changed")
+    if (type(draft["id"]) is not int or draft["id"] <= 0
+            or draft["tag_name"] != tag):
+        raise ValueError("GitHub did not reserve the exact candidate release")
+    return previous
+
+
 def reserve_release(repo, tag, sha, upstream, patchset, version, config, pr=None):
     if pr is not None:
         try:
@@ -3915,15 +3933,7 @@ def reserve_release(repo, tag, sha, upstream, patchset, version, config, pr=None
     releases = pages(f"repos/{repo}/releases")
     existing = next((release for release in releases if release["tag_name"] == tag), None)
     if existing:
-        matches = re.findall(r"<!-- zed-candidate:v1 (\{[^\n]+\}) -->", existing.get("body") or "")
-        if (not existing["draft"] or existing["target_commitish"] != sha
-                or existing.get("prerelease") is not False or len(matches) != 1
-                or existing.get("author", {}).get("login") not in
-                {repo.split("/")[0], "github-actions[bot]"}):
-            raise ValueError("Existing release is not this workflow's unpublished candidate")
-        previous = json.loads(matches[0])
-        if any(previous.get(key) != value for key, value in identity.items() if key != "config_sha"):
-            raise ValueError("Draft release source identity changed")
+        reserved_draft_identity(repo, existing, tag, sha, upstream, patchset, version)
         release = api(f"repos/{repo}/releases/{existing['id']}", method="PATCH",
                       data={"body": marker, "tag_name": tag})
     else:
@@ -4285,13 +4295,21 @@ def prepare(app, *, shared=False):
                   if item.get("tag_name") == release and item.get("draft") is True]
         if len(drafts) != 1:
             raise ValueError("A validated application artifact can be reused only for its unique existing draft")
+        metadata = reserved_draft_identity(
+            repo, drafts[0], release, sha, upstream, patchset, version)
+        artifact_config = metadata.get("config_sha")
+        if not isinstance(artifact_config, str) or not SHA.fullmatch(artifact_config):
+            raise ValueError("Validated artifact configuration must be a full commit")
+        if (artifact_config != review_config
+                and adopted_review_configuration(repo, artifact_config, shared_candidate) != review_config):
+            raise ValueError("Validated artifact configuration has no exact reviewed adoption receipt")
+        release_id = drafts[0]["id"]
     output(ready=True, reason="Both complete reviews accepted; no outstanding findings",
            sha=sha, upstream=upstream, patchset=patchset, version=version,
            release=release, pr=pr, followup=False, candidate_config=review_config,
            already_published=bool(existing), policy_verified=policy_verified,
            full_review_sha=full_sha,
-           artifact_config=(shared_candidate["configuration_sha"]
-                            if recovery_run is not None else ""),
+           artifact_config=artifact_config if artifact_reuse else "",
            checked_policy=config if recovery_run is not None else "",
            publication_config=config if recovery_run is not None else "",
            **({"maintenance_baseline": json.dumps(accepted_proof, sort_keys=True, separators=(",", ":")),
@@ -4312,8 +4330,11 @@ def prepare(app, *, shared=False):
         # Cheap setup must succeed before the single expensive sequence is spent.
         if shared and decision.get("decision") not in {"allow", "already-validated"}:
             raise ValueError("A new application release requires a common heavy-attempt authorization")
-        release_id = reserve_release(repo, release, sha, upstream, patchset, version,
-                                     review_config, None if shared else pr)
+        if artifact_reuse:
+            ensure_forward_release(repo, version, upstream, release_id=release_id)
+        else:
+            release_id = reserve_release(repo, release, sha, upstream, patchset, version,
+                                         review_config, None if shared else pr)
         if not shared:
             final_attempt(repo, pr, sha, review_config)
         output(release_id=release_id)
@@ -4867,8 +4888,7 @@ def publish(directory):
     if not SHA.fullmatch(publication_config or ""):
         raise ValueError("Expected a full publication configuration commit")
     if publication_config != config and (
-            not shared or candidate.get("configuration_sha") != config
-            or os.environ.get("REVIEW_CONFIG_SHA") != config
+            not shared or candidate.get("configuration_sha") != os.environ.get("REVIEW_CONFIG_SHA")
             or publication_config != os.environ["GITHUB_SHA"]
             or api(f"repos/{repo}/actions/variables/ZED_TRUSTED_POLICY").get("value")
                != publication_config):

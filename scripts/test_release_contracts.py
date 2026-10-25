@@ -419,6 +419,7 @@ class ReleaseMetadataTests(unittest.TestCase):
 
 class PublishedReleaseTests(unittest.TestCase):
     def setUp(self):
+        self.native_delta_gate = release.check_delta_for_publication
         # Delta-review rejection has its own independent contract tests. These
         # tests isolate immutable artifact publication from GitHub review I/O.
         delta = patch.object(release, "check_delta_for_publication")
@@ -803,12 +804,13 @@ class PublishedReleaseTests(unittest.TestCase):
             )
 
 
-    def recovery_fixture(self, directory):
+    def recovery_fixture(self, directory, reviewed_config=None):
         identity, _, _, _, assets, tag = metadata_fixture(directory)
+        reviewed = identity["config_sha"] if reviewed_config is None else reviewed_config
         publication = "0" * 40
         candidate = {"schema": 1, "repository": identity["repository"],
                      "application_sha": identity["candidate_sha"],
-                     "configuration_sha": identity["config_sha"],
+                     "configuration_sha": reviewed,
                      "upstream_sha": identity["upstream_sha"],
                      "patchset_sha256": identity["patchset_sha256"],
                      "recipe_sha256": "e" * 64, "platform": "macos/aarch64"}
@@ -848,7 +850,7 @@ class PublishedReleaseTests(unittest.TestCase):
             "RELEASE_TAG": tag,
             "CANDIDATE_PR": "7",
             "DELTA_PR": "8",
-            "REVIEW_CONFIG_SHA": identity["config_sha"],
+            "REVIEW_CONFIG_SHA": reviewed,
             "CONFIG_SHA": identity["config_sha"],
             "PUBLICATION_CONFIG_SHA": publication,
             "MAINTENANCE_CANDIDATE": json.dumps(candidate),
@@ -857,17 +859,25 @@ class PublishedReleaseTests(unittest.TestCase):
             "ARTIFACT_RECEIPT_PATH": "/unused/receipt",
             "ARTIFACT_VALIDATED_RUN_ID": "41",
             "ARTIFACT_VALIDATED_RUN_ATTEMPT": "2",
-            "ARTIFACT_VALIDATED_WORKFLOW_SHA": identity["config_sha"],
+            "ARTIFACT_VALIDATED_WORKFLOW_SHA": reviewed,
             "FULL_REVIEW_SHA": "f" * 40,
-            "DELTA_SHA": "0" * 40,
+            "DELTA_SHA": reviewed if reviewed_config is not None else "0" * 40,
             "DELTA_BASE": "1" * 40,
         }
         return identity, assets, tag, marker, record, api, api_calls, environment, publication
 
     def test_recovery_publish_keeps_original_identity_under_the_checked_controller(self):
+        self._assert_recovery_publication()
+
+    def test_recovery_publish_keeps_adopted_artifact_and_review_identities_distinct(self):
+        self._assert_recovery_publication("7" * 40)
+
+    def _assert_recovery_publication(self, reviewed_config=None):
         with tempfile.TemporaryDirectory() as temporary:
             (identity, assets, tag, marker, record, api, api_calls,
-             environment, publication) = self.recovery_fixture(Path(temporary))
+             environment, publication) = self.recovery_fixture(Path(temporary), reviewed_config)
+            reviewed = reviewed_config or identity["config_sha"]
+            provenance = (Path(temporary) / "provenance.json").read_bytes()
 
             def run(*args, **kwargs):
                 if args[:3] == ("gh", "release", "upload"):
@@ -880,6 +890,10 @@ class PublishedReleaseTests(unittest.TestCase):
                 patch.object(release, "api", side_effect=api),
                 patch.object(release, "pages", return_value=[]),
                 patch.object(release, "check_shared_publication"),
+                patch.object(release, "check_delta_for_publication",
+                             self.native_delta_gate if reviewed_config is not None
+                             else release.check_delta_for_publication),
+                patch.object(release, "verify_adopted_configuration") as adopted,
                 patch.object(release, "verify_artifact_receipt") as receipt,
                 patch.object(release, "publication_review_status",
                              return_value=(True, "reviewed")),
@@ -896,22 +910,41 @@ class PublishedReleaseTests(unittest.TestCase):
             self.assertEqual(record["tag_name"], tag)
             self.assertEqual(record["target_commitish"], identity["candidate_sha"])
             self.assertEqual(record["body"].count(marker), 1)
+            self.assertEqual((Path(temporary) / "provenance.json").read_bytes(), provenance)
             self.assertTrue(all(
                 data.get("tag_name") == tag
                 for _path, method, data in api_calls if method == "PATCH"))
             self.assertEqual(close_repair.call_args.args[1], publication)
             self.assertEqual(receipt.call_args.args[2]["configuration_sha"],
-                             identity["config_sha"])
+                             reviewed)
             self.assertEqual(receipt.call_args.args[2]["application_sha"],
                              identity["candidate_sha"])
             self.assertEqual(receipt.call_args.kwargs, {
                 "run_id": 41, "run_attempt": 2,
-                "workflow_sha": identity["config_sha"]})
+                "workflow_sha": reviewed})
+            if reviewed_config is not None:
+                adopted.assert_called_with(identity["repository"], reviewed, identity["config_sha"])
+                self.assertGreaterEqual(adopted.call_count, 2)
+            else:
+                adopted.assert_not_called()
 
     def test_recovery_publish_refuses_unbound_or_moved_controller_identities(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        self._assert_recovery_publication_refusals()
+
+    def test_adopted_artifact_publish_refuses_unbound_or_moved_controller_identities(self):
+        self._assert_recovery_publication_refusals("7" * 40)
+
+    def _assert_recovery_publication_refusals(self, reviewed_config=None):
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(release, "check_delta_for_publication", self.native_delta_gate),
+            patch.object(release, "verify_adopted_configuration") as adopted,
+            patch.object(release, "publication_review_status", return_value=(True, "reviewed")),
+            patch.object(release, "publication_minor_findings", return_value=[]),
+        ):
             (identity, assets, tag, marker, record, api, api_calls,
-             environment, publication) = self.recovery_fixture(Path(temporary))
+             environment, publication) = self.recovery_fixture(Path(temporary), reviewed_config)
+            environment["DELTA_SHA"] = reviewed_config or identity["config_sha"]
             variants = [
                 {"MAINTENANCE_CANDIDATE": ""},
                 {"REVIEW_CONFIG_SHA": "f" * 40},
@@ -946,6 +979,8 @@ class PublishedReleaseTests(unittest.TestCase):
             ):
                 release.publish(Path(temporary))
             run.assert_not_called()
+            self.assertFalse(any(method == "PATCH" for _, method, _ in api_calls))
+            api_calls.clear()
             with (
                 patch.dict(os.environ, environment, clear=True),
                 patch.object(release, "build_identity", return_value=identity),
@@ -960,6 +995,13 @@ class PublishedReleaseTests(unittest.TestCase):
             ):
                 release.publish(Path(temporary))
             run.assert_not_called()
+            self.assertFalse(any(method == "PATCH" for _, method, _ in api_calls))
+            self.assertTrue(record["draft"])
+            if reviewed_config is not None:
+                adopted.assert_called_with(
+                    identity["repository"], reviewed_config, identity["config_sha"])
+            else:
+                adopted.assert_not_called()
 
     def recovery_pin_fixture(self, directory, extra_good_pins):
         (identity, assets, tag, marker, record, api, api_calls,

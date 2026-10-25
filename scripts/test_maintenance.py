@@ -2237,7 +2237,17 @@ class UnfinishedSourceSnapshotTests(unittest.TestCase):
             native.assert_called_once_with(f"repos/{repo}/commits/downstream")
 
     def test_recovery_reprepares_the_exact_original_candidate_and_run(self):
+        self._assert_recovery_preparation()
+
+    def test_recovery_reuses_an_adopted_artifact_without_rewriting_its_draft(self):
+        self._assert_recovery_preparation("6" * 40)
+
+    def test_recovery_rejects_an_artifact_without_its_exact_adoption_receipt(self):
+        self._assert_recovery_preparation("6" * 40, adoption_valid=False)
+
+    def _assert_recovery_preparation(self, artifact_config=None, *, adoption_valid=True):
         repo, old, new = "owner/zed", "c" * 40, "0" * 40
+        artifact_config = old if artifact_config is None else artifact_config
         application, upstream, patchset = "a" * 40, "b" * 40, "d" * 64
         candidate = {"schema": 1, "repository": repo, "upstream_sha": upstream,
                      "application_sha": application, "configuration_sha": old,
@@ -2249,7 +2259,13 @@ class UnfinishedSourceSnapshotTests(unittest.TestCase):
             {"publication": {"published_at": "2026-10-19T10:00:00Z"}})}}
         context, review_pr, delta_pr = "f" * 40, 11, 12
         tag = release.release_tag("1.24.2", upstream, patchset, application)
-        draft = {"id": 9, "tag_name": tag, "draft": True}
+        identity = {"schema": 1, "candidate_sha": application, "upstream_sha": upstream,
+                    "patchset_sha256": patchset, "version": "1.24.2",
+                    "config_sha": artifact_config}
+        draft = {"id": 9, "tag_name": tag, "draft": True, "prerelease": False,
+                 "target_commitish": application, "author": {"login": "owner"},
+                 "body": "<!-- zed-candidate:v1 " + json.dumps(identity, sort_keys=True) + " -->"}
+        original_draft = json.dumps(draft, sort_keys=True)
         pull = {"number": review_pr, "state": "open",
                 "head": {"sha": context}, "base": {"ref": f"review-base/{upstream}"}}
 
@@ -2301,7 +2317,7 @@ class UnfinishedSourceSnapshotTests(unittest.TestCase):
                 pending = stack.enter_context(patch.object(release, "pending_source_snapshot",
                                side_effect=AssertionError("no pending lookup")))
                 adopted = stack.enter_context(patch.object(release, "adopted_review_configuration",
-                               side_effect=AssertionError("no adoption")))
+                               return_value=old if adoption_valid else None))
                 stack.enter_context(patch.object(release, "missing_patch_regressions", return_value=set()))
                 stack.enter_context(patch.object(release, "validate_paths"))
                 stack.enter_context(patch.object(release, "policy_snapshot", return_value={}))
@@ -2330,14 +2346,22 @@ class UnfinishedSourceSnapshotTests(unittest.TestCase):
                       "decision": "already-validated",
                       "validated_run": {"id": 41, "run_attempt": 2},
                       "artifact_workflow_sha": old}))
-                stack.enter_context(patch.object(release, "ensure_forward_release"))
+                forward = stack.enter_context(patch.object(release, "ensure_forward_release"))
                 reserve = stack.enter_context(patch.object(release, "reserve_release", return_value=9))
                 stack.enter_context(patch.object(release, "owner_token", return_value="owner"))
                 stack.enter_context(patch.object(release, "run", side_effect=run))
-                release.prepare(app, shared=True)
+                if artifact_config != old and not adoption_valid:
+                    with self.assertRaisesRegex(
+                            ValueError, "Validated artifact configuration has no exact reviewed adoption receipt"):
+                        release.prepare(app, shared=True)
+                else:
+                    release.prepare(app, shared=True)
         proposal.assert_not_called()
         pending.assert_not_called()
-        adopted.assert_not_called()
+        if artifact_config == old:
+            adopted.assert_not_called()
+        else:
+            adopted.assert_called_once_with(repo, artifact_config, candidate)
         collect.assert_called_once()
         recipe.assert_called_once_with(candidate, new)
         self.assertEqual(delta.call_args.args[:3], (repo, old, application))
@@ -2353,16 +2377,25 @@ class UnfinishedSourceSnapshotTests(unittest.TestCase):
         ]
         self.assertEqual(len(request_bodies), 1)
         self.assertIn(f"<!-- zed-full:{context}:{old} -->", request_bodies[0])
-        self.assertEqual(reserve.call_args.args[6], old)
-        self.assertTrue(outputs["ready"])
-        self.assertEqual(outputs["candidate_config"], old)
-        self.assertEqual(outputs["artifact_config"], old)
-        self.assertEqual(outputs["checked_policy"], new)
-        self.assertEqual(outputs["publication_config"], new)
-        self.assertEqual(json.loads(outputs["maintenance_candidate"]), candidate)
-        self.assertEqual((outputs["artifact_run_id"], outputs["artifact_run_attempt"]), (41, 2))
-        self.assertEqual(outputs["artifact_workflow_sha"], old)
-        self.assertTrue(outputs["artifact_reuse"])
+        reserve.assert_not_called()
+        self.assertFalse(any("/releases" in call.args[0]
+                             and call.kwargs.get("method", "GET") in {"POST", "PATCH"}
+                             for call in native_api.call_args_list))
+        self.assertEqual(json.dumps(draft, sort_keys=True), original_draft)
+        if artifact_config != old and not adoption_valid:
+            self.assertFalse(outputs["ready"])
+        else:
+            self.assertTrue(outputs["ready"])
+            self.assertEqual(outputs["release_id"], 9)
+            forward.assert_called_with(repo, "1.24.2", upstream, release_id=9)
+            self.assertEqual(outputs["candidate_config"], old)
+            self.assertEqual(outputs["artifact_config"], artifact_config)
+            self.assertEqual(outputs["checked_policy"], new)
+            self.assertEqual(outputs["publication_config"], new)
+            self.assertEqual(json.loads(outputs["maintenance_candidate"]), candidate)
+            self.assertEqual((outputs["artifact_run_id"], outputs["artifact_run_attempt"]), (41, 2))
+            self.assertEqual(outputs["artifact_workflow_sha"], old)
+            self.assertTrue(outputs["artifact_reuse"])
 
     def test_recovery_input_requires_checked_shared_trusted_controller(self):
         repo, candidate = "owner/zed", {"repository": "owner/zed"}

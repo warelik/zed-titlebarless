@@ -30,6 +30,15 @@ class BatchedReviewTests(unittest.TestCase):
                             "recipe_sha256": "e" * 64, "platform": "macos/aarch64"}
         outputs = {}
         order = []
+        artifact_identity = {"schema": 1, "candidate_sha": candidate,
+                             "upstream_sha": upstream, "patchset_sha256": "d" * 64,
+                             "version": "1.24.2", "config_sha": config}
+        artifact_draft = {
+            "id": 10, "draft": True, "prerelease": False,
+            "tag_name": release.release_tag("1.24.2", upstream, "d" * 64, candidate),
+            "target_commitish": candidate, "author": {"login": "maintainer"},
+            "body": "<!-- zed-candidate:v1 " + json.dumps(artifact_identity, sort_keys=True) + " -->"}
+        original_draft = json.dumps(artifact_draft, sort_keys=True)
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
             app = Path(temporary) / "app"
 
@@ -55,7 +64,7 @@ class BatchedReviewTests(unittest.TestCase):
                     if published:
                         return [{"draft": False, "tag_name": tag}]
                     if shared and reuse_artifact:
-                        return [{"draft": True, "tag_name": tag}]
+                        return [artifact_draft]
                     return []
                 if "/pulls?" in path:
                     return [{"number": 1, "state": "open", "head": {"sha": candidate}}]
@@ -156,7 +165,7 @@ class BatchedReviewTests(unittest.TestCase):
             stack.enter_context(patch.object(release, "run", side_effect=run))
             stack.enter_context(patch.object(release, "pages", side_effect=pages))
             stack.enter_context(patch.object(release, "output", side_effect=lambda **v: outputs.update(v)))
-            stack.enter_context(patch.object(release, "api", side_effect=native_api))
+            native = stack.enter_context(patch.object(release, "api", side_effect=native_api))
             cleanup = stack.enter_context(patch.object(
                 release, "close_published_reviews",
                 side_effect=ValueError("published cleanup failed") if cleanup_failure else None))
@@ -179,6 +188,9 @@ class BatchedReviewTests(unittest.TestCase):
             self.last_authorize_calls = authorize.call_count if shared else 0
             self.last_authorize_kwargs = authorize.call_args.kwargs if shared and authorize.call_args else {}
             self.last_pending_calls = pending.call_args_list
+            self.last_native_calls = native.call_args_list
+            self.last_artifact_draft_before = original_draft
+            self.last_artifact_draft_after = json.dumps(artifact_draft, sort_keys=True)
             return outputs, final.call_count, reserve.call_count, failure
 
     def test_shared_waiting_uses_latest_immutable_owner_request_per_scope(self):
@@ -451,9 +463,51 @@ class BatchedReviewTests(unittest.TestCase):
         self.assertIsNone(failure)
         self.assertTrue(outputs["ready"])
         self.assertEqual(outputs["candidate_config"], reviewed)
+        self.assertEqual(outputs["artifact_config"], "a" * 40)
         self.assertTrue(outputs["artifact_reuse"])
         self.assertEqual((outputs["artifact_run_id"], outputs["artifact_run_attempt"]), (12, 3))
-        self.assertEqual((final, reserve), (0, 1))
+        self.assertEqual(outputs["release_id"], 10)
+        self.assertEqual((final, reserve), (0, 0))
+        self.assertEqual(self.last_artifact_draft_after, self.last_artifact_draft_before)
+        self.assertFalse(any("/releases" in call.args[0]
+                             and call.kwargs.get("method", "GET") in {"POST", "PATCH"}
+                             for call in self.last_native_calls))
+
+    def test_reserved_draft_identity_is_pure_and_rejects_invalid_reservations(self):
+        repo, sha, upstream, patchset = "maintainer/zed-fork", "c" * 40, "b" * 40, "d" * 64
+        version, tag = "1.24.2", "candidate"
+        identity = {"schema": 1, "candidate_sha": sha, "upstream_sha": upstream,
+                    "patchset_sha256": patchset, "version": version, "config_sha": "a" * 40}
+        marker = "<!-- zed-candidate:v1 " + json.dumps(identity, sort_keys=True) + " -->"
+        draft = {"id": 10, "draft": True, "prerelease": False,
+                 "target_commitish": sha, "tag_name": tag,
+                 "author": {"login": "maintainer"}, "body": marker}
+        before = json.dumps(draft, sort_keys=True)
+        variants = [
+            {"body": "<!-- zed-candidate:v1 {malformed} -->"},
+            {"target_commitish": "e" * 40},
+            *({"body": "<!-- zed-candidate:v1 " + json.dumps({**identity, key: value}) + " -->"}
+              for key, value in (("patchset_sha256", "e" * 64), ("version", "1.24.3"))),
+            {"author": {"login": "somebody"}},
+            {"body": marker + "\n" + marker},
+            {"draft": False},
+            *({"id": value} for value in (0, -1, True, "10")),
+        ]
+        with (patch.object(release, "api") as native,
+              patch.object(release, "pages") as pages,
+              patch.object(release, "ensure_forward_release") as forward):
+            self.assertEqual(release.reserved_draft_identity(
+                repo, draft, tag, sha, upstream, patchset, version), identity)
+            self.assertEqual(json.dumps(draft, sort_keys=True), before)
+            for changes in variants:
+                record = {**draft, **changes}
+                original = json.dumps(record, sort_keys=True)
+                with self.subTest(changes=changes), self.assertRaises(ValueError):
+                    release.reserved_draft_identity(repo, record, tag, sha, upstream, patchset, version)
+                self.assertEqual(json.dumps(record, sort_keys=True), original)
+        native.assert_not_called()
+        pages.assert_not_called()
+        forward.assert_not_called()
 
     def test_existing_final_receipt_blocks_a_callback_from_rebuilding(self):
         sha, config = "c" * 40, "a" * 40
