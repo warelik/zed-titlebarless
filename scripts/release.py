@@ -3654,9 +3654,11 @@ def repair_text(state, attempt, failure, prepared=None):
             + json.dumps(prepared, sort_keys=True) + "\n\n"
         )
     reviews = []
-    for number_key, sha_key, label in (("CANDIDATE_PR", "CANDIDATE_SHA", "complete project"),
-                                       ("DELTA_PR", "DELTA_SHA", "unshipped changes")):
-        number, commit = os.environ.get(number_key, ""), os.environ.get(sha_key, "")
+    for number_key, commit, label in (
+            ("CANDIDATE_PR", os.environ.get("FULL_REVIEW_SHA") or os.environ.get("CANDIDATE_SHA", ""),
+             "complete project"),
+            ("DELTA_PR", os.environ.get("DELTA_SHA", ""), "unshipped changes")):
+        number = os.environ.get(number_key, "")
         if number.isdigit() and SHA.fullmatch(commit):
             reviews.append(f"- {label}: https://github.com/{os.environ['GITHUB_REPOSITORY']}/pull/{number} "
                            f"at `{commit}`")

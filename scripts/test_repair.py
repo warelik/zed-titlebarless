@@ -1485,3 +1485,33 @@ class AdoptionTests(unittest.TestCase):
               patch.object(release, "urlopen", side_effect=AssertionError("Stop at failed tests")),
               self.assertRaises(subprocess.CalledProcessError)):
             release.check_policy(Path("/unused"))
+
+
+class RepairReviewReferenceTests(unittest.TestCase):
+    def test_full_review_reference_uses_context_sha(self):
+        full, application, delta = "f" * 40, "c" * 40, "e" * 40
+        env = {**ENV, "FULL_REVIEW_SHA": full, "CANDIDATE_SHA": application,
+               "CANDIDATE_PR": "11", "DELTA_PR": "12", "DELTA_SHA": delta}
+        with patch.dict(os.environ, env, clear=True):
+            text = release.repair_text(STATE, 1, "fixture failure")
+        self.assertIn(f"- complete project: https://github.com/{REPO}/pull/11 at `{full}`", text)
+        self.assertNotIn(f"- complete project: https://github.com/{REPO}/pull/11 at `{application}`", text)
+        self.assertIn(f"- unshipped changes: https://github.com/{REPO}/pull/12 at `{delta}`", text)
+
+    def test_legacy_full_review_reference_uses_application_sha(self):
+        application, delta = "c" * 40, "e" * 40
+        env = {**ENV, "CANDIDATE_SHA": application,
+               "CANDIDATE_PR": "11", "DELTA_PR": "12", "DELTA_SHA": delta}
+        with patch.dict(os.environ, env, clear=True):
+            text = release.repair_text(STATE, 1, "fixture failure")
+        self.assertIn(f"- complete project: https://github.com/{REPO}/pull/11 at `{application}`", text)
+        self.assertIn(f"- unshipped changes: https://github.com/{REPO}/pull/12 at `{delta}`", text)
+
+    def test_empty_full_review_reference_uses_application_sha(self):
+        application, delta = "c" * 40, "e" * 40
+        env = {**ENV, "FULL_REVIEW_SHA": "", "CANDIDATE_SHA": application,
+               "CANDIDATE_PR": "11", "DELTA_PR": "12", "DELTA_SHA": delta}
+        with patch.dict(os.environ, env, clear=True):
+            text = release.repair_text(STATE, 1, "fixture failure")
+        self.assertIn(f"- complete project: https://github.com/{REPO}/pull/11 at `{application}`", text)
+        self.assertIn(f"- unshipped changes: https://github.com/{REPO}/pull/12 at `{delta}`", text)
