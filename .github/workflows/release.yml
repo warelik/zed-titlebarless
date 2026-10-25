@@ -845,21 +845,25 @@ jobs:
         id: maintenance
         run: |
           python3 -B - "candidate/scripts/maintenance.lock.json" \
-            "gate/scripts/maintenance.lock.json" \
-            "candidate/scripts/maintenance.py" "gate/scripts/maintenance.py" >> "$GITHUB_OUTPUT" <<'PY'
+            "workflow-source/scripts/maintenance.lock.json" \
+            "candidate/scripts/maintenance.py" "workflow-source/scripts/maintenance.py" \
+            "gate/scripts/maintenance.lock.json" "gate/scripts/maintenance.py" >> "$GITHUB_OUTPUT" <<'PY'
           import json, pathlib, re, sys
-          candidate_lock, workflow_lock, candidate_loader, workflow_loader = map(pathlib.Path, sys.argv[1:])
-          paths = (candidate_lock, workflow_lock, candidate_loader, workflow_loader)
+          candidate_lock, workflow_lock, candidate_loader, workflow_loader, verifier_lock, verifier_loader = map(pathlib.Path, sys.argv[1:])
+          paths = (candidate_lock, workflow_lock, candidate_loader, workflow_loader, verifier_lock, verifier_loader)
           if any(path.is_symlink() or not path.is_file() for path in paths):
               raise SystemExit("Candidate and native-workflow loader inputs must be regular files")
           if candidate_loader.read_bytes() != workflow_loader.read_bytes():
               raise SystemExit("Candidate public loader differs from the native workflow-source loader")
+          if candidate_loader.read_bytes() != verifier_loader.read_bytes():
+              raise SystemExit("Candidate public loader differs from the independently checked gate loader")
           if candidate_lock.read_bytes() != workflow_lock.read_bytes():
               raise SystemExit("Candidate maintenance lock differs from the native workflow-source lock")
-          lock = json.loads(candidate_lock.read_text(encoding="utf-8"))
-          if lock.get("repository") != "warelik/machine-maintenance" or not re.fullmatch(r"[0-9a-f]{40}", lock.get("revision", "")):
-              raise SystemExit("The reviewed maintenance revision is invalid")
-          print("revision=" + lock["revision"])
+          for name, path in (("revision", candidate_lock), ("verifier_revision", verifier_lock)):
+              lock = json.loads(path.read_text(encoding="utf-8"))
+              if lock.get("repository") != "warelik/machine-maintenance" or not re.fullmatch(r"[0-9a-f]{40}", lock.get("revision", "")):
+                  raise SystemExit("The reviewed maintenance revision is invalid")
+              print(name + "=" + lock["revision"])
           PY
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -868,16 +872,30 @@ jobs:
           ssh-key: ${{ secrets.MAINTENANCE_READ_KEY }}
           path: maintenance
           persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: warelik/machine-maintenance
+          ref: ${{ steps.maintenance.outputs.verifier_revision }}
+          ssh-key: ${{ secrets.MAINTENANCE_READ_KEY }}
+          path: maintenance-verifier
+          persist-credentials: false
       - name: Record The Acquired Private Source Identity
         env:
           MAINTENANCE_REVISION: ${{ steps.maintenance.outputs.revision }}
+          VERIFIER_REVISION: ${{ steps.maintenance.outputs.verifier_revision }}
         run: |
-          test "$(git -C maintenance rev-parse HEAD)" = "$MAINTENANCE_REVISION"
           python3 -B - <<'PY'
-          import json, os, pathlib
-          pathlib.Path("maintenance/.maintenance-source.json").write_text(json.dumps({
-              "repository": "warelik/machine-maintenance",
-              "revision": os.environ["MAINTENANCE_REVISION"]}))
+          import json, os, pathlib, subprocess
+          for directory, name in (("maintenance", "MAINTENANCE_REVISION"),
+                                  ("maintenance-verifier", "VERIFIER_REVISION")):
+              root = pathlib.Path(directory)
+              revision = os.environ[name]
+              actual = subprocess.check_output(
+                  ["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+              if actual != revision:
+                  raise SystemExit("Private checkout differs from its exact revision")
+              (root / ".maintenance-source.json").write_text(json.dumps({
+                  "repository": "warelik/machine-maintenance", "revision": revision}))
           PY
       - name: Verify The Complete Native Pair And Private Policy Receipt
         id: bundle
@@ -938,10 +956,10 @@ jobs:
               if (isinstance(candidate, dict)
                       and candidate.get('configuration_sha') == policy
                       and target.get('full', {}).get('pr') == int(full_pr)):
-                  receipts.append((candidate, target))
+                  receipts.append((candidate, target, comment, receipt))
           if len(receipts) != 1:
               raise SystemExit('Exactly one private bundle receipt must bind this exact policy and full-review PR')
-          candidate, target = receipts[0]
+          candidate, target, comment, receipt = receipts[0]
           delta_pr = str(target['delta']['pr'])
           if os.environ['DELTA_PR'] and os.environ['DELTA_PR'] != delta_pr:
               raise SystemExit('Dispatched delta PR differs from the private manifest')
@@ -968,9 +986,46 @@ jobs:
               if private_route.fullmatch(route):
                   return gate.api(route, token=private_token)
               raise ValueError('The private receipt verifier requested an unexpected native route')
+          checked_loader = maintenance
+          os.environ['FORK_MAINTENANCE_ROOT'] = str(pathlib.Path('maintenance-verifier').resolve())
+          checked_verifier = checked_loader.load()
+          manifest = checked_verifier._bundle_manifest(receipt.get('manifest'))
+          manifest_hash = checked_verifier._bundle_manifest_hash(manifest)
+          private_run = receipt.get('private_run')
+          if (set(receipt) != {'schema', 'manifest_sha256', 'manifest', 'private_run'}
+                  or type(receipt.get('schema')) is not int or receipt['schema'] != 1
+                  or receipt.get('manifest_sha256') != manifest_hash
+                  or not isinstance(private_run, dict)
+                  or set(private_run) != {'id', 'run_attempt', 'dispatcher_sha'}
+                  or any(type(private_run.get(key)) is not int or private_run[key] <= 0
+                         for key in ('id', 'run_attempt'))
+                  or private_run.get('dispatcher_sha') != manifest['shared']['dispatcher_sha']
+                  or type(comment.get('id')) is not int or comment['id'] <= 0):
+              raise SystemExit('Owner receipt does not bind an exact private validation attempt')
+          native_comments = checked_verifier._bundle_native_pages(
+              read_native, f'repos/{repo}/issues/{full_pr}/comments')
+          if comments != native_comments or comment not in native_comments:
+              raise SystemExit('Owner receipt differs from the complete native comment evidence')
+          shared = manifest['shared']
+          candidate_lock = json.loads(pathlib.Path('candidate/scripts/maintenance.lock.json').read_text())
+          source_fields = ('repository', 'revision', 'module_sha256', 'api_version')
+          if {key: candidate_lock[key] for key in source_fields} != {
+                  key: shared[key] for key in source_fields}:
+              raise SystemExit('Candidate lock differs from the privately validated source')
+          # Authenticate the final run with checked code before importing its validated source.
+          checked_verifier._bundle_source_hash(read_native, shared)
+          _, _, finished = checked_verifier._bundle_private_run(
+              read_native, receipt, manifest_hash, shared)
+          created = checked_verifier._timestamp(comment.get('created_at'))
+          if (checked_verifier._timestamp(comment.get('updated_at')) != created
+                  or created < finished):
+              raise SystemExit('Owner receipt was edited or predates final private validation')
+          os.environ['FORK_MAINTENANCE_ROOT'] = str(pathlib.Path('maintenance').resolve())
+          maintenance = checked_loader.load(pathlib.Path('candidate/scripts/maintenance.lock.json'))
           proof = maintenance.validated_bundle(candidate, comments, read_native)
           if (not isinstance(proof, dict) or proof.get('decision') != 'reuse-policy-validation'
-                  or proof.get('candidate_id') != maintenance.load().candidate_identity(candidate)
+                  or proof.get('candidate_id') != maintenance.candidate_identity(candidate)
+                  or proof.get('shared_source') != maintenance._maintenance_lock_identity
                   or proof.get('heavy_build_allowed') is not False
                   or proof.get('application_artifact_verified') is not False):
               raise SystemExit('Private bundle did not prove exact policy validation without authorizing a build')
