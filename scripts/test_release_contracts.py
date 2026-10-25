@@ -2360,7 +2360,7 @@ class UpstreamCompilerRecipeTests(unittest.TestCase):
         pin = activation.index("Pin The Checked Controller For Subsequent Runs")
         self.assertLess(check, pin)
         checkout = activation[:check]
-        self.assertIn("ref: ${{ needs.prepare.outputs.candidate_config }}", checkout)
+        self.assertIn("ref: ${{ needs.prepare.outputs.checked_policy || needs.prepare.outputs.candidate_config }}", checkout)
         self.assertIn("path: checked\n          persist-credentials: false", checkout)
         self.assertNotIn("GH_TOKEN:", checkout)
         macos = re.search(r"(?ms)^  test:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", text)[1]

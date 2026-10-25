@@ -2279,60 +2279,61 @@ class UnfinishedSourceSnapshotTests(unittest.TestCase):
             module = Mock()
             module.candidate_identity.return_value = "1" * 64
             outputs = {}
-            with (patch.dict(os.environ, {
+            with ExitStack() as stack:
+                stack.enter_context(patch.dict(os.environ, {
                       "GITHUB_REPOSITORY": repo, "GITHUB_SHA": new,
                       "GITHUB_RUN_ID": "90", "GITHUB_RUN_ATTEMPT": "1",
                       "ZED_TRUSTED_POLICY_SHA": new,
-                      "ARTIFACT_RECOVERY": "41/2"}, clear=True),
-                  patch.object(release, "output", side_effect=lambda **kw: outputs.update(kw)),
-                  patch.object(release, "api", side_effect=native) as native_api,
-                  patch.object(release, "pages", side_effect=lambda path, **kw: (
+                      "ARTIFACT_RECOVERY": "41/2"}, clear=True))
+                stack.enter_context(patch.object(release, "output", side_effect=lambda **kw: outputs.update(kw)))
+                native_api = stack.enter_context(patch.object(release, "api", side_effect=native))
+                stack.enter_context(patch.object(release, "pages", side_effect=lambda path, **kw: (
                       [draft] if path == f"repos/{repo}/releases"
-                      else [pull] if "pulls?" in path else [])),
-                  patch.object(release, "proposal",
-                               side_effect=AssertionError("no proposal in recovery")) as proposal,
-                  patch.object(release, "patch_identity",
-                               return_value=([Path(temporary)], patchset)),
-                  patch.object(release, "active_snapshot", return_value=None),
-                  patch.object(release, "select_upstream",
-                               return_value=("v1.24.2", upstream)),
-                  patch.object(release, "minor_findings", return_value=[]),
-                  patch.object(release, "pending_source_snapshot",
-                               side_effect=AssertionError("no pending lookup")) as pending,
-                  patch.object(release, "adopted_review_configuration",
-                               side_effect=AssertionError("no adoption")) as adopted,
-                  patch.object(release, "missing_patch_regressions", return_value=set()),
-                  patch.object(release, "validate_paths"),
-                  patch.object(release, "policy_snapshot", return_value={}),
-                  patch.object(release, "verify_upstream_recipes"),
-                  patch.object(release, "maintenance_candidate", return_value={
-                      **candidate, "configuration_sha": new}),
-                  patch.object(release, "accepted_baseline",
-                               return_value=(baseline, candidate, {})),
-                  patch.object(release, "final_attempt_history",
-                               return_value=(history, [])) as collect,
-                  patch.object(release, "review_context_commit", return_value=context),
-                  patch.object(release, "push_review_refs"),
-                  patch.object(release, "check_review", return_value=(True, "ready")),
-                  patch.object(release, "verified_policy_bundle", return_value=False),
-                  patch.object(release.maintenance, "load", return_value=module),
-                  patch.object(release, "delta_review",
-                               return_value=(delta_pr, "1" * 40, old, True, "ready")) as delta,
-                  patch.object(release, "current_review_comments", return_value=[]),
-                  patch.object(release, "review_history_from_comments", return_value=({}, {})),
-                  patch.object(release, "review_dispositions_from_comments", return_value=[]),
-                  patch.object(release, "maintenance_pair", return_value={
+                      else [pull] if "pulls?" in path else [])))
+                proposal = stack.enter_context(patch.object(release, "proposal",
+                               side_effect=AssertionError("no proposal in recovery")))
+                stack.enter_context(patch.object(release, "patch_identity",
+                               return_value=([Path(temporary)], patchset)))
+                stack.enter_context(patch.object(release, "active_snapshot", return_value=None))
+                stack.enter_context(patch.object(release, "select_upstream",
+                               return_value=("v1.24.2", upstream)))
+                stack.enter_context(patch.object(release, "minor_findings", return_value=[]))
+                pending = stack.enter_context(patch.object(release, "pending_source_snapshot",
+                               side_effect=AssertionError("no pending lookup")))
+                adopted = stack.enter_context(patch.object(release, "adopted_review_configuration",
+                               side_effect=AssertionError("no adoption")))
+                stack.enter_context(patch.object(release, "missing_patch_regressions", return_value=set()))
+                stack.enter_context(patch.object(release, "validate_paths"))
+                stack.enter_context(patch.object(release, "policy_snapshot", return_value={}))
+                stack.enter_context(patch.object(release, "verify_upstream_recipes"))
+                stack.enter_context(patch.object(release, "maintenance_candidate", return_value={
+                      **candidate, "configuration_sha": new}))
+                stack.enter_context(patch.object(release, "accepted_baseline",
+                               return_value=(baseline, candidate, {})))
+                collect = stack.enter_context(patch.object(release, "final_attempt_history",
+                               return_value=(history, [])))
+                stack.enter_context(patch.object(release, "review_context_commit", return_value=context))
+                stack.enter_context(patch.object(release, "push_review_refs"))
+                stack.enter_context(patch.object(release, "check_review", return_value=(True, "ready")))
+                stack.enter_context(patch.object(release, "verified_policy_bundle", return_value=False))
+                stack.enter_context(patch.object(release.maintenance, "load", return_value=module))
+                delta = stack.enter_context(patch.object(release, "delta_review",
+                               return_value=(delta_pr, "1" * 40, old, True, "ready")))
+                stack.enter_context(patch.object(release, "current_review_comments", return_value=[]))
+                stack.enter_context(patch.object(release, "review_history_from_comments", return_value=({}, {})))
+                stack.enter_context(patch.object(release, "review_dispositions_from_comments", return_value=[]))
+                stack.enter_context(patch.object(release, "maintenance_pair", return_value={
                       "state": "ready", "complete": False, "findings": [],
-                      "known_findings": [], "review_dispositions": []}),
-                  patch.object(release, "verify_executing_product_recipe") as recipe,
-                  patch.object(release, "authorize_shared_final", return_value={
+                      "known_findings": [], "review_dispositions": []}))
+                recipe = stack.enter_context(patch.object(release, "verify_executing_product_recipe"))
+                authorize = stack.enter_context(patch.object(release, "authorize_shared_final", return_value={
                       "decision": "already-validated",
                       "validated_run": {"id": 41, "run_attempt": 2},
-                      "artifact_workflow_sha": old}) as authorize,
-                  patch.object(release, "ensure_forward_release"),
-                  patch.object(release, "reserve_release", return_value=9) as reserve,
-                  patch.object(release, "owner_token", return_value="owner"),
-                  patch.object(release, "run", side_effect=run)):
+                      "artifact_workflow_sha": old}))
+                stack.enter_context(patch.object(release, "ensure_forward_release"))
+                reserve = stack.enter_context(patch.object(release, "reserve_release", return_value=9))
+                stack.enter_context(patch.object(release, "owner_token", return_value="owner"))
+                stack.enter_context(patch.object(release, "run", side_effect=run))
                 release.prepare(app, shared=True)
         proposal.assert_not_called()
         pending.assert_not_called()
