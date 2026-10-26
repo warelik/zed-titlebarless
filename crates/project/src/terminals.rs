@@ -874,6 +874,7 @@ impl Project {
             let pty_startup = PtyStartup {
                 bounds,
                 hold_resize_until_output: command.is_some(),
+                session_owned_shell: command.is_some(),
             };
             if let Some(context) = &context {
                 if let Some(reserve) = reserve_context.take() {
