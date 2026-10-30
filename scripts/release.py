@@ -2,7 +2,7 @@ import argparse
 import ast
 import base64
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
@@ -27,6 +27,8 @@ ROOT = Path(__file__).resolve().parent.parent
 CONTROL_ROOT = ROOT
 BOT = "chatgpt-codex-connector[bot]"
 APP = "chatgpt-codex-connector"
+REVIEW_MODES = {"bot", "owner", "none"}
+OWNER_ACCEPTANCE_AUTHORIZATION_SHA256 = "3343e4d2dfc5a06b529fe32b352bfc0b798539c8454d02f60d9cae3ccd5cc7b0"
 SHA = re.compile(r"^[0-9a-f]{40}$")
 SEVERITY = re.compile(r"\bP[01]\b|\b(?:critical|high)\s+severity\b", re.I)
 MINOR_FINDING = re.compile(r"\bP[23]\b")
@@ -450,8 +452,60 @@ def maintenance_marker(candidate, scope, sha, base):
     return "<!-- fork-review:v1 " + json.dumps(payload, sort_keys=True, separators=(",", ":")) + " -->"
 
 
+def review_mode():
+    mode = os.environ.get("FORK_REVIEW_MODE", "bot").strip().lower()
+    if mode not in REVIEW_MODES:
+        raise ValueError("FORK_REVIEW_MODE must be bot, owner or none")
+    return mode
+
+
+def review_trigger_prefix():
+    if review_mode() not in {"bot", "owner"}:
+        return ""
+    trigger = os.environ.get("FORK_REVIEW_TRIGGER", "@codex review").strip()
+    return trigger + "\n\n" if trigger else ""
+
+
+def _owner_acceptance_body(candidate, scope, number, request, sha, base):
+    value = {
+        "schema": 1,
+        "authorization_sha256": OWNER_ACCEPTANCE_AUTHORIZATION_SHA256,
+        "repository": candidate["repository"],
+        "pr": number,
+        "request_id": request["id"],
+        "scope": scope,
+        "review_sha": sha,
+        "base_sha": base,
+        "candidate_id": maintenance.load().candidate_identity(candidate),
+    }
+    return ("<!-- machine-maintenance-owner-acceptance:v1 "
+            + json.dumps(value, separators=(",", ":")) + " -->")
+
+
+def _ensure_owner_acceptance(candidate, scope, number, request, sha, base, comments):
+    if review_mode() != "none":
+        return False
+    repo = candidate["repository"]
+    owner = repo.split("/", 1)[0]
+    body = _owner_acceptance_body(candidate, scope, number, request, sha, base)
+    if any(comment.get("body") == body
+           and comment.get("user", {}).get("login") == owner
+           and comment.get("user", {}).get("type") == "User" for comment in comments):
+        return False
+    requested_at = datetime.fromisoformat(request["created_at"].replace("Z", "+00:00"))
+    if requested_at.tzinfo is None:
+        raise ValueError("Native review request timestamp needs a timezone")
+    wait = (requested_at.astimezone(timezone.utc) + timedelta(seconds=1)
+            - datetime.now(timezone.utc)).total_seconds()
+    if wait > 0:
+        time.sleep(wait + 0.1)
+    api(f"repos/{repo}/issues/{number}/comments", method="POST", token=owner_token(repo),
+        data={"body": body})
+    return True
+
+
 def maintenance_review(candidate, scope, number, sha, base, *, accepted=None,
-                       allow_closed=False, published_at=None):
+                       allow_closed=False, published_at=None, _acceptance_attempted=False):
     repo = candidate["repository"]
     pull = api(f"repos/{repo}/pulls/{number}")
     comments = pages(f"repos/{repo}/issues/{number}/comments")
@@ -466,6 +520,12 @@ def maintenance_review(candidate, scope, number, sha, base, *, accepted=None,
     request = max(requests, key=lambda item: (item["created_at"], item["id"]))
     if request.get("updated_at") != request.get("created_at"):
         raise ValueError("The newest exact owner review request was edited")
+    if not _acceptance_attempted and _ensure_owner_acceptance(
+            candidate, scope, number, request, sha, base, comments):
+        return maintenance_review(
+            candidate, scope, number, sha, base, accepted=accepted,
+            allow_closed=allow_closed, published_at=published_at,
+            _acceptance_attempted=True)
     reviews = pages(f"repos/{repo}/pulls/{number}/reviews")
     inline = pages(f"repos/{repo}/pulls/{number}/comments")
     resolved = {}
@@ -2198,7 +2258,7 @@ def delta_review(repo, config, application, *, allow_closed=False, candidate=Non
                and shared_marker in _metadata_scan_body(item, owner, published_at=published_at)
                for item in comments):
         api(f"repos/{repo}/issues/{pr}/comments", method="POST", token=owner_token(repo), data={
-            "body": (f"@codex review\n\nReview {scope} at exact `{review_sha}` "
+            "body": (f"{review_trigger_prefix()}Review {scope} at exact `{review_sha}` "
                      f"against last shipped `{base}`. Configuration: `{config}`. "
                      f"The paired complete application is `{application}`. "
                      "This branch stores mail patches, not the assembled editor. For application "
@@ -3592,7 +3652,7 @@ def file_digest(path):
 
 def request_text(sha, upstream, config):
     return (
-        "@codex review\n\n"
+        review_trigger_prefix() +
         f"Review the COMPLETE assembled project at exact application commit `{sha}`.\n"
         f"Base: `{UPSTREAM}@{upstream}`. Patch configuration: `{config}`.\n"
         f"Apply the existing downstream maintenance contract in `AGENTS.md` at `{config}`. "

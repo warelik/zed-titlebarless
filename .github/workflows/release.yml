@@ -32,6 +32,8 @@ on:
 
 env:
   FORK_MAINTENANCE_ROOT: ${{ github.workspace }}/maintenance
+  FORK_REVIEW_MODE: ${{ vars.FORK_REVIEW_MODE || 'bot' }}
+  FORK_REVIEW_TRIGGER: ${{ vars.FORK_REVIEW_TRIGGER || '@codex review' }}
 
 permissions:
   contents: read

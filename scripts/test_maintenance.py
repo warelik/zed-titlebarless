@@ -267,6 +267,44 @@ class SharedZedReviewTests(unittest.TestCase):
                 target = module.evaluate_review.call_args.args[0]
                 self.assertEqual(target["review_dismissals"], [event] if state == "DISMISSED" else [])
 
+    def test_review_mode_none_posts_exact_owner_acceptance_once(self):
+        candidate = {"repository": "owner/zed"}
+        request = {"id": 7, "created_at": "2026-10-19T09:00:00Z"}
+        module = Mock()
+        module.candidate_identity.return_value = "e" * 64
+        with patch.dict(release.os.environ, {"FORK_REVIEW_MODE": "none"}), \
+                patch.object(release.maintenance, "load", return_value=module), \
+                patch.object(release, "owner_token", return_value="owner-token"), \
+                patch.object(release, "api", return_value={"id": 8}) as api:
+            self.assertTrue(release._ensure_owner_acceptance(
+                candidate, "full", 7, request, "c" * 40, "d" * 40, []))
+            self.assertFalse(release.request_text("c" * 40, "b" * 40, "config").startswith("@codex"))
+        body = api.call_args.kwargs["data"]["body"]
+        self.assertIn('"candidate_id":"' + "e" * 64 + '"', body)
+        self.assertIn('"request_id":7', body)
+        with patch.dict(release.os.environ, {"FORK_REVIEW_MODE": "none"}), \
+                patch.object(release.maintenance, "load", return_value=module), \
+                patch.object(release, "api") as duplicate:
+            self.assertFalse(release._ensure_owner_acceptance(
+                candidate, "full", 7, request, "c" * 40, "d" * 40,
+                [{"body": body, "user": {"login": "owner", "type": "User"}}]))
+        duplicate.assert_not_called()
+
+    def test_review_mode_bot_uses_configured_trigger_without_acceptance(self):
+        with patch.dict(release.os.environ, {
+                "FORK_REVIEW_MODE": "bot", "FORK_REVIEW_TRIGGER": "@reviewer review"}):
+            self.assertTrue(release.request_text(
+                "c" * 40, "b" * 40, "config").startswith("@reviewer review\n\n"))
+            with patch.object(release, "api") as api:
+                self.assertFalse(release._ensure_owner_acceptance(
+                    {"repository": "owner/zed"}, "full", 7,
+                    {"id": 7, "created_at": "2026-10-19T09:00:00Z"},
+                    "c" * 40, "d" * 40, []))
+            api.assert_not_called()
+        with patch.dict(release.os.environ, {"FORK_REVIEW_MODE": "sometimes"}), \
+                self.assertRaisesRegex(ValueError, "FORK_REVIEW_MODE"):
+            release.review_mode()
+
     def test_native_bundle_reuse_remains_bound_to_the_public_loader_lock(self):
         candidate = {"repository": "owner/zed"}
         comments = [{"id": 7}]
