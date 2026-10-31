@@ -1,4 +1,4 @@
-From 64efb020ff8dc33c468da84c34a7c9083a65d080 Mon Sep 17 00:00:00 2001
+From c82ea34281f152464b025b9bd25e538add325e78 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 19:04:03 +0000
@@ -8,7 +8,7 @@ Subject: [PATCH 43/90] Preserve project groups until workspace close consent
 Keep cancelled and failed closes intact. Retain a same-group workspace opened during pending consent, and still remove unloaded project rows. Cover cancellation, successful retry and concurrent opening.
 
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 3683185595..5540211d04 100644
+index 3683185595..abd566e524 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -1034,9 +1034,8 @@ impl MultiWorkspace {
@@ -23,7 +23,7 @@ index 3683185595..5540211d04 100644
          let active_workspace = self.workspace().clone();
          if active_workspace.read(cx).project_group_key(cx) == *group_key
              && !self.is_workspace_retained(&active_workspace)
-@@ -1047,9 +1046,46 @@ impl MultiWorkspace {
+@@ -1047,9 +1046,19 @@ impl MultiWorkspace {
  
          let workspaces = self.workspaces_for_project_group(group_key, cx);
  
@@ -41,38 +41,11 @@ index 3683185595..5540211d04 100644
 +        }
  
 -        task
-+        let project_ids: collections::HashSet<_> = workspaces
-+            .iter()
-+            .map(|workspace| workspace.read(cx).project().entity_id())
-+            .collect();
-+        let task = self.remove(workspaces, RemovalIntent::CloseProject, window, cx);
-+        let group_key = group_key.clone();
-+        cx.spawn(async move |this, cx| {
-+            let removed = task.await?;
-+            if removed {
-+                this.update(cx, |this, cx| {
-+                    // A workspace opened while consent was pending was not part
-+                    // of that close request and must retain its project row.
-+                    let has_members = this.workspaces().any(|workspace| {
-+                        project_ids.contains(&workspace.read(cx).project().entity_id())
-+                    });
-+                    if !has_members {
-+                        let previous_len = this.project_groups.len();
-+                        this.project_groups.retain(|group| group.key != group_key);
-+                        if this.project_groups.len() != previous_len {
-+                            cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
-+                            this.serialize(cx);
-+                            cx.notify();
-+                        }
-+                    }
-+                })?;
-+            }
-+            Ok(removed)
-+        })
++        self.remove(workspaces, RemovalIntent::CloseProject, window, cx)
      }
  
      /// Returns the nearest retained workspace outside the project group at
-@@ -1872,9 +1908,8 @@ impl MultiWorkspace {
+@@ -1872,9 +1881,8 @@ impl MultiWorkspace {
          let original_active = self.workspace().clone();
          let group_key = original_active.read(cx).project_group_key(cx);
  
@@ -84,6 +57,33 @@ index 3683185595..5540211d04 100644
          let group_index = self
              .project_groups
              .iter()
+@@ -1974,13 +1982,24 @@ impl MultiWorkspace {
+ 
+                 // wait for should_continue to be true before removing project groups
+                 if intent == RemovalIntent::CloseProject {
++                    let projects_to_delete: collections::HashSet<_> = workspaces
++                        .iter()
++                        .map(|workspace| workspace.read(cx).project().entity_id())
++                        .collect();
+                     let workspace_to_delete_keys = workspaces
+                         .iter()
+                         .map(|workspace| workspace.read(cx).project_group_key(cx))
+                         .collect::<Vec<_>>();
+ 
+-                    this.project_groups
+-                        .retain(|group| !workspace_to_delete_keys.contains(&group.key));
++                    this.project_groups.retain(|group| {
++                        !workspace_to_delete_keys.contains(&group.key)
++                            || this.workspaces().any(|workspace| {
++                                !workspaces.contains(workspace)
++                                    && projects_to_delete.contains(
++                                        &workspace.read(cx).project().entity_id(),
++                                    )
++                            })
++                    });
+                     cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
+                 }
+ 
 diff --git a/crates/workspace/src/multi_workspace_tests.rs b/crates/workspace/src/multi_workspace_tests.rs
 index 7c9dc56fa7..17f3adc839 100644
 --- a/crates/workspace/src/multi_workspace_tests.rs

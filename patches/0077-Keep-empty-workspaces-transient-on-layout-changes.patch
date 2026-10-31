@@ -1,4 +1,4 @@
-From fb8a97cb3ccca5d3ea7ddd4085b382a5b1e56e44 Mon Sep 17 00:00:00 2001
+From 1c26075cde96150489feb8b8d7c892eaecc8d028 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 21:42:25 +0000
@@ -7,7 +7,7 @@ Subject: [PATCH 76/90] Keep empty workspaces transient when changing the
 
 
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index cc02aff744..b1a6a7d747 100644
+index 1fdf64479a..cedcaa54b4 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -412,7 +412,14 @@ impl MultiWorkspace {

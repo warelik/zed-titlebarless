@@ -1,4 +1,4 @@
-From 2515b97d3bebd66d1d9cb8622aa8e7d183e722ab Mon Sep 17 00:00:00 2001
+From 8a4e1495fbb0afd4b4c29f94c4fbb62e4ae2ecc2 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Mon, 19 Oct 2026 01:29:54 +0000
@@ -299,10 +299,10 @@ index 68fc12c163..452ce1c60c 100644
                  assert!(terminal.get_content().contains("retained task output"));
              });
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 4723d44ba7..734bf472e7 100644
+index 2d0a41e54e..8b45cc8053 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
-@@ -1743,7 +1743,14 @@ impl MultiWorkspace {
+@@ -1716,7 +1716,14 @@ impl MultiWorkspace {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) -> Entity<Workspace> {
