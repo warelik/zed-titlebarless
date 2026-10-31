@@ -1,4 +1,4 @@
-From a5e53a0ef740eeb3f91bdaff4fd690eb73f7aa18 Mon Sep 17 00:00:00 2001
+From a973390439bd2dc5fc176d36cc7bb6d784f7ccd3 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex@example.invalid>
 Date: Sun, 18 Oct 2026 05:57:59 +0000
 Subject: [PATCH 28/90] Bind update assets to the candidate SHA

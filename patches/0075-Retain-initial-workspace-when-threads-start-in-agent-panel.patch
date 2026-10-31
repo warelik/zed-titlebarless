@@ -1,4 +1,4 @@
-From 3f13ac817626e44619c71bf977cc7a90c0a0d993 Mon Sep 17 00:00:00 2001
+From 04a9d58fd8712701aa4e209b82c3fbd2e7db28aa Mon Sep 17 00:00:00 2001
 From: OpenAI Codex <noreply@openai.com>
 Date: Tue, 20 Oct 2026 00:00:00 +0000
 Subject: [PATCH 74/90] Retain the initial workspace when threads start in the

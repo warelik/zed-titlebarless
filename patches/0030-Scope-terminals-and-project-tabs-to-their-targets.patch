@@ -1,4 +1,4 @@
-From f47b83a1ef1b393e2ebc1cc3eece317e19f86b9b Mon Sep 17 00:00:00 2001
+From 8105ff2e09b071daca4cc26b5abaff91b0105b0c Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex@example.invalid>
 Date: Sun, 18 Oct 2026 06:30:00 +0000
 Subject: [PATCH 30/90] Scope terminals and project tabs to their targets
@@ -329,7 +329,7 @@ index 3ca324313f..d39b07f300 100644
 +    }), "opening a closed project tab must not reopen the source project's panel");
 +}
 diff --git a/crates/sidebar/src/thread_tabs.rs b/crates/sidebar/src/thread_tabs.rs
-index 85ac844038..34d4c430bf 100644
+index a4179e8acb..e36b71515e 100644
 --- a/crates/sidebar/src/thread_tabs.rs
 +++ b/crates/sidebar/src/thread_tabs.rs
 @@ -420,13 +420,7 @@ impl Sidebar {

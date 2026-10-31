@@ -1,4 +1,4 @@
-From 4b0867aa1d6c65f61081e683c58fbae8e9f299b9 Mon Sep 17 00:00:00 2001
+From 50fbf80ef85ae323e23074c24769b92301ea8d85 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex-repair@example.invalid>
 Date: Sat, 17 Oct 2026 13:55:42 +0000
 Subject: [PATCH 20/90] Close nonpersistent terminals without shpool kill

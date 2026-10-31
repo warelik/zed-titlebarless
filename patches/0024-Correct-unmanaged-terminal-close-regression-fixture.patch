@@ -1,4 +1,4 @@
-From 3d0be90d0bfa6248a96108dc9dd69317816dd921 Mon Sep 17 00:00:00 2001
+From 60bff96487d0b6de15c386b3396bc29a8b275549 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex@example.invalid>
 Date: Sat, 17 Oct 2026 21:56:27 +0000
 Subject: [PATCH 24/90] Correct unmanaged terminal close regression fixture

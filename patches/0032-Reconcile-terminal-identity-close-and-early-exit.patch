@@ -1,4 +1,4 @@
-From 448fa68356f7c0eaf75c95ec0d09d35b2f3bf911 Mon Sep 17 00:00:00 2001
+From 36ea4b81ecbe8f7c7696e79fe83583244610dbc5 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex@example.invalid>
 Date: Sun, 18 Oct 2026 07:53:38 +0000
 Subject: [PATCH 32/90] Normalize terminal identity and reconcile pending close

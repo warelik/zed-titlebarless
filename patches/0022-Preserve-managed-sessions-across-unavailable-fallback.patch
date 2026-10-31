@@ -1,4 +1,4 @@
-From e35e8ff9f1becbbc161a36118ef83e1e87a65321 Mon Sep 17 00:00:00 2001
+From d33ed15385113cf7ec6df865db50febf501d8fde Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex@example.invalid>
 Date: Sat, 17 Oct 2026 17:31:36 +0000
 Subject: [PATCH 22/90] Preserve managed sessions across unavailable fallback

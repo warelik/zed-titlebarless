@@ -1,4 +1,4 @@
-From ffd2642747acd09a9ce5c51644aa4f5f0d02c0b9 Mon Sep 17 00:00:00 2001
+From 7b8e8e5908f5506957c8035d81d4099989d48ba5 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex-repair@example.invalid>
 Date: Sat, 17 Oct 2026 10:36:57 +0000
 Subject: [PATCH 19/90] Fail terminal session kills when shpool is unavailable

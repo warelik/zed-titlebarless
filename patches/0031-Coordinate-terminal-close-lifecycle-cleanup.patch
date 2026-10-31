@@ -1,4 +1,4 @@
-From 5746680a651ff93fff73daab513178f5d8d83a14 Mon Sep 17 00:00:00 2001
+From 5ccc8ead5b32c807dd9295eb3cf23630f6e0f6fa Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex-repair@example.invalid>
 Date: Sun, 18 Oct 2026 06:34:09 +0000
 Subject: [PATCH 31/90] Coordinate terminal close lifecycle cleanup

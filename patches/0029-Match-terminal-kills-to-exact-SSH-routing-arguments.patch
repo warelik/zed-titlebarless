@@ -1,4 +1,4 @@
-From 760a462a0fd69ffc3a3e230d308c43d4ce7dba01 Mon Sep 17 00:00:00 2001
+From e0851d16698d774afbf2e8f28fffe4ba88a4f07e Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex@example.invalid>
 Date: Sun, 18 Oct 2026 05:58:17 +0000
 Subject: [PATCH 29/90] Match terminal kills to exact SSH routing arguments

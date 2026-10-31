@@ -1,4 +1,4 @@
-From 948e4015c095533af1796c7c9a34989081b35dd4 Mon Sep 17 00:00:00 2001
+From 2dda78c388f8de6c5316bc7d6ebfb855572ba174 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Thu, 15 Oct 2026 23:49:19 +0300
 Subject: [PATCH 12/90] Stop reconnect retries that cannot succeed and keep

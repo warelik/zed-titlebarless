@@ -1,4 +1,4 @@
-From 40ab81848c881ee7b5bf8ce8131879448c2e5fb4 Mon Sep 17 00:00:00 2001
+From cc016fb6acf6defc93aeddef413c48cd1b35639e Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex@example.invalid>
 Date: Sat, 17 Oct 2026 18:02:27 +0000
 Subject: [PATCH 23/90] Sanitize terminal metadata and narrow shpool errors

@@ -1,4 +1,4 @@
-From edb17949055b0020e5750883a71bd2afc3f4ba88 Mon Sep 17 00:00:00 2001
+From b803c695505f92cfd7b9e951de08b6396774b321 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 11:03:26 +0300
 Subject: [PATCH 09/90] Add agent.threads_sidebar.in_agent_panel setting
@@ -1241,10 +1241,10 @@ index 97bdd6050f..4574cf49b8 100644
 +}
 diff --git a/crates/sidebar/src/thread_tabs.rs b/crates/sidebar/src/thread_tabs.rs
 new file mode 100644
-index 0000000000..85ac844038
+index 0000000000..a4179e8acb
 --- /dev/null
 +++ b/crates/sidebar/src/thread_tabs.rs
-@@ -0,0 +1,730 @@
+@@ -0,0 +1,738 @@
 +use super::*;
 +use gpui::ScrollHandle;
 +use ui::{IconButtonShape, Indicator, TabCloseSide, TabPosition};
@@ -1711,7 +1711,9 @@ index 0000000000..85ac844038
 +        let title = thread.metadata.display_title();
 +        let is_running = matches!(
 +            thread.status,
-+            AgentThreadStatus::Running | AgentThreadStatus::WaitingForConfirmation
++            AgentThreadStatus::Running
++                | AgentThreadStatus::WaitingForConfirmation
++                | AgentThreadStatus::Unconfirmed
 +        );
 +
 +        let indicator = match thread.status {
@@ -1726,6 +1728,12 @@ index 0000000000..85ac844038
 +                Icon::new(IconName::Warning)
 +                    .size(IconSize::XSmall)
 +                    .color(Color::Warning)
++                    .into_any_element(),
++            ),
++            AgentThreadStatus::Unconfirmed => Some(
++                Icon::new(IconName::Info)
++                    .size(IconSize::XSmall)
++                    .color(Color::Muted)
 +                    .into_any_element(),
 +            ),
 +            AgentThreadStatus::Error => {

@@ -1,4 +1,4 @@
-From 45cddee16db2fe65251bdee645445213602c1834 Mon Sep 17 00:00:00 2001
+From 92e52d580f5c6abb1c46dcb1bfc4d58dd71fc497 Mon Sep 17 00:00:00 2001
 From: Zed Patch Preparation Bot <zed-patch-preparation-bot@localhost>
 Date: Fri, 16 Oct 2026 20:23:53 +0000
 Subject: [PATCH 13/90] Verify immutable fork releases and accept same-version

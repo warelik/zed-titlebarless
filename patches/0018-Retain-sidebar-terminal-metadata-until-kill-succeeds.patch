@@ -1,4 +1,4 @@
-From 9cdb646d636e657ed7be1b3ec623973c6f89388b Mon Sep 17 00:00:00 2001
+From 47d5d9c15c5e366e0342f87ec285023d84544c56 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex-repair@example.invalid>
 Date: Sat, 17 Oct 2026 02:28:03 +0000
 Subject: [PATCH 18/90] Retain sidebar terminal metadata until session kill

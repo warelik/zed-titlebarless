@@ -1,4 +1,4 @@
-From 607bb8281ffc4a85abdaa9c43c46cb23a154e3d1 Mon Sep 17 00:00:00 2001
+From a42384eb0bc8c6020b4b5249a7fa13cdba120652 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex@example.invalid>
 Date: Sun, 18 Oct 2026 00:50:03 +0000
 Subject: [PATCH 26/90] Ensure tab width regression renders a tab

@@ -1,4 +1,4 @@
-From 4c80b882e48b66d43d1a6d3355c71fb2e9daf6c9 Mon Sep 17 00:00:00 2001
+From 4eb649f21f21b5d59858b93ee588a8dba6d72560 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex-repair@example.invalid>
 Date: Sat, 17 Oct 2026 01:54:49 +0000
 Subject: [PATCH 17/90] Fix terminal metadata cleanup compilation

@@ -1,4 +1,4 @@
-From 8e9b46fac261bbaf109412fa5725e36d46e67957 Mon Sep 17 00:00:00 2001
+From 4200711dd7206c6e809a9779aa45809062f9f39a Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex-repair@example.invalid>
 Date: Sat, 17 Oct 2026 00:00:38 +0000
 Subject: [PATCH 14/90] Retain terminal metadata when session kill fails
