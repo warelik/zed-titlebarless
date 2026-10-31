@@ -1,12 +1,10 @@
-From 11a2ab3bee7983f92b5fbe94a7ce3424378221da Mon Sep 17 00:00:00 2001
+From 34087035008cc6dd1185612a19f608709a9b8cea Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 04:27:19 +0000
-Subject: [PATCH] Release provisional terminal contexts after failed startup
+Subject: [PATCH 79/90] Release provisional terminal contexts after failed
+ startup
 
----
- crates/project/src/terminals.rs | 81 ++++++++++++++++++++++++++++++++-
- 1 file changed, 80 insertions(+), 1 deletion(-)
 
 diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
 index b319d0bf3f..cb52724d8d 100644

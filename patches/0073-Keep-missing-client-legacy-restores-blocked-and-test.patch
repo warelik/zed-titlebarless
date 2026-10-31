@@ -1,21 +1,17 @@
-From 62991fd1550d44b9c7634252be82824b691550d2 Mon Sep 17 00:00:00 2001
+From d9b1281cf77540923a7cdaa2bf458fffb5127fcd Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Mon, 19 Oct 2026 07:42:14 +0000
-Subject: [PATCH] Keep missing-client legacy restores blocked and test actual
- probe statuses
+Subject: [PATCH 72/90] Keep missing-client legacy restores blocked and test
+ actual probe statuses
 
 Resolve the complete paired143/144 findings4311327072 and4311337939 together. Withdraw the unshipped legacy plain-shell fallback: the documented fallback is only for new threads, while old UUIDs require positive ownership and must not create duplicate shells. Preserve existing-only and kill script missing-client status127. Adapt only the unmanaged fixture producer to a real NEW thread, preserving every old assertion and fixture value except its newly added false managed locator. Extend the existing legacy match case with unavailable restore and kill rejection, and the existing POSIX probe regression with actual isolated production-script statuses new0/legacy127/kill127. Keep all207 selector identities and stock compiler recipes; no intermediate tests executed.
----
- crates/agent_ui/src/agent_panel.rs | 14 +++++--
- crates/project/src/terminals.rs    | 59 ++++++++++++++++++++++++------
- 2 files changed, 59 insertions(+), 14 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index d8a2903..8c9ae18 100644
+index f7e9cd8bac..c616fff1aa 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -17749,11 +17749,19 @@ mod tests {
+@@ -17795,11 +17795,19 @@ mod tests {
              working_directory: None,
          };
          panel.update_in(&mut cx, |panel, window, cx| {
@@ -39,7 +35,7 @@ index d8a2903..8c9ae18 100644
                  cx,
              );
 diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
-index 9638da4..b319d0b 100644
+index 9638da4b4c..b319d0bf3f 100644
 --- a/crates/project/src/terminals.rs
 +++ b/crates/project/src/terminals.rs
 @@ -265,8 +265,9 @@ exec "$SHPOOL_BIN" -s "$SHPOOL_SOCK" list --json

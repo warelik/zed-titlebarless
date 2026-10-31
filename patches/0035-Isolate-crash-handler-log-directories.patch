@@ -1,19 +1,13 @@
-From 1153781576080638d033cee63706ea3cf1831fc4 Mon Sep 17 00:00:00 2001
+From c9fa032098c02a2800ca6e639fcce1e596c8e311 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 08:18:19 +0000
-Subject: [PATCH] Forward resolved log directories to crash-handler
+Subject: [PATCH 35/90] Forward resolved log directories to crash-handler
  subprocesses
 
----
- crates/crashes/src/crashes.rs      | 45 ++++++++++++++++++++++++------
- crates/remote_server/src/main.rs   |  5 +++-
- crates/remote_server/src/server.rs |  2 ++
- crates/zed/src/main.rs             |  6 +++-
- 4 files changed, 47 insertions(+), 11 deletions(-)
 
 diff --git a/crates/crashes/src/crashes.rs b/crates/crashes/src/crashes.rs
-index 87d6f5c..c2faa71 100644
+index 87d6f5c640..c2faa71c69 100644
 --- a/crates/crashes/src/crashes.rs
 +++ b/crates/crashes/src/crashes.rs
 @@ -50,6 +50,7 @@ pub fn init<F, S, C, P>(
@@ -115,7 +109,7 @@ index 87d6f5c..c2faa71 100644
 +
  }
 diff --git a/crates/remote_server/src/main.rs b/crates/remote_server/src/main.rs
-index 5f0033f..f93c48a 100644
+index 58123ebb95..63bb499f13 100644
 --- a/crates/remote_server/src/main.rs
 +++ b/crates/remote_server/src/main.rs
 @@ -16,6 +16,8 @@ struct Cli {
@@ -138,10 +132,10 @@ index 5f0033f..f93c48a 100644
      }
  
 diff --git a/crates/remote_server/src/server.rs b/crates/remote_server/src/server.rs
-index 2263293..602eec2 100644
+index 48004fddd5..9ac95713a3 100644
 --- a/crates/remote_server/src/server.rs
 +++ b/crates/remote_server/src/server.rs
-@@ -588,6 +588,7 @@ pub fn execute_run(
+@@ -698,6 +698,7 @@ pub fn execute_run(
              // we are running outside gpui
              #[allow(clippy::disallowed_methods)]
              |duration| FutureExt::map(Timer::after(duration), |_| ()),
@@ -149,7 +143,7 @@ index 2263293..602eec2 100644
          )))
      } else {
          crashes::force_backtrace();
-@@ -863,6 +864,7 @@ pub(crate) fn execute_proxy(
+@@ -973,6 +974,7 @@ pub(crate) fn execute_proxy(
              // we are running outside gpui
              #[allow(clippy::disallowed_methods)]
              |duration| FutureExt::map(Timer::after(duration), |_| ()),
@@ -158,7 +152,7 @@ index 2263293..602eec2 100644
          .detach();
      };
 diff --git a/crates/zed/src/main.rs b/crates/zed/src/main.rs
-index f720fef..c3b0529 100644
+index c3bde91b04..509fe5af02 100644
 --- a/crates/zed/src/main.rs
 +++ b/crates/zed/src/main.rs
 @@ -221,7 +221,8 @@ fn main() {
@@ -188,6 +182,3 @@ index f720fef..c3b0529 100644
  
      /// Run zed in the foreground, only used on Windows, to match the behavior on macOS.
      #[arg(long)]
--- 
-2.43.0
-

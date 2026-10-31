@@ -1,17 +1,14 @@
-From c9485fd4471291088196272baa5c3cc2ea7a1891 Mon Sep 17 00:00:00 2001
+From af7b0de206a86e125325e05dd53a630a8f3676d7 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 19:51:13 +0000
-Subject: [PATCH] Preserve the documented global sidebar minimum across layouts
+Subject: [PATCH 47/90] Preserve the documented global sidebar minimum across
+ layouts
 
 The original patch explicitly lowers the minimum for every user, independently of compact and in-agent-panel settings. Keep that required behavior and cover settings, dragging and restored state under all four layout combinations rather than accepting a contradictory review assumption.
----
- crates/agent_settings/src/agent_settings.rs | 19 ++++++++++++++++
- crates/sidebar/src/sidebar_tests.rs         | 25 +++++++++++++++++++++
- 2 files changed, 44 insertions(+)
 
 diff --git a/crates/agent_settings/src/agent_settings.rs b/crates/agent_settings/src/agent_settings.rs
-index 5ac5d29..f34a2d7 100644
+index 5ac5d29343..f34a2d74d3 100644
 --- a/crates/agent_settings/src/agent_settings.rs
 +++ b/crates/agent_settings/src/agent_settings.rs
 @@ -34,6 +34,8 @@ pub const COMPACTION_PROMPT: &str = include_str!("prompts/compaction_prompt.txt"
@@ -48,7 +45,7 @@ index 5ac5d29..f34a2d7 100644
      fn test_threads_sidebar_settings(cx: &mut gpui::App) {
          let store = SettingsStore::test(cx);
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 77a6e7c..1d2e4c2 100644
+index 45680f044a..7d792d1b07 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
 @@ -1153,6 +1153,31 @@ async fn test_restored_width_preserves_legacy_resizes(cx: &mut TestAppContext) {

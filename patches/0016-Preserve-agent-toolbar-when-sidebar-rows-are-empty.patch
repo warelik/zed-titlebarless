@@ -1,17 +1,14 @@
-From bee27fd5614604d20ff971f538c7c858607c0ff0 Mon Sep 17 00:00:00 2001
+From 4a337add39083a7356a382f7340ef0aef971bacf Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex-repair@example.invalid>
 Date: Sat, 17 Oct 2026 00:03:51 +0000
-Subject: [PATCH 3/3] Preserve agent toolbar when sidebar rows are empty
+Subject: [PATCH 16/90] Preserve agent toolbar when sidebar rows are empty
 
----
- crates/agent_ui/src/agent_panel.rs | 38 +++++++++++++++++++++++++++++-
- 1 file changed, 37 insertions(+), 1 deletion(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 843b6af..e2c812b 100644
+index 2145c8c6c3..c72d2e79f2 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -6430,7 +6430,14 @@ impl AgentPanel {
+@@ -6442,7 +6442,14 @@ impl AgentPanel {
              && window
                  .root::<MultiWorkspace>()
                  .flatten()
@@ -27,7 +24,7 @@ index 843b6af..e2c812b 100644
      }
  
      fn sidebar_tab_rows(window: &Window, cx: &mut App) -> Option<workspace::AgentPanelTabRows> {
-@@ -10459,6 +10466,35 @@ mod tests {
+@@ -10474,6 +10481,35 @@ mod tests {
          assert_eq!(pasted, "file.rs:2-3 ");
      }
  
@@ -63,6 +60,3 @@ index 843b6af..e2c812b 100644
      async fn setup_panel(cx: &mut TestAppContext) -> (Entity<AgentPanel>, VisualTestContext) {
          init_test(cx);
          cx.update(|cx| {
--- 
-2.43.0
-

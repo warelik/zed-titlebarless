@@ -1,18 +1,14 @@
-From 9aa02d051c59374238c4b00ad8a6ccfa54c58219 Mon Sep 17 00:00:00 2001
+From 22fb3fa5626be5453ca52c6b3499cf5ed57a85b7 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Mon, 19 Oct 2026 01:36:22 +0000
-Subject: [PATCH] Coordinate a sole same-window terminal owner outside the
- direct close workspace
+Subject: [PATCH 63/90] Coordinate a sole same-window terminal owner outside
+ the direct close workspace
 
 Bind all four owner checks to the actual direct workspace, with independent pre-remove callback capture. Preserve the ordinary single-owner close path and cover live/pending ownership for closed and non-owning open sidebar entries.
----
- crates/sidebar/src/sidebar.rs       | 27 +++++-----
- crates/sidebar/src/sidebar_tests.rs | 76 +++++++++++++++++++++++++++++
- 2 files changed, 92 insertions(+), 11 deletions(-)
 
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index c98a64e..9bd6b52 100644
+index 9d265018a3..1f30fbd232 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -5355,17 +5355,21 @@ impl Sidebar {
@@ -89,10 +85,10 @@ index c98a64e..9bd6b52 100644
                      if !gpui::AsyncApp::update(cx, |cx| begin_terminal_close(terminal_id, cx)) {
                          return Ok(false);
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index ca18416..a71574e 100644
+index e1bb7aaaad..a3d83c92a4 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -5226,6 +5226,82 @@ async fn test_unavailable_saved_root_keeps_terminal_metadata_and_session(cx: &mu
+@@ -5327,6 +5327,82 @@ async fn test_unavailable_saved_root_keeps_terminal_metadata_and_session(cx: &mu
      });
  }
  

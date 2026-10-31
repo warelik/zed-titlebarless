@@ -1,18 +1,14 @@
-From f86d403c79630366c5809047ec4a5c75b3dcf865 Mon Sep 17 00:00:00 2001
+From 14c678832a1b5de0fb1aca8e2663fd7e880c8c7b Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Mon, 19 Oct 2026 02:51:42 +0000
-Subject: [PATCH] Require every saved terminal root to exist before selecting
- its daemon
+Subject: [PATCH 65/90] Require every saved terminal root to exist before
+ selecting its daemon
 
 Use the existing local/SSH resolve_abs_path metadata query because worktree creation permits nonexistent placeholders. Preserve the original missing-root regression and add a multi-root rejection followed by recovery/retry, without opening or activating a workspace.
----
- crates/sidebar/src/sidebar.rs       | 10 +++++
- crates/sidebar/src/sidebar_tests.rs | 61 +++++++++++++++++++++++++++++
- 2 files changed, 71 insertions(+)
 
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 4cae6ed..dfac458 100644
+index 7e298c51c1..f57514005d 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -5320,6 +5320,16 @@ impl Sidebar {
@@ -33,10 +29,10 @@ index 4cae6ed..dfac458 100644
                      project.find_or_create_worktree(path.as_path(), true, cx)
                  });
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index a71574e..bdb324c 100644
+index a3d83c92a4..33130f459d 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -5226,6 +5226,67 @@ async fn test_unavailable_saved_root_keeps_terminal_metadata_and_session(cx: &mu
+@@ -5327,6 +5327,67 @@ async fn test_unavailable_saved_root_keeps_terminal_metadata_and_session(cx: &mu
      });
  }
  

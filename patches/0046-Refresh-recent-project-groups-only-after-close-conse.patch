@@ -1,17 +1,14 @@
-From 4bde8d89b99add04adf69ef18713ea802e859d7e Mon Sep 17 00:00:00 2001
+From 0d56b0318b35037c0c5802c8c89729ddf5424d2f Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 19:37:53 +0000
-Subject: [PATCH] Refresh recent project groups only after close consent
+Subject: [PATCH 46/90] Refresh recent project groups only after close consent
  completes
 
 Await the actual project removal before refreshing picker state from the authoritative workspace groups. Preserve cancelled closes, unloaded-group removal, and concurrent same-group workspaces. Exercise cancellation and accepted close through the real picker delegate.
----
- crates/recent_projects/src/recent_projects.rs | 81 +++++++++++++++----
- 1 file changed, 67 insertions(+), 14 deletions(-)
 
 diff --git a/crates/recent_projects/src/recent_projects.rs b/crates/recent_projects/src/recent_projects.rs
-index 5578ae9..54c9a82 100644
+index 5578ae9382..54c9a82e3a 100644
 --- a/crates/recent_projects/src/recent_projects.rs
 +++ b/crates/recent_projects/src/recent_projects.rs
 @@ -2408,20 +2408,28 @@ impl RecentProjectsDelegate {

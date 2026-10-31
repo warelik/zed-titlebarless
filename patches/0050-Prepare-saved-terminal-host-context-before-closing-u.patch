@@ -1,22 +1,17 @@
-From 770e82d418480c20beff55919210df1da3a3892d Mon Sep 17 00:00:00 2001
+From c3a0c5c5505f8f84c26cedfb82489ef7d0b54455 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 21:01:33 +0000
-Subject: [PATCH] Prepare saved terminal host context before closing unloaded
- sessions
+Subject: [PATCH 50/90] Prepare saved terminal host context before closing
+ unloaded sessions
 
 Reuse standard connection/modal and Project factories without opening or activating a workspace. Load saved roots for terminal settings, recheck live and pending terminal ownership after setup, and preserve metadata on cancellation/failure. Cover local closure from a remote workspace and remote closure from a local workspace with no UI activation. Keep existing unreachable-host refusal assertions.
----
- crates/agent_ui/src/agent_panel.rs  |   2 +-
- crates/sidebar/src/sidebar.rs       | 124 +++++++++++++++++++++++---
- crates/sidebar/src/sidebar_tests.rs | 132 +++++++++++++++++++++++++++-
- 3 files changed, 242 insertions(+), 16 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index eaeeafc..1b64b06 100644
+index 9007096775..ec826faf3f 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -2137,7 +2137,7 @@ impl AgentPanel {
+@@ -2138,7 +2138,7 @@ impl AgentPanel {
          );
      }
  
@@ -26,7 +21,7 @@ index eaeeafc..1b64b06 100644
              || self.closed_terminal_spawns.contains(&terminal_id)
      }
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index ed9527e..c5870e0 100644
+index 57a6525efc..6d56592e42 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -5233,12 +5233,122 @@ impl Sidebar {
@@ -174,10 +169,10 @@ index ed9527e..c5870e0 100644
              .active_entry
              .as_ref()
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 08134ab..ec74fb5 100644
+index 0197f24dfe..f3c39a5df1 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -5134,6 +5134,135 @@ async fn test_failed_close_terminal_entry_retains_metadata_until_session_kill_su
+@@ -5235,6 +5235,135 @@ async fn test_failed_close_terminal_entry_retains_metadata_until_session_kill_su
      });
  }
  
@@ -313,7 +308,7 @@ index 08134ab..ec74fb5 100644
  #[gpui::test]
  async fn test_close_terminal_entry_without_matching_project_retains_metadata(
      cx: &mut TestAppContext,
-@@ -5193,8 +5322,9 @@ async fn test_close_terminal_entry_without_matching_project_retains_metadata(
+@@ -5294,8 +5423,9 @@ async fn test_close_terminal_entry_without_matching_project_retains_metadata(
                  .read(cx)
                  .entry(terminal_id)
                  .is_some(),

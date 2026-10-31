@@ -1,19 +1,16 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From d9140303176eb603b0b0e7a52b15fe8315fc82ca Mon Sep 17 00:00:00 2001
 From: OpenAI Codex <noreply@openai.com>
 Date: Tue, 20 Oct 2026 00:00:00 +0000
-Subject: [PATCH] Compare remote terminal directories using the project path style
+Subject: [PATCH 75/90] Compare remote terminal directories using the project
+ path style
 
 Use the project's path style when matching rootless remote terminal working directories to project roots. Thread the style through every caller and cover Windows remote paths on Unix hosts without relaxing component-boundary or remote-identity checks.
----
- crates/agent_ui/src/agent_panel.rs                 | 12 +++-
- .../agent_ui/src/terminal_thread_metadata_store.rs | 67 +++++++++++++++++++++-
- 2 files changed, 74 insertions(+), 5 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 44927139f98e0e8688c5e513a3fdf69ec3f5443a..f17ad2d06187d874bbd0f22eab57d6ebb550da89 100644
+index 062febae84..8a3ed84d90 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -3024,13 +3024,21 @@ impl AgentPanel {
+@@ -3025,13 +3025,21 @@ impl AgentPanel {
      }
  
      fn update_terminal_worktree_paths(&self, cx: &mut Context<Self>) {
@@ -38,7 +35,7 @@ index 44927139f98e0e8688c5e513a3fdf69ec3f5443a..f17ad2d06187d874bbd0f22eab57d6eb
                      );
                  });
 diff --git a/crates/agent_ui/src/terminal_thread_metadata_store.rs b/crates/agent_ui/src/terminal_thread_metadata_store.rs
-index c9cf0abaacfd2610522128dd7c26c821b72362ea..1defb46d4451a1317999819becbc7e638a68c49d 100644
+index c9cf0abaac..1defb46d44 100644
 --- a/crates/agent_ui/src/terminal_thread_metadata_store.rs
 +++ b/crates/agent_ui/src/terminal_thread_metadata_store.rs
 @@ -14,7 +14,7 @@ use futures::{FutureExt, future::Shared};

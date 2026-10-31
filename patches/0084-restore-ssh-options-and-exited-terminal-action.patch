@@ -1,22 +1,16 @@
-From 6937aca656290fc962b7c628c49094fff42c4951 Mon Sep 17 00:00:00 2001
+From 1d8ccb0aa5a1cd0db43e4440b590166ab939f6c7 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sat, 1 Jan 2000 00:00:00 +0000
-Subject: [PATCH] Restore SSH execution options and intercept the exited
+Subject: [PATCH 85/90] Restore SSH execution options and intercept the exited
  terminal action
 
----
- crates/agent_ui/src/agent_panel.rs        | 14 ++++++++++-
- crates/sidebar/src/sidebar.rs             | 27 ++++++++++++++-------
- crates/sidebar/src/sidebar_tests.rs       | 29 +++++++++++++++++++++++
- crates/terminal_view/src/terminal_view.rs |  7 ++++++
- 4 files changed, 67 insertions(+), 10 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 07d8623646..a56c833f51 100644
+index ac40db8399..3f1bdbd96f 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -7665,7 +7665,17 @@ impl Render for AgentPanel {
+@@ -7666,7 +7666,17 @@ impl Render for AgentPanel {
                          })
                          .child(terminal_view.clone())
                          .when_some(exited_terminal_id, |this, terminal_id| {
@@ -35,7 +29,7 @@ index 07d8623646..a56c833f51 100644
                                  move |this, event: &KeyDownEvent, window, cx| {
                                      if event.keystroke.key == "enter"
                                          && !event.keystroke.modifiers.modified()
-@@ -16956,6 +16966,8 @@ mod tests {
+@@ -17002,6 +17012,8 @@ mod tests {
      async fn test_process_exited_keeps_thread_and_enter_restart(cx: &mut TestAppContext) {
          init_test(cx);
          cx.update(|cx| {
@@ -45,7 +39,7 @@ index 07d8623646..a56c833f51 100644
              TerminalThreadMetadataStore::init_global(cx);
              language_model::LanguageModelRegistry::test(cx);
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 46ab5ea103..53fdc61928 100644
+index f2f6339350..79cefbeeb3 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -768,13 +768,22 @@ fn apply_worktree_label_mode(
@@ -145,10 +139,10 @@ index 46ab5ea103..53fdc61928 100644
          let modal_workspace = active_workspace.clone();
  
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index d038c9c9cb..4ba3a68ed0 100644
+index 667d8e1343..755750e285 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -18427,3 +18427,32 @@ async fn test_sidebar_close_waits_for_pending_terminal_startup(cx: &mut TestAppC
+@@ -18547,3 +18547,32 @@ async fn test_sidebar_close_waits_for_pending_terminal_startup(cx: &mut TestAppC
      assert!(!fake.has_session(&terminal_id.session_name()));
      cx.update(|_, cx| assert!(TerminalThreadMetadataStore::global(cx).read(cx).entry(terminal_id).is_none()));
  }
@@ -182,7 +176,7 @@ index d038c9c9cb..4ba3a68ed0 100644
 +    });
 +}
 diff --git a/crates/terminal_view/src/terminal_view.rs b/crates/terminal_view/src/terminal_view.rs
-index 28a6804760..813c7b529f 100644
+index 117e705252..ada2652b19 100644
 --- a/crates/terminal_view/src/terminal_view.rs
 +++ b/crates/terminal_view/src/terminal_view.rs
 @@ -93,6 +93,13 @@ pub struct SendText(String);
@@ -199,5 +193,3 @@ index 28a6804760..813c7b529f 100644
  actions!(
      terminal,
      [
--- 
-2.43.0

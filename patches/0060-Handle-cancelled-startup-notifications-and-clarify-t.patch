@@ -1,22 +1,17 @@
-From 7948278db2c18fb34a349f0feee15a2a9aab73fe Mon Sep 17 00:00:00 2001
+From 2a3ef3aeff7b722cabcac66db7948d5999c41a22 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 23:50:51 +0000
-Subject: [PATCH] Handle cancelled startup notifications and clarify terminal
- regression scheduling
+Subject: [PATCH 59/90] Handle cancelled startup notifications and clarify
+ terminal regression scheduling
 
 Handle both oneshot-send cancellation results with debug diagnostics. Use the public GPUI background-executor timer for the real-shpool marker while retaining parking, which advances its clock by elapsed wall time. Give all three new terminal-owner regressions full role-bearing local names. Preserve every string literal, assertion, test identity, fixture and compiler parameter; no intermediate tests or builds.
----
- crates/agent_ui/src/agent_panel.rs  |   8 +-
- crates/project/src/terminals.rs     |   4 +-
- crates/sidebar/src/sidebar_tests.rs | 154 ++++++++++++++--------------
- 3 files changed, 86 insertions(+), 80 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 796fef3..f11e24a 100644
+index fe530e6e99..1a3261fa68 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -2799,14 +2799,18 @@ impl AgentPanel {
+@@ -2800,14 +2800,18 @@ impl AgentPanel {
          let observation = gpui::App::observe(cx, &panel, move |panel, cx| {
              if !panel.read(cx).is_terminal_spawn_pending(terminal_id) {
                  if let Some(sender) = completed.borrow_mut().take() {
@@ -38,7 +33,7 @@ index 796fef3..f11e24a 100644
              }
          });
 diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
-index a64e429..fb83ab9 100644
+index a64e4295ba..fb83ab999a 100644
 --- a/crates/project/src/terminals.rs
 +++ b/crates/project/src/terminals.rs
 @@ -2119,6 +2119,8 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
@@ -60,10 +55,10 @@ index a64e429..fb83ab9 100644
          assert_eq!(std::fs::read_to_string(&marker).unwrap(), expected_output);
  
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index b980a4d..7ec170b 100644
+index 7d7d603d2c..35499914bf 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -5229,65 +5229,65 @@ async fn test_unavailable_saved_root_keeps_terminal_metadata_and_session(cx: &mu
+@@ -5330,65 +5330,65 @@ async fn test_unavailable_saved_root_keeps_terminal_metadata_and_session(cx: &mu
  #[gpui::test]
  async fn test_terminal_close_coordinates_live_owners_in_all_windows(cx: &mut TestAppContext) {
      let project = init_test_project_with_agent_panel("/shared", cx).await;
@@ -164,7 +159,7 @@ index b980a4d..7ec170b 100644
          created_at: chrono::Utc::now(),
          worktree_paths: project.read_with(cx, |project, cx| project.worktree_paths(cx)),
          remote_connection: None, working_directory: None,
-@@ -5297,10 +5297,10 @@ async fn test_terminal_close_coordinates_same_window_live_and_pending_owners(cx:
+@@ -5398,10 +5398,10 @@ async fn test_terminal_close_coordinates_same_window_live_and_pending_owners(cx:
          metadata.clone(), false, AgentThreadSource::AgentPanel, None, window, cx,
      ));
      cx.run_until_parked();
@@ -179,7 +174,7 @@ index b980a4d..7ec170b 100644
      });
      let second = add_agent_panel(&second_workspace, cx);
      fake.state.lock().probe_delay = Some(Duration::from_secs(1));
-@@ -5308,8 +5308,8 @@ async fn test_terminal_close_coordinates_same_window_live_and_pending_owners(cx:
+@@ -5409,8 +5409,8 @@ async fn test_terminal_close_coordinates_same_window_live_and_pending_owners(cx:
          metadata.clone(), false, AgentThreadSource::AgentPanel, None, window, cx,
      ));
      cx.run_until_parked();
@@ -190,7 +185,7 @@ index b980a4d..7ec170b 100644
      sidebar.update_in(cx, |sidebar, window, cx| sidebar.close_terminal(
          &metadata, &ThreadEntryWorkspace::Open(first_workspace.clone()), window, cx,
      ));
-@@ -5317,74 +5317,74 @@ async fn test_terminal_close_coordinates_same_window_live_and_pending_owners(cx:
+@@ -5418,74 +5418,74 @@ async fn test_terminal_close_coordinates_same_window_live_and_pending_owners(cx:
      assert!(fake.kill_history().is_empty(), "the second workspace's startup must settle before killing the shared session");
      cx.update(|_, cx| {
          let store = TerminalThreadMetadataStore::global(cx);

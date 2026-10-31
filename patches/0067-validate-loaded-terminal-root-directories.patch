@@ -1,18 +1,14 @@
-From d82c97d9345a6d60afeb25476651312db14dce12 Mon Sep 17 00:00:00 2001
+From cd4013a2c9adea6d5431ae1323753a13ac6512f2 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Mon, 19 Oct 2026 03:22:12 +0000
-Subject: [PATCH] Validate loaded saved terminal roots as directories before
- closing
+Subject: [PATCH 66/90] Validate loaded saved terminal roots as directories
+ before closing
 
 Reject placeholder and regular-file worktrees using the loaded root metadata, with the native initial snapshot barrier for remote worktrees. Preserve all previously executed test fixtures and add first-root file replacement and recovery to the new multi-root regression.
----
- crates/sidebar/src/sidebar.rs       | 22 ++++++++++++----------
- crates/sidebar/src/sidebar_tests.rs | 15 +++++++++++++++
- 2 files changed, 27 insertions(+), 10 deletions(-)
 
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index dfac458..5b4c6dc 100644
+index f57514005d..673316ceec 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -5320,20 +5320,22 @@ impl Sidebar {
@@ -49,10 +45,10 @@ index dfac458..5b4c6dc 100644
              anyhow::Ok(project)
          })
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index bdb324c..506265b 100644
+index 33130f459d..262566a2e9 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -5270,6 +5270,21 @@ async fn test_saved_terminal_checks_every_root_and_allows_retry(cx: &mut TestApp
+@@ -5371,6 +5371,21 @@ async fn test_saved_terminal_checks_every_root_and_allows_retry(cx: &mut TestApp
          assert!(!store.read(cx).is_intentionally_closing(terminal_id));
      });
      fs.as_fake().insert_tree("/missing-second", serde_json::json!({})).await;

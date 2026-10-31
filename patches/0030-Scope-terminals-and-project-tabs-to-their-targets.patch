@@ -1,17 +1,11 @@
-From a8862062aeb5b282a292b80a7e62ece08656b8e6 Mon Sep 17 00:00:00 2001
+From f47b83a1ef1b393e2ebc1cc3eece317e19f86b9b Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex@example.invalid>
 Date: Sun, 18 Oct 2026 06:30:00 +0000
-Subject: [PATCH] Scope terminals and project tabs to their targets
+Subject: [PATCH 30/90] Scope terminals and project tabs to their targets
 
----
- .../src/terminal_thread_metadata_store.rs     | 102 +++++++++++++++++-
- crates/sidebar/src/sidebar.rs                 |  44 +++++++-
- crates/sidebar/src/sidebar_tests.rs           |  70 ++++++++++++
- crates/sidebar/src/thread_tabs.rs             |   8 +-
- 4 files changed, 207 insertions(+), 17 deletions(-)
 
 diff --git a/crates/agent_ui/src/terminal_thread_metadata_store.rs b/crates/agent_ui/src/terminal_thread_metadata_store.rs
-index 5aca08e..4ca941d 100644
+index 5aca08e54f..4ca941d45c 100644
 --- a/crates/agent_ui/src/terminal_thread_metadata_store.rs
 +++ b/crates/agent_ui/src/terminal_thread_metadata_store.rs
 @@ -23,6 +23,21 @@ pub fn init(cx: &mut App) {
@@ -164,7 +158,7 @@ index 5aca08e..4ca941d 100644
 +
  }
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 899ad08..d4251df 100644
+index df7cd20a88..70e3143017 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -1341,6 +1341,7 @@ impl Sidebar {
@@ -197,7 +191,7 @@ index 899ad08..d4251df 100644
                                                      window,
                                                      cx,
                                                  );
-@@ -7634,6 +7641,25 @@ impl Sidebar {
+@@ -7675,6 +7682,25 @@ impl Sidebar {
          key: &ProjectGroupKey,
          window: &mut Window,
          cx: &mut Context<Self>,
@@ -223,7 +217,7 @@ index 899ad08..d4251df 100644
      ) {
          let workspace = self
              .multi_workspace
-@@ -7641,12 +7667,20 @@ impl Sidebar {
+@@ -7682,12 +7708,20 @@ impl Sidebar {
              .and_then(|mw| mw.read(cx).last_active_workspace_for_group(key, cx))
              .or_else(|| self.workspace_for_group(key, cx));
          if let Some(workspace) = workspace {
@@ -247,7 +241,7 @@ index 899ad08..d4251df 100644
          }
          self.selection = None;
          self.active_entry = None;
-@@ -7713,7 +7747,7 @@ impl Sidebar {
+@@ -7754,7 +7788,7 @@ impl Sidebar {
                  multi_workspace.retain_active_workspace(cx);
              });
          } else {
@@ -257,10 +251,10 @@ index 899ad08..d4251df 100644
      }
  
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 5b9f07b..9d32d7b 100644
+index 3ca324313f..d39b07f300 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -17298,3 +17298,73 @@ fn test_terminal_remote_connection_match_distinguishes_ssh_arguments() {
+@@ -17418,3 +17418,73 @@ fn test_terminal_remote_connection_match_distinguishes_ssh_arguments() {
          Some(&different_endpoint)
      ));
  }
@@ -335,7 +329,7 @@ index 5b9f07b..9d32d7b 100644
 +    }), "opening a closed project tab must not reopen the source project's panel");
 +}
 diff --git a/crates/sidebar/src/thread_tabs.rs b/crates/sidebar/src/thread_tabs.rs
-index 85ac844..34d4c43 100644
+index 85ac844038..34d4c430bf 100644
 --- a/crates/sidebar/src/thread_tabs.rs
 +++ b/crates/sidebar/src/thread_tabs.rs
 @@ -420,13 +420,7 @@ impl Sidebar {
@@ -353,5 +347,3 @@ index 85ac844..34d4c43 100644
      }
  
      fn close_tab(&mut self, close: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
--- 
-2.43.0

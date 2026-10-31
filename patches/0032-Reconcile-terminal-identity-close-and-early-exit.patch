@@ -1,18 +1,12 @@
-From 8cb503ea5545ef2dc646268b7c047698d7cc8274 Mon Sep 17 00:00:00 2001
+From 448fa68356f7c0eaf75c95ec0d09d35b2f3bf911 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex@example.invalid>
 Date: Sun, 18 Oct 2026 07:53:38 +0000
-Subject: [PATCH] Normalize terminal identity and reconcile pending close and
- early exit
+Subject: [PATCH 32/90] Normalize terminal identity and reconcile pending close
+ and early exit
 
----
- crates/agent_ui/src/agent_panel.rs            | 125 ++++++++++++++----
- .../src/terminal_thread_metadata_store.rs     |  16 ++-
- crates/sidebar/src/sidebar.rs                 |   2 +-
- crates/sidebar/src/sidebar_tests.rs           |   5 +
- 4 files changed, 119 insertions(+), 29 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 7724599..9d1a06f 100644
+index 1322ab0ebe..3faca5670c 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
 @@ -147,15 +147,21 @@ fn reconnect_if_remote_disconnected(project: Entity<Project>, cx: &mut App) {
@@ -46,7 +40,7 @@ index 7724599..9d1a06f 100644
                          workspace.show_toast(
                              workspace::Toast::new(
                                  workspace::notifications::NotificationId::unique::<CloseTerminalErrorToast>(),
-@@ -2233,6 +2238,7 @@ impl AgentPanel {
+@@ -2234,6 +2239,7 @@ impl AgentPanel {
                                  this.project.clone(),
                                  this.workspace.clone(),
                                  terminal_id,
@@ -54,7 +48,7 @@ index 7724599..9d1a06f 100644
                                  cx,
                              );
                              return;
-@@ -2340,6 +2346,7 @@ impl AgentPanel {
+@@ -2341,6 +2347,7 @@ impl AgentPanel {
                              this.project.clone(),
                              this.workspace.clone(),
                              terminal_id,
@@ -62,7 +56,7 @@ index 7724599..9d1a06f 100644
                              cx,
                          );
                      }
-@@ -2547,23 +2554,7 @@ impl AgentPanel {
+@@ -2548,23 +2555,7 @@ impl AgentPanel {
                  // The thread outlives its process: an SSH drop, sleep or `exit`
                  // leaves it to be restarted, and only closing it removes it.
                  TerminalEvent::ProcessExited => {
@@ -87,7 +81,7 @@ index 7724599..9d1a06f 100644
                  }
                  TerminalEvent::CloseTerminal
                  | TerminalEvent::BlinkChanged(_)
-@@ -2604,6 +2595,12 @@ impl AgentPanel {
+@@ -2605,6 +2596,12 @@ impl AgentPanel {
          self.terminals.insert(terminal_id, terminal);
          self.persist_terminal_metadata(terminal_id, cx);
          self.emit_terminal_thread_started(terminal_id, source, cx);
@@ -100,7 +94,7 @@ index 7724599..9d1a06f 100644
          let should_select = match select_mode {
              TerminalSelectMode::Always => true,
              TerminalSelectMode::Never => false,
-@@ -2689,9 +2686,19 @@ impl AgentPanel {
+@@ -2690,9 +2687,19 @@ impl AgentPanel {
              .terminal_session_may_exist(terminal_id, cx)
              .unwrap_or(true);
  
@@ -122,7 +116,7 @@ index 7724599..9d1a06f 100644
              self.closed_terminal_spawns.insert(terminal_id);
          }
          self.pending_reconnect_restart.remove(&terminal_id);
-@@ -2706,6 +2713,7 @@ impl AgentPanel {
+@@ -2707,6 +2714,7 @@ impl AgentPanel {
                  self.project.clone(),
                  self.workspace.clone(),
                  terminal_id,
@@ -130,7 +124,7 @@ index 7724599..9d1a06f 100644
                  cx,
              );
          } else if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
-@@ -2765,6 +2773,31 @@ impl AgentPanel {
+@@ -2766,6 +2774,31 @@ impl AgentPanel {
          })
      }
  
@@ -162,7 +156,7 @@ index 7724599..9d1a06f 100644
      fn terminal_has_exited(&self, terminal_id: TerminalId, cx: &App) -> bool {
          self.terminals.get(&terminal_id).is_some_and(|terminal| {
              terminal.exited || terminal.view.read(cx).terminal().read(cx).has_exited()
-@@ -17595,6 +17628,14 @@ mod tests {
+@@ -17641,6 +17674,14 @@ mod tests {
              panel.closed_terminal_spawns.contains(&terminal_id)
          }));
          assert!(fake_shpool.kill_history().is_empty());
@@ -177,7 +171,7 @@ index 7724599..9d1a06f 100644
  
          cx.update(|_, cx| {
              TerminalThreadMetadataStore::global(cx)
-@@ -17615,11 +17656,13 @@ mod tests {
+@@ -17661,11 +17702,13 @@ mod tests {
              assert!(store.entry(terminal_id).is_some());
              assert!(!store.has_deleted_terminal_id(terminal_id));
          });
@@ -196,7 +190,7 @@ index 7724599..9d1a06f 100644
          assert!(fake_shpool.attach_history().is_empty());
          assert!(fake_shpool.has_session(&terminal_id.session_name()));
          assert_eq!(fake_shpool.kill_history(), vec![terminal_id.session_name()]);
-@@ -17656,6 +17699,7 @@ mod tests {
+@@ -17702,6 +17745,7 @@ mod tests {
                  store.save(open_terminal_metadata.clone(), cx);
              });
          });
@@ -204,7 +198,7 @@ index 7724599..9d1a06f 100644
          panel.update_in(&mut cx, |panel, window, cx| {
              panel.restore_terminal(
                  open_terminal_metadata,
-@@ -17669,7 +17713,7 @@ mod tests {
+@@ -17715,7 +17759,7 @@ mod tests {
          cx.run_until_parked();
          assert!(
              workspace.read_with(&cx, |workspace, _cx| workspace.notification_ids().len())
@@ -213,7 +207,7 @@ index 7724599..9d1a06f 100644
              "a non-closed spawn error should remain visible"
          );
      }
-@@ -18472,4 +18516,31 @@ mod tests {
+@@ -18518,4 +18562,31 @@ mod tests {
              );
          });
      }
@@ -246,7 +240,7 @@ index 7724599..9d1a06f 100644
 +
  }
 diff --git a/crates/agent_ui/src/terminal_thread_metadata_store.rs b/crates/agent_ui/src/terminal_thread_metadata_store.rs
-index ca71def..80a51f1 100644
+index ca71def46e..80a51f1ac6 100644
 --- a/crates/agent_ui/src/terminal_thread_metadata_store.rs
 +++ b/crates/agent_ui/src/terminal_thread_metadata_store.rs
 @@ -32,7 +32,7 @@ fn same_terminal_remote_connection(
@@ -278,7 +272,7 @@ index ca71def..80a51f1 100644
 +
  }
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index c9726d6..ed9527e 100644
+index 90f2a2d5ec..57a6525efc 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -734,7 +734,7 @@ fn same_terminal_remote_connection(
@@ -291,10 +285,10 @@ index c9726d6..ed9527e 100644
          _ => true,
      }
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index a817f97..ac6a4c3 100644
+index 535e08e062..e2f50d83a2 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -17395,6 +17395,11 @@ fn test_terminal_remote_connection_match_distinguishes_ssh_arguments() {
+@@ -17515,6 +17515,11 @@ fn test_terminal_remote_connection_match_distinguishes_ssh_arguments() {
          Some(&persisted),
          Some(&different_endpoint)
      ));
@@ -306,6 +300,3 @@ index a817f97..ac6a4c3 100644
  }
  
  
--- 
-2.43.0
-

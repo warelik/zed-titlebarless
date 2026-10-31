@@ -1,15 +1,11 @@
-From c23db3dced1ba3e7ff5018e16188b379c2581745 Mon Sep 17 00:00:00 2001
+From 8e9b46fac261bbaf109412fa5725e36d46e67957 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex-repair@example.invalid>
 Date: Sat, 17 Oct 2026 00:00:38 +0000
-Subject: [PATCH] Retain terminal metadata when session kill fails
+Subject: [PATCH 14/90] Retain terminal metadata when session kill fails
 
----
- crates/agent_ui/src/agent_panel.rs | 294 +++++++++++++++++++++++------
- crates/project/src/terminals.rs    |  26 ++-
- 2 files changed, 261 insertions(+), 59 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index c868051..01b3370 100644
+index 25fdbe106f..2145c8c6c3 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
 @@ -147,6 +147,26 @@ fn reconnect_if_remote_disconnected(project: Entity<Project>, cx: &mut App) {
@@ -39,7 +35,7 @@ index c868051..01b3370 100644
  fn is_known_terminal_agent_command(command: &str) -> bool {
      KNOWN_TERMINAL_AGENT_COMMANDS.contains(&command)
  }
-@@ -2178,11 +2198,11 @@ impl AgentPanel {
+@@ -2179,11 +2199,11 @@ impl AgentPanel {
                      this.update_in(cx, |this, window, cx| {
                          this.pending_terminal_spawns.remove(&terminal_id);
                          if this.closed_terminal_spawns.remove(&terminal_id) {
@@ -56,7 +52,7 @@ index c868051..01b3370 100644
                              return;
                          }
                          log::error!("failed to spawn agent panel terminal: {error:#}");
-@@ -2275,15 +2295,16 @@ impl AgentPanel {
+@@ -2276,15 +2296,16 @@ impl AgentPanel {
              this.update_in(cx, |this, window, cx| {
                  this.pending_terminal_spawns.remove(&terminal_id);
                  if this.closed_terminal_spawns.remove(&terminal_id) {
@@ -82,7 +78,7 @@ index c868051..01b3370 100644
                      }
                      return;
                  }
-@@ -2302,7 +2323,7 @@ impl AgentPanel {
+@@ -2303,7 +2324,7 @@ impl AgentPanel {
                      custom_title,
                      initial_title,
                      created_at,
@@ -91,7 +87,7 @@ index c868051..01b3370 100644
                      select_mode,
                      focus,
                      source,
-@@ -2613,26 +2634,28 @@ impl AgentPanel {
+@@ -2614,26 +2635,28 @@ impl AgentPanel {
              .get(&terminal_id)
              .map_or(true, |terminal| terminal.persistent);
  
@@ -132,7 +128,7 @@ index c868051..01b3370 100644
          if was_active {
              self.base_view = BaseView::Uninitialized;
              self.refresh_base_view_subscriptions(window, cx);
-@@ -16261,6 +16284,80 @@ mod tests {
+@@ -16307,6 +16330,80 @@ mod tests {
          });
      }
  
@@ -213,7 +209,7 @@ index c868051..01b3370 100644
      #[gpui::test]
      async fn test_process_exited_keeps_thread_and_enter_restart(cx: &mut TestAppContext) {
          init_test(cx);
-@@ -17012,23 +17109,30 @@ mod tests {
+@@ -17058,23 +17155,30 @@ mod tests {
          });
          assert!(panel.read_with(&cx, |p, _| p.is_terminal_spawn_pending(terminal_id)));
  
@@ -259,7 +255,7 @@ index c868051..01b3370 100644
  
          // Release the gate so spawn_terminal finishes and lands on tombstone
          release_tx
-@@ -17045,21 +17149,78 @@ mod tests {
+@@ -17091,21 +17195,78 @@ mod tests {
                  TerminalThreadMetadataStore::global(cx)
                      .read(cx)
                      .entry(terminal_id)
@@ -350,7 +346,7 @@ index c868051..01b3370 100644
      }
  
      #[gpui::test]
-@@ -17089,6 +17250,8 @@ mod tests {
+@@ -17135,6 +17296,8 @@ mod tests {
              remote_connection: None,
              working_directory: None,
          };
@@ -359,7 +355,7 @@ index c868051..01b3370 100644
          cx.update(|_, cx| {
              TerminalThreadMetadataStore::global(cx)
                  .update(cx, |store, cx| store.save(metadata.clone(), cx));
-@@ -17117,7 +17280,7 @@ mod tests {
+@@ -17163,7 +17326,7 @@ mod tests {
          assert!(panel.read_with(&cx, |panel, _cx| {
              panel.closed_terminal_spawns.contains(&terminal_id)
          }));
@@ -368,7 +364,7 @@ index c868051..01b3370 100644
  
          cx.update(|_, cx| {
              TerminalThreadMetadataStore::global(cx)
-@@ -17135,7 +17298,7 @@ mod tests {
+@@ -17181,7 +17344,7 @@ mod tests {
              assert!(!panel.closed_terminal_spawns.contains(&terminal_id));
              let store = TerminalThreadMetadataStore::global(cx);
              let store = store.read(cx);
@@ -377,7 +373,7 @@ index c868051..01b3370 100644
              assert!(!store.has_deleted_terminal_id(terminal_id));
          });
          assert_eq!(
-@@ -17144,9 +17307,26 @@ mod tests {
+@@ -17190,9 +17353,26 @@ mod tests {
              "a closed spawn error should not add an error notification"
          );
          assert!(fake_shpool.attach_history().is_empty());
@@ -406,7 +402,7 @@ index c868051..01b3370 100644
          let open_terminal_metadata = TerminalThreadMetadata {
              terminal_id: open_terminal_id,
 diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
-index 6ae3786..4a2b03c 100644
+index 6ae37867cd..4a2b03ca0d 100644
 --- a/crates/project/src/terminals.rs
 +++ b/crates/project/src/terminals.rs
 @@ -70,6 +70,8 @@ pub struct FakeShpoolState {
@@ -449,6 +445,3 @@ index 6ae3786..4a2b03c 100644
              state.sessions.remove(&session_name);
              return Task::ready(Ok(()));
          }
--- 
-2.43.0
-

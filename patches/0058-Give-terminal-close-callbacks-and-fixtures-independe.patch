@@ -1,18 +1,14 @@
-From 2b0305be9590c737ddfba07c5ad3fb76d3f0818e Mon Sep 17 00:00:00 2001
+From 93ad429199796aa2aa0a84e0488a341f4849079d Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 23:30:04 +0000
-Subject: [PATCH] Give terminal close callbacks and fixtures independent owned
- snapshots
+Subject: [PATCH 58/90] Give terminal close callbacks and fixtures independent
+ owned snapshots
 
 Resolve all three E0382 diagnostics from final run39174552818: clone metadata for the asynchronous pre-remove owner guard while retaining the original for post-remove UI cleanup; clone both path lists at the earlier fixture insertion before their later reuse. Preserve every fixture row, consent and ownership guard, and regression assertion. No compiler flags or test selection changed.
----
- crates/sidebar/src/sidebar.rs       | 3 ++-
- crates/sidebar/src/sidebar_tests.rs | 2 +-
- 2 files changed, 3 insertions(+), 2 deletions(-)
 
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index b491c8a..15d6ed6 100644
+index 25ef86bf23..e6a74005cb 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -5594,6 +5594,7 @@ impl Sidebar {
@@ -33,10 +29,10 @@ index b491c8a..15d6ed6 100644
                      if !gpui::AsyncApp::update(cx, |cx| begin_terminal_close(terminal_id, cx)) {
                          return Ok(false);
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index edb108e..b980a4d 100644
+index 80e8bd5745..7d7d603d2c 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -4992,7 +4992,7 @@ async fn test_timed_out_terminal_close_keeps_metadata_and_allows_retry(cx: &mut
+@@ -5093,7 +5093,7 @@ async fn test_timed_out_terminal_close_keeps_metadata_and_allows_retry(cx: &mut
      cx.update(|_, cx| {
          TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx));
      });

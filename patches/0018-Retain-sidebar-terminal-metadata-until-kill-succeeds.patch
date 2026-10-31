@@ -1,24 +1,15 @@
-From 63c561d2f33286055923dcbb34f57c5f0e411d85 Mon Sep 17 00:00:00 2001
+From 9cdb646d636e657ed7be1b3ec623973c6f89388b Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex-repair@example.invalid>
 Date: Sat, 17 Oct 2026 02:28:03 +0000
-Subject: [PATCH] Retain sidebar terminal metadata until session kill succeeds
+Subject: [PATCH 18/90] Retain sidebar terminal metadata until session kill
+ succeeds
 
----
- crates/agent_ui/src/agent_panel.rs            |  19 +-
- crates/sidebar/src/sidebar.rs                 | 449 +++++++++--
- crates/sidebar/src/sidebar_tests.rs           | 752 ++++++++++++++++++
- crates/workspace/src/item.rs                  |  53 +-
- crates/workspace/src/multi_workspace.rs       |  64 +-
- crates/workspace/src/multi_workspace_tests.rs | 246 ++++++
- crates/workspace/src/pane.rs                  |   4 +
- crates/workspace/src/workspace.rs             |   4 +-
- 8 files changed, 1515 insertions(+), 76 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 2e60981..8caca50 100644
+index 63da239635..f0dc3683e4 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -2525,7 +2525,7 @@ impl AgentPanel {
+@@ -2526,7 +2526,7 @@ impl AgentPanel {
                          cx.emit(AgentPanelEvent::EntryChanged);
                          cx.notify();
                      } else {
@@ -27,7 +18,7 @@ index 2e60981..8caca50 100644
                      }
                  }
                  TerminalEvent::CloseTerminal
-@@ -2609,7 +2609,7 @@ impl AgentPanel {
+@@ -2610,7 +2610,7 @@ impl AgentPanel {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
@@ -36,7 +27,7 @@ index 2e60981..8caca50 100644
      }
  
      pub fn close_terminal_without_activating_draft(
-@@ -2618,13 +2618,24 @@ impl AgentPanel {
+@@ -2619,13 +2619,24 @@ impl AgentPanel {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
@@ -62,7 +53,7 @@ index 2e60981..8caca50 100644
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
-@@ -2646,7 +2657,7 @@ impl AgentPanel {
+@@ -2647,7 +2658,7 @@ impl AgentPanel {
          if spawn_is_pending {
              // The spawn outcome determines whether there is a persistent session
              // to kill. Its completion resolves this tombstone.
@@ -72,7 +63,7 @@ index 2e60981..8caca50 100644
                  self.project.clone(),
                  terminal_id,
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 2bca37b..0dbe984 100644
+index 69cc1c1611..acaf05315b 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -49,6 +49,7 @@ use remote::{RemoteConnectionOptions, same_remote_connection_identity};
@@ -598,7 +589,7 @@ index 2bca37b..0dbe984 100644
          let mut close_item_tasks = Vec::new();
          for (workspace, archived_worktree_ids) in &mixed_workspaces {
              let panes: Vec<_> = workspace.read(cx).panes().to_vec();
-@@ -5614,12 +5937,10 @@ impl Sidebar {
+@@ -5645,12 +5968,10 @@ impl Sidebar {
          // dropped without destroying the user's workspace layout.
          let mut workspaces_to_remove: Vec<Entity<Workspace>> =
              workspace_to_remove.into_iter().collect();
@@ -615,7 +606,7 @@ index 2bca37b..0dbe984 100644
  
          let removed_workspace = !workspaces_to_remove.is_empty();
          let session_id = session_id.clone();
-@@ -7062,12 +7383,10 @@ impl Sidebar {
+@@ -7103,12 +7424,10 @@ impl Sidebar {
          });
          let mut workspaces_to_remove: Vec<Entity<Workspace>> =
              workspace_to_remove.into_iter().collect();
@@ -633,7 +624,7 @@ index 2bca37b..0dbe984 100644
          let draft_workspace_removed = matches!(
              workspace,
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 283219f..54be3c5 100644
+index 35eae977d1..d66ce08d73 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
 @@ -23,8 +23,10 @@ use settings::{Settings, SettingsStore};
@@ -739,7 +730,7 @@ index 283219f..54be3c5 100644
      close_terminal_from_sidebar(&sidebar, terminal_id, cx);
      for _ in 0..4 {
          cx.run_until_parked();
-@@ -4688,6 +4768,182 @@ async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes
+@@ -4789,6 +4869,182 @@ async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes
      });
  }
  
@@ -922,7 +913,7 @@ index 283219f..54be3c5 100644
  #[gpui::test]
  async fn test_parallel_threads_shown_with_live_status(cx: &mut TestAppContext) {
      let project = init_test_project_with_agent_panel("/my-project", cx).await;
-@@ -14799,6 +15055,502 @@ async fn test_archive_removes_worktree_even_when_workspace_paths_diverge(cx: &mu
+@@ -14919,6 +15175,502 @@ async fn test_archive_removes_worktree_even_when_workspace_paths_diverge(cx: &mu
      );
  }
  
@@ -1426,7 +1417,7 @@ index 283219f..54be3c5 100644
  async fn test_archive_mixed_workspace_closes_only_archived_worktree_items(cx: &mut TestAppContext) {
      // When a workspace contains both a worktree being archived and other
 diff --git a/crates/workspace/src/item.rs b/crates/workspace/src/item.rs
-index 15cd5e1..908cddc 100644
+index 15cd5e1723..908cddcbb5 100644
 --- a/crates/workspace/src/item.rs
 +++ b/crates/workspace/src/item.rs
 @@ -12,8 +12,8 @@ use client::{Client, proto};
@@ -1504,7 +1495,7 @@ index 15cd5e1..908cddc 100644
      fn item_focus_handle(&self, cx: &App) -> FocusHandle;
      fn subscribe_to_item_events(
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index aa0f0b5..f2f1800 100644
+index aa169c09aa..96b9a94068 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -27,8 +27,8 @@ const SIDEBAR_RESIZE_HANDLE_SIZE: Pixels = px(6.0);
@@ -1518,7 +1509,7 @@ index aa0f0b5..f2f1800 100644
      persistence::model::MultiWorkspaceState,
  };
  
-@@ -1854,6 +1854,17 @@ impl MultiWorkspace {
+@@ -1851,6 +1851,17 @@ impl MultiWorkspace {
          intent: RemovalIntent,
          window: &mut Window,
          cx: &mut Context<Self>,
@@ -1536,7 +1527,7 @@ index aa0f0b5..f2f1800 100644
      ) -> Task<Result<bool>> {
          let workspaces: Vec<_> = workspaces.into_iter().collect();
  
-@@ -1898,9 +1909,58 @@ impl MultiWorkspace {
+@@ -1895,9 +1906,58 @@ impl MultiWorkspace {
                  }
              }
  
@@ -1596,7 +1587,7 @@ index aa0f0b5..f2f1800 100644
                  let displayed_workspace = this.workspace().clone();
  
 diff --git a/crates/workspace/src/multi_workspace_tests.rs b/crates/workspace/src/multi_workspace_tests.rs
-index 91abd7d..db91d13 100644
+index 91abd7d548..db91d131d7 100644
 --- a/crates/workspace/src/multi_workspace_tests.rs
 +++ b/crates/workspace/src/multi_workspace_tests.rs
 @@ -717,6 +717,120 @@ async fn test_remove_fallback_via_find_or_create_skips_removed_workspaces(cx: &m
@@ -1857,7 +1848,7 @@ index 91abd7d..db91d13 100644
 +    );
 +}
 diff --git a/crates/workspace/src/pane.rs b/crates/workspace/src/pane.rs
-index 40bc7bb..e7ef290 100644
+index 0bbf7896d5..7f155ed61e 100644
 --- a/crates/workspace/src/pane.rs
 +++ b/crates/workspace/src/pane.rs
 @@ -860,6 +860,10 @@ impl Pane {
@@ -1872,7 +1863,7 @@ index 40bc7bb..e7ef290 100644
          self.toolbar.update(cx, |toolbar, cx| {
              toolbar.set_can_navigate(can_navigate, cx);
 diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
-index d0e0c81..43d06fc 100644
+index ed332c688e..7363ebac9e 100644
 --- a/crates/workspace/src/workspace.rs
 +++ b/crates/workspace/src/workspace.rs
 @@ -72,8 +72,8 @@ use gpui::{
@@ -1886,6 +1877,3 @@ index d0e0c81..43d06fc 100644
  };
  use itertools::Itertools;
  use language::{Buffer, LanguageRegistry, Rope, language_settings::all_language_settings};
--- 
-2.43.0
-

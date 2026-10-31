@@ -1,23 +1,16 @@
-From 3b242b9d8fb11ac76c7b03f512a2fca9fc1de8ad Mon Sep 17 00:00:00 2001
+From 0ee7f4167e74b3467d2d501541bb382ed4b99a92 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 04:47:22 +0000
-Subject: [PATCH] Retain rootless remote workspaces and protect overlapping
- context starts
+Subject: [PATCH 80/90] Retain rootless remote workspaces and protect
+ overlapping context starts
 
----
- crates/project/src/project.rs           |  19 ++--
- crates/project/src/terminals.rs         | 140 ++++++++++++++++++------
- crates/sidebar/src/sidebar.rs           |   7 +-
- crates/sidebar/src/sidebar_tests.rs     |  57 ++++++++++
- crates/workspace/src/multi_workspace.rs |  26 ++---
- 5 files changed, 184 insertions(+), 65 deletions(-)
 
 diff --git a/crates/project/src/project.rs b/crates/project/src/project.rs
-index 1bde76d7cc..02438a1b0e 100644
+index 13c33510ba..7610a1ccee 100644
 --- a/crates/project/src/project.rs
 +++ b/crates/project/src/project.rs
-@@ -1406,10 +1406,7 @@ impl Project {
+@@ -1473,10 +1473,7 @@ impl Project {
  
                  buffers_needing_diff: Default::default(),
                  git_diff_debouncer: DebouncedDelay::new(),
@@ -29,7 +22,7 @@ index 1bde76d7cc..02438a1b0e 100644
                  #[cfg(any(test, feature = "test-support"))]
                  fake_shpool: None,
                  node: Some(node),
-@@ -1653,10 +1650,7 @@ impl Project {
+@@ -1720,10 +1717,7 @@ impl Project {
                  remote_client: Some(remote.clone()),
                  buffers_needing_diff: Default::default(),
                  git_diff_debouncer: DebouncedDelay::new(),
@@ -41,7 +34,7 @@ index 1bde76d7cc..02438a1b0e 100644
                  #[cfg(any(test, feature = "test-support"))]
                  fake_shpool: None,
                  node: Some(node),
-@@ -1951,10 +1945,7 @@ impl Project {
+@@ -2018,10 +2012,7 @@ impl Project {
                  agent_server_store,
                  buffers_needing_diff: Default::default(),
                  git_diff_debouncer: DebouncedDelay::new(),
@@ -53,7 +46,7 @@ index 1bde76d7cc..02438a1b0e 100644
                  #[cfg(any(test, feature = "test-support"))]
                  fake_shpool: None,
                  node: None,
-@@ -6806,6 +6797,10 @@ impl ProjectGroupKey {
+@@ -6941,6 +6932,10 @@ impl ProjectGroupKey {
          &self.paths
      }
  
@@ -265,7 +258,7 @@ index cb52724d8d..b346d21e75 100644
          SpawnInTerminal {
              command: Some("cmd.exe".to_string()),
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 909d65875d..67d61f75ff 100644
+index 76b8b301e9..e841765edf 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -2143,12 +2143,7 @@ impl Sidebar {
@@ -283,10 +276,10 @@ index 909d65875d..67d61f75ff 100644
                      multi_workspace.retain_active_workspace(cx);
                  }
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 7af0390090..46c77266cf 100644
+index 9b36d25548..a22a8ab4ef 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -17907,6 +17907,63 @@ fn set_threads_sidebar_in_agent_panel(in_agent_panel: bool, cx: &mut VisualTestC
+@@ -18027,6 +18027,63 @@ fn set_threads_sidebar_in_agent_panel(in_agent_panel: bool, cx: &mut VisualTestC
      });
  }
  
@@ -351,7 +344,7 @@ index 7af0390090..46c77266cf 100644
  async fn test_agent_panel_sidebar_keeps_empty_workspace_transient(cx: &mut TestAppContext) {
      init_test(cx);
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 38513f18ce..0b4bd1b1ab 100644
+index 53857b1bdc..b14517a855 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -413,12 +413,7 @@ impl MultiWorkspace {

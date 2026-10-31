@@ -1,19 +1,16 @@
-From a49b580754013add50c9a4377686775c637f6d6e Mon Sep 17 00:00:00 2001
+From 2d9e51809eb55aab468fb91e065dce213307b5fe Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 02:21:08 +0000
-Subject: [PATCH] Check saved terminal routes before restoring the agent panel
+Subject: [PATCH 78/90] Check saved terminal routes before restoring the agent
+ panel
 
----
- crates/agent_ui/src/agent_panel.rs            | 176 ++++++++++++++----
- .../src/terminal_thread_metadata_store.rs     |  68 +++++++
- 2 files changed, 212 insertions(+), 32 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index f17ad2d061..07d8623646 100644
+index 8a3ed84d90..ac40db8399 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -1378,12 +1378,15 @@ impl AgentPanel {
+@@ -1379,12 +1379,15 @@ impl AgentPanel {
                  })
                  .await;
  
@@ -33,7 +30,7 @@ index f17ad2d061..07d8623646 100644
              let terminal_id_to_restore = if has_open_project {
                  serialized_panel
                      .as_ref()
-@@ -1414,10 +1417,17 @@ impl AgentPanel {
+@@ -1415,10 +1418,17 @@ impl AgentPanel {
                  reload_task.await;
              }
  
@@ -54,7 +51,7 @@ index f17ad2d061..07d8623646 100644
                  })
                  .ok()
                  .flatten()
-@@ -8652,6 +8662,101 @@ mod tests {
+@@ -8656,6 +8666,101 @@ mod tests {
          });
      }
  
@@ -156,7 +153,7 @@ index f17ad2d061..07d8623646 100644
      #[gpui::test]
      async fn test_terminal_restore_working_directory_does_not_read_leased_workspace(
          cx: &mut TestAppContext,
-@@ -16328,7 +16433,9 @@ mod tests {
+@@ -16374,7 +16479,9 @@ mod tests {
              custom_title: None,
              created_at: Utc::now(),
              worktree_paths: WorktreePaths::default(),
@@ -167,7 +164,7 @@ index f17ad2d061..07d8623646 100644
              working_directory: None,
          };
          cx.update(|cx| {
-@@ -16398,7 +16505,7 @@ mod tests {
+@@ -16444,7 +16551,7 @@ mod tests {
              |_, _, _| async { Ok(client::proto::Ack {}) },
          );
          drop(old_connection_guard);
@@ -176,7 +173,7 @@ index f17ad2d061..07d8623646 100644
          let old_project = cx.update(|cx| {
              Project::remote(
                  old_remote_client.clone(),
-@@ -16412,33 +16519,11 @@ mod tests {
+@@ -16458,33 +16565,11 @@ mod tests {
              )
          });
  
@@ -210,7 +207,7 @@ index f17ad2d061..07d8623646 100644
          let multi_workspace = cx.add_window({
              let params = params.clone();
              let project = old_project.clone();
-@@ -16470,7 +16555,9 @@ mod tests {
+@@ -16516,7 +16601,9 @@ mod tests {
              custom_title: None,
              created_at: Utc::now(),
              worktree_paths: WorktreePaths::default(),
@@ -221,7 +218,7 @@ index f17ad2d061..07d8623646 100644
              working_directory: None,
          };
          cx.update(|cx| {
-@@ -16507,6 +16594,31 @@ mod tests {
+@@ -16553,6 +16640,31 @@ mod tests {
          });
          visual_cx.run_until_parked();
  

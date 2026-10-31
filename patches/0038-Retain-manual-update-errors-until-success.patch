@@ -1,15 +1,13 @@
-From 9436a246793f2cd7aa80943e6cc66261c54a6ab8 Mon Sep 17 00:00:00 2001
+From 4015704e91a30c5baabcf82ba0d7e13931c3de01 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 08:40:33 +0000
-Subject: [PATCH] Retain manual updater errors through failed automatic retries
+Subject: [PATCH 38/90] Retain manual updater errors through failed automatic
+ retries
 
----
- crates/auto_update/src/auto_update.rs | 15 ++++++++++-----
- 1 file changed, 10 insertions(+), 5 deletions(-)
 
 diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs
-index e1ee875..33f0c43 100644
+index e1ee875b2d..33f0c43a1b 100644
 --- a/crates/auto_update/src/auto_update.rs
 +++ b/crates/auto_update/src/auto_update.rs
 @@ -637,10 +637,11 @@ impl AutoUpdater {
@@ -56,6 +54,3 @@ index e1ee875..33f0c43 100644
              } else {
                  assert_eq!(status, updated, "phase {current_phase} must retain the installed restart action");
              }
--- 
-2.43.0
-

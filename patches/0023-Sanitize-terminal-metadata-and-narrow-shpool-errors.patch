@@ -1,15 +1,11 @@
-From 3b2828a6831573e6fded7503249d0a8461f856ab Mon Sep 17 00:00:00 2001
+From 40ab81848c881ee7b5bf8ce8131879448c2e5fb4 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex@example.invalid>
 Date: Sat, 17 Oct 2026 18:02:27 +0000
-Subject: [PATCH] Sanitize terminal metadata and narrow shpool errors
+Subject: [PATCH 23/90] Sanitize terminal metadata and narrow shpool errors
 
----
- .../src/terminal_thread_metadata_store.rs     | 41 ++++++++++++++++++-
- crates/project/src/terminals.rs               | 35 +++++++++++++++-
- 2 files changed, 73 insertions(+), 3 deletions(-)
 
 diff --git a/crates/agent_ui/src/terminal_thread_metadata_store.rs b/crates/agent_ui/src/terminal_thread_metadata_store.rs
-index 7c4f72c..5aca08e 100644
+index 7c4f72c5dc..5aca08e54f 100644
 --- a/crates/agent_ui/src/terminal_thread_metadata_store.rs
 +++ b/crates/agent_ui/src/terminal_thread_metadata_store.rs
 @@ -563,6 +563,18 @@ impl Domain for TerminalThreadMetadataDb {
@@ -75,7 +71,7 @@ index 7c4f72c..5aca08e 100644
      fn test_terminal_title_prefix_preserves_non_alphanumeric_prefixes() {
          assert_eq!(terminal_title_prefix("✳ Thinking"), Some("✳ "));
 diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
-index 621b401..cd9b352 100644
+index 621b401a97..cd9b352032 100644
 --- a/crates/project/src/terminals.rs
 +++ b/crates/project/src/terminals.rs
 @@ -631,6 +631,19 @@ impl Project {
@@ -134,6 +130,3 @@ index 621b401..cd9b352 100644
      #[test]
      fn test_shpool_kill_prelude_fails_when_client_is_missing() {
          assert!(SHPOOL_SCRIPT_PRELUDE.contains("[ -n \"$SHPOOL_BIN\" ] || exit 0"));
--- 
-2.43.0
-

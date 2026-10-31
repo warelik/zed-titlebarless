@@ -1,7 +1,7 @@
-From 1e533bdc5d8bba724ed83da9f76846679c99e2a9 Mon Sep 17 00:00:00 2001
+From ebd746c812b1b6dd6dda7dd722d9bb32b8286206 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 21:24:41 +0300
-Subject: [PATCH 04/12] Add shadows.project_panel and shadows.minimap settings
+Subject: [PATCH 04/90] Add shadows.project_panel and shadows.minimap settings
 
 The sticky folder rows of the project panel and the minimap draw
 shadows that read as visual noise in flat themes. These toggles turn
@@ -15,18 +15,9 @@ gracefully handling missing parent shadows objects and missing child fields.
 
 Use descriptive settings names so the opt-in shadow behavior remains easy
 to follow without changing its defaults.
----
- assets/settings/default.json                |  7 +++++++
- crates/editor/src/element.rs                |  6 ++++--
- crates/project_panel/src/project_panel.rs   |  3 ++-
- crates/settings/src/vscode_import.rs        |  1 +
- crates/settings_content/src/theme.rs        | 17 +++++++++++++++++
- crates/theme_settings/src/settings.rs       | 18 ++++++++++++++++++
- crates/theme_settings/src/theme_settings.rs |  4 ++--
- 7 files changed, 51 insertions(+), 5 deletions(-)
 
 diff --git a/assets/settings/default.json b/assets/settings/default.json
-index b83cae69bb99865568f517973933ba55e34c0376..4e990e125d06f59b34eeaa69db089ac23c38b7f6 100644
+index 71a13ef761..852d1a51e0 100644
 --- a/assets/settings/default.json
 +++ b/assets/settings/default.json
 @@ -69,6 +69,13 @@
@@ -44,7 +35,7 @@ index b83cae69bb99865568f517973933ba55e34c0376..4e990e125d06f59b34eeaa69db089ac2
    "agent_ui_font_family": null,
    // The default font size for agent responses in the agent panel. Falls back to the UI font size if unset.
 diff --git a/crates/editor/src/element.rs b/crates/editor/src/element.rs
-index 56663881ff0208b0baf4504137a2f39d3f7743a2..5482f08f7e590886c8581363dc898bfe23f7bec5 100644
+index 262ec45637..295d9b3fc6 100644
 --- a/crates/editor/src/element.rs
 +++ b/crates/editor/src/element.rs
 @@ -87,7 +87,7 @@ use std::{
@@ -56,7 +47,7 @@ index 56663881ff0208b0baf4504137a2f39d3f7743a2..5482f08f7e590886c8581363dc898bfe
  use ui::utils::ensure_minimum_contrast;
  use ui::{ButtonLike, POPOVER_Y_PADDING, Tooltip, prelude::*, scrollbars::ShowScrollbar};
  use unicode_segmentation::UnicodeSegmentation;
-@@ -1687,7 +1687,9 @@ impl EditorElement {
+@@ -1694,7 +1694,9 @@ impl EditorElement {
  
          let mut minimap = div()
              .size_full()
@@ -68,10 +59,10 @@ index 56663881ff0208b0baf4504137a2f39d3f7743a2..5482f08f7e590886c8581363dc898bfe
              .child(minimap_editor)
              .into_any_element();
 diff --git a/crates/project_panel/src/project_panel.rs b/crates/project_panel/src/project_panel.rs
-index e456d7b2feab1dd9d8c8f86184bd42cd1476db19..fbd3459d389a1c62e2e4583743120641476000bc 100644
+index a84ab9b427..1a79e146a4 100644
 --- a/crates/project_panel/src/project_panel.rs
 +++ b/crates/project_panel/src/project_panel.rs
-@@ -7300,6 +7300,7 @@ impl ProjectPanel {
+@@ -7401,6 +7401,7 @@ impl ProjectPanel {
          // already checked if non empty above
          let last_item_index = sticky_parents.len() - 1;
          let marked_selections: Arc<[SelectedEntry]> = Arc::from(self.marked_entries.clone());
@@ -79,7 +70,7 @@ index e456d7b2feab1dd9d8c8f86184bd42cd1476db19..fbd3459d389a1c62e2e4583743120641
          sticky_parents
              .iter()
              .enumerate()
-@@ -7328,7 +7329,7 @@ impl ProjectPanel {
+@@ -7429,7 +7430,7 @@ impl ProjectPanel {
                      window,
                      cx,
                  )
@@ -89,10 +80,10 @@ index e456d7b2feab1dd9d8c8f86184bd42cd1476db19..fbd3459d389a1c62e2e4583743120641
                      let shadow_color_bottom = hsla(0.0, 0.0, 0.0, 0.);
                      let sticky_shadow = div()
 diff --git a/crates/settings/src/vscode_import.rs b/crates/settings/src/vscode_import.rs
-index a458433589f84fd9066e31e795f98e6f6d1d7aac..ed1d3a3cbbd9761edbf89333fc8d5d27ad68f36f 100644
+index 0966e1338c..23a4a0a7b7 100644
 --- a/crates/settings/src/vscode_import.rs
 +++ b/crates/settings/src/vscode_import.rs
-@@ -1045,6 +1045,7 @@ impl VsCodeSettings {
+@@ -1046,6 +1046,7 @@ impl VsCodeSettings {
              theme: None,
              icon_theme: None,
              ui_density: None,
@@ -101,7 +92,7 @@ index a458433589f84fd9066e31e795f98e6f6d1d7aac..ed1d3a3cbbd9761edbf89333fc8d5d27
              experimental_theme_overrides: None,
              theme_overrides: Default::default(),
 diff --git a/crates/settings_content/src/theme.rs b/crates/settings_content/src/theme.rs
-index 0b2b7106091ea01e5de8cb2635d3bc5178491a4e..8cc6ea474ac7cec09f34fc14ba222f5ba30c72f1 100644
+index 0b2b710609..8cc6ea474a 100644
 --- a/crates/settings_content/src/theme.rs
 +++ b/crates/settings_content/src/theme.rs
 @@ -228,6 +228,9 @@ pub struct ThemeSettingsContent {
@@ -136,7 +127,7 @@ index 0b2b7106091ea01e5de8cb2635d3bc5178491a4e..8cc6ea474ac7cec09f34fc14ba222f5b
  #[derive(
      Clone,
 diff --git a/crates/theme_settings/src/settings.rs b/crates/theme_settings/src/settings.rs
-index 0a587340f5b7cb3473b6a4fecaf92c3ae7f0a5aa..dc72cfbd8350ba1c1f6391da2537b667e5f13c92 100644
+index 0a587340f5..dc72cfbd83 100644
 --- a/crates/theme_settings/src/settings.rs
 +++ b/crates/theme_settings/src/settings.rs
 @@ -99,10 +99,21 @@ pub struct ThemeSettings {
@@ -183,7 +174,7 @@ index 0a587340f5b7cb3473b6a4fecaf92c3ae7f0a5aa..dc72cfbd8350ba1c1f6391da2537b667
          }
      }
 diff --git a/crates/theme_settings/src/theme_settings.rs b/crates/theme_settings/src/theme_settings.rs
-index f56a46b40507f9ca5ebbc7933b6244f2fbc03ab1..e5296d656a3f79a2ba19866b99527d786db248d6 100644
+index f56a46b405..e5296d656a 100644
 --- a/crates/theme_settings/src/theme_settings.rs
 +++ b/crates/theme_settings/src/theme_settings.rs
 @@ -30,8 +30,8 @@ use crate::settings::adjust_buffer_font_size;
@@ -197,6 +188,3 @@ index f56a46b40507f9ca5ebbc7933b6244f2fbc03ab1..e5296d656a3f79a2ba19866b99527d78
      adjust_markdown_preview_font_size, adjust_ui_font_size, adjusted_font_size, appearance_to_mode,
      buffer_line_height_from_settings, clamp_font_size, default_theme,
      observe_buffer_font_size_adjustment, reset_agent_buffer_font_size, reset_agent_ui_font_size,
--- 
-2.55.0
-

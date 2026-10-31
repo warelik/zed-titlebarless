@@ -1,16 +1,13 @@
-From 6d6b43826e88a170af4f49cb9b7ac5645aebb08b Mon Sep 17 00:00:00 2001
+From 5a2d168e0378c749dc965fe75a9dd932bc6bb7f6 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 19:04:03 +0000
-Subject: [PATCH] Honor configured shells in persistent terminal sessions
+Subject: [PATCH 44/90] Honor configured shells in persistent terminal sessions
 
 Resolve the local worktree or remote terminal shell before constructing shpool attach arguments. Preserve explicit program arguments and titles without forcing a login shell. Quote literal arguments and protect them from shpool template expansion. Retain the real-daemon probe, kill and idempotence checks while exercising the configured command and literal directory.
----
- crates/project/src/terminals.rs | 291 +++++++++++++++++++++++++++-----
- 1 file changed, 253 insertions(+), 38 deletions(-)
 
 diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
-index 19dbd4f..9c9809c 100644
+index 19dbd4fc6a..9c9809cb65 100644
 --- a/crates/project/src/terminals.rs
 +++ b/crates/project/src/terminals.rs
 @@ -42,10 +42,11 @@ pub enum PersistentSession {

@@ -1,16 +1,13 @@
-From aa9cc4ef819ae8b94c10a9947c55c928b3e063a1 Mon Sep 17 00:00:00 2001
+From 298d7c7cec1019396d875f7323c11a08a5b95faa Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 23:51:13 +0000
-Subject: [PATCH] Keep empty workspaces transient during real sidebar updates
+Subject: [PATCH 77/90] Keep empty workspaces transient during real sidebar
+ updates
 
----
- crates/sidebar/src/sidebar.rs       | 10 +++++++++-
- crates/sidebar/src/sidebar_tests.rs | 25 +++++++++++++++++++++++++
- 2 files changed, 34 insertions(+), 1 deletion(-)
 
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 7181d7bcdb..909d65875d 100644
+index 52506a61a8..76b8b301e9 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -2143,7 +2143,15 @@ impl Sidebar {
@@ -31,10 +28,10 @@ index 7181d7bcdb..909d65875d 100644
          }
  
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 67c7692343..7af0390090 100644
+index bea8de76d5..9b36d25548 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -17907,6 +17907,31 @@ fn set_threads_sidebar_in_agent_panel(in_agent_panel: bool, cx: &mut VisualTestC
+@@ -18027,6 +18027,31 @@ fn set_threads_sidebar_in_agent_panel(in_agent_panel: bool, cx: &mut VisualTestC
      });
  }
  

@@ -1,21 +1,17 @@
-From 1b1e70e710e77cc13e7cef9711ecefda161c6881 Mon Sep 17 00:00:00 2001
+From 3e4c23c9ba39e79b9c7e644e6b3af773c578ee4a Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 20:23:25 +0000
-Subject: [PATCH] Preserve native hide decisions and output for imported task
- terminals
+Subject: [PATCH 49/90] Preserve native hide decisions and output for imported
+ task terminals
 
 Treat ProcessExited as completion and honor CloseTerminal for nonpersistent imports. Keep finished tasks selectable in place without shpool conversion or managed-session restart controls. Reuse native task-mode pairing in a test-only display fixture and cover all hide policies and success/failure. Retain all ordinary-terminal assertions with its real native completion stimulus.
----
- crates/agent_ui/src/agent_panel.rs | 123 +++++++++++++++++++++++------
- crates/terminal/src/terminal.rs    |  45 +++++++++++
- 2 files changed, 146 insertions(+), 22 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 9619875..eaeeafc 100644
+index decea551b2..9007096775 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -2587,13 +2587,19 @@ impl AgentPanel {
+@@ -2588,13 +2588,19 @@ impl AgentPanel {
                      this.report_terminal_program(terminal_id, source, cx);
                  }
                  TerminalEvent::Bell => this.mark_terminal_notification(terminal_id, window, cx),
@@ -39,7 +35,7 @@ index 9619875..eaeeafc 100644
                  | TerminalEvent::OutputReplaced
                  | TerminalEvent::SelectionsChanged
                  | TerminalEvent::NewNavigationTarget(_)
-@@ -2815,23 +2821,21 @@ impl AgentPanel {
+@@ -2816,23 +2822,21 @@ impl AgentPanel {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
@@ -75,7 +71,7 @@ index 9619875..eaeeafc 100644
      }
  
      fn terminal_has_exited(&self, terminal_id: TerminalId, cx: &App) -> bool {
-@@ -3127,7 +3131,10 @@ impl AgentPanel {
+@@ -3128,7 +3132,10 @@ impl AgentPanel {
              return;
          }
          if self.has_terminal(metadata.terminal_id)
@@ -87,7 +83,7 @@ index 9619875..eaeeafc 100644
          {
              let should_select = match select_mode {
                  TerminalSelectMode::Always => true,
-@@ -7501,7 +7508,10 @@ impl Render for AgentPanel {
+@@ -7502,7 +7509,10 @@ impl Render for AgentPanel {
                          .and_then(|terminal| terminal.search_bar.clone());
                      let exited_terminal_id = self
                          .active_terminal_id()
@@ -99,7 +95,7 @@ index 9619875..eaeeafc 100644
                      let terminal_content = v_flex()
                          .size_full()
                          .when_some(search_bar, |this, search_bar| {
-@@ -10965,6 +10975,75 @@ mod tests {
+@@ -10969,6 +10979,75 @@ mod tests {
          });
      }
  
@@ -175,7 +171,7 @@ index 9619875..eaeeafc 100644
      #[gpui::test]
      async fn test_dragged_terminal_tab_is_non_persistent_and_closes_on_process_exit(
          cx: &mut TestAppContext,
-@@ -11096,8 +11175,8 @@ mod tests {
+@@ -11100,8 +11179,8 @@ mod tests {
              "reconnect should not schedule a dragged terminal for restart"
          );
  
@@ -187,7 +183,7 @@ index 9619875..eaeeafc 100644
          visual_context.run_until_parked();
          assert!(
 diff --git a/crates/terminal/src/terminal.rs b/crates/terminal/src/terminal.rs
-index 635538c..e111d1c 100644
+index d3b42e6c88..68fc12c163 100644
 --- a/crates/terminal/src/terminal.rs
 +++ b/crates/terminal/src/terminal.rs
 @@ -1125,6 +1125,17 @@ impl TerminalBuilder {
@@ -208,7 +204,7 @@ index 635538c..e111d1c 100644
      pub fn new(
          working_directory: Option<PathBuf>,
          mode: TerminalMode,
-@@ -4711,6 +4722,40 @@ mod tests {
+@@ -4702,6 +4713,40 @@ mod tests {
          );
      }
  

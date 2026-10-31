@@ -1,20 +1,17 @@
-From 624d5ebc9ad19304bab839b6021d54f390ded0a3 Mon Sep 17 00:00:00 2001
+From 559b4da00a22c72383d1e89e5e7e01bb4c07b279 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 21:55:04 +0000
-Subject: [PATCH] Show terminal restoration failures in the in-panel thread
- layout
+Subject: [PATCH 54/90] Show terminal restoration failures in the in-panel
+ thread layout
 
 Render the same retained-data warning in AgentPanel when it owns the thread layout, and observe metadata reload and recovery so the message stays current without reopening the panel.
----
- crates/agent_ui/src/agent_panel.rs | 21 +++++++++++++++++++++
- 1 file changed, 21 insertions(+)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 1b64b06..796fef3 100644
+index ec826faf3f..fe530e6e99 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -1645,6 +1645,12 @@ impl AgentPanel {
+@@ -1646,6 +1646,12 @@ impl AgentPanel {
              },
          );
  
@@ -27,7 +24,7 @@ index 1b64b06..796fef3 100644
          let _observe_project = None;
  
          let _settings_subscription = cx.observe_global::<SettingsStore>(|this, cx| {
-@@ -7433,6 +7439,12 @@ impl AgentPanel {
+@@ -7434,6 +7440,12 @@ impl AgentPanel {
  impl Render for AgentPanel {
      fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
          let sidebar_history = Self::sidebar_history(window, cx);
@@ -40,7 +37,7 @@ index 1b64b06..796fef3 100644
          // WARNING: Changes to this element hierarchy can have
          // non-obvious implications to the layout of children.
          //
-@@ -7488,6 +7500,15 @@ impl Render for AgentPanel {
+@@ -7489,6 +7501,15 @@ impl Render for AgentPanel {
                  }
              }))
              .child(self.render_toolbar(window, cx))

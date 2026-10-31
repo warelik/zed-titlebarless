@@ -1,25 +1,16 @@
-From e2eac08ac10441b7061d3f58bb2200432470cca2 Mon Sep 17 00:00:00 2001
+From 4b7f98f598f9a0e50462c5d352c01213d1c4d91d Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Mon, 19 Oct 2026 01:29:54 +0000
-Subject: [PATCH] Repair the complete final runtime failure batch
+Subject: [PATCH 62/90] Repair the complete final runtime failure batch
 
 Enumerate registered workspace models without borrowing leased window roots, replay native close decisions for terminals completed before insertion, and preserve realistic shared-client and event-turn fixtures. Keep real shpool sockets short and include full daemon diagnostics without weakening mandatory assertions.
----
- crates/agent_ui/src/agent_panel.rs            |  3 +-
- crates/project/src/terminals.rs               | 18 +++-
- crates/sidebar/src/sidebar.rs                 | 88 +++++++++++++------
- crates/sidebar/src/sidebar_tests.rs           | 16 +++-
- crates/terminal/src/terminal.rs               | 13 +++
- crates/workspace/src/multi_workspace.rs       |  9 +-
- crates/workspace/src/multi_workspace_tests.rs | 35 ++++++--
- 7 files changed, 139 insertions(+), 43 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index f11e24a..4c39b7e 100644
+index 1a3261fa68..e8a9d6f180 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -2645,7 +2645,8 @@ impl AgentPanel {
+@@ -2646,7 +2646,8 @@ impl AgentPanel {
          self.emit_terminal_thread_started(terminal_id, source, cx);
          if terminal_entity.read(cx).has_exited() {
              self.handle_terminal_process_exited(terminal_id, window, cx);
@@ -30,7 +21,7 @@ index f11e24a..4c39b7e 100644
              }
          }
 diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
-index fb83ab9..1b89848 100644
+index fb83ab999a..1b89848da7 100644
 --- a/crates/project/src/terminals.rs
 +++ b/crates/project/src/terminals.rs
 @@ -2140,7 +2140,13 @@ Last login: Wed Oct 14 20:00:00 2026 from 10.0.0.1
@@ -66,7 +57,7 @@ index fb83ab9..1b89848 100644
          let probe = parse_shpool_probe(&stdout)
              .expect("should parse output")
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 15d6ed6..c98a64e 100644
+index e6a74005cb..9d265018a3 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -3805,22 +3805,56 @@ impl Sidebar {
@@ -202,10 +193,10 @@ index 15d6ed6..c98a64e 100644
                              panel.update(cx, |panel, cx| {
                                  panel.close_terminal_after_session_kill(id, false, window, cx);
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 7ec170b..ca18416 100644
+index 35499914bf..e1bb7aaaad 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -5234,8 +5234,14 @@ async fn test_terminal_close_coordinates_live_owners_in_all_windows(cx: &mut Tes
+@@ -5335,8 +5335,14 @@ async fn test_terminal_close_coordinates_live_owners_in_all_windows(cx: &mut Tes
      let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
      fake.add_session(&session_name);
      let origin_window_handle = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
@@ -221,7 +212,7 @@ index 7ec170b..ca18416 100644
      let target_multi_workspace = target_window_handle.root(cx).unwrap();
      let mut origin_context = VisualTestContext::from_window(origin_window_handle.into(), cx);
      let mut target_context = VisualTestContext::from_window(target_window_handle.into(), cx);
-@@ -5349,8 +5355,14 @@ async fn test_terminal_close_waits_for_pending_owner_in_another_window(cx: &mut
+@@ -5450,8 +5456,14 @@ async fn test_terminal_close_waits_for_pending_owner_in_another_window(cx: &mut
      fake.add_session(&session_name);
      fake.state.lock().probe_delay = Some(Duration::from_secs(1));
      let origin_window_handle = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
@@ -238,7 +229,7 @@ index 7ec170b..ca18416 100644
      let mut origin_context = VisualTestContext::from_window(origin_window_handle.into(), cx);
      let mut target_context = VisualTestContext::from_window(target_window_handle.into(), cx);
 diff --git a/crates/terminal/src/terminal.rs b/crates/terminal/src/terminal.rs
-index e111d1c..c9d1478 100644
+index 68fc12c163..452ce1c60c 100644
 --- a/crates/terminal/src/terminal.rs
 +++ b/crates/terminal/src/terminal.rs
 @@ -1103,6 +1103,7 @@ impl TerminalBuilder {
@@ -267,7 +258,7 @@ index e111d1c..c9d1478 100644
      keyboard_input_sent: bool,
      init_command_startup_marker: Option<String>,
      init_command_startup_tx: Option<Sender<()>>,
-@@ -3367,6 +3372,10 @@ impl Terminal {
+@@ -3358,6 +3363,10 @@ impl Terminal {
          self.process_exited
      }
  
@@ -278,7 +269,7 @@ index e111d1c..c9d1478 100644
      #[cfg(any(test, feature = "test-support"))]
      pub fn simulate_process_exit(&mut self, cx: &mut Context<Self>) {
          self.register_task_finished(None, cx);
-@@ -3402,6 +3411,7 @@ impl Terminal {
+@@ -3393,6 +3402,7 @@ impl Terminal {
                      self.child_exited.is_none_or(|e| e.code() == Some(0))
                  };
                  if should_close {
@@ -286,7 +277,7 @@ index e111d1c..c9d1478 100644
                      cx.emit(Event::CloseTerminal);
                  }
                  return;
-@@ -3440,10 +3450,12 @@ impl Terminal {
+@@ -3431,10 +3441,12 @@ impl Terminal {
          match hide {
              HideStrategy::Never => {}
              HideStrategy::Always => {
@@ -299,7 +290,7 @@ index e111d1c..c9d1478 100644
                      cx.emit(Event::CloseTerminal);
                  }
              }
-@@ -4750,6 +4762,7 @@ mod tests {
+@@ -4741,6 +4753,7 @@ mod tests {
              assert!(recorded.contains(&Event::ProcessExited));
              assert_eq!(recorded.contains(&Event::CloseTerminal), should_close, "{hide:?}, exit {code}");
              terminal.read_with(cx, |terminal, _| {
@@ -308,7 +299,7 @@ index e111d1c..c9d1478 100644
                  assert!(terminal.get_content().contains("retained task output"));
              });
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 4e34a33..172e221 100644
+index 9004756c60..da384f9d41 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -1738,7 +1738,14 @@ impl MultiWorkspace {
@@ -328,7 +319,7 @@ index 4e34a33..172e221 100644
          workspace
      }
 diff --git a/crates/workspace/src/multi_workspace_tests.rs b/crates/workspace/src/multi_workspace_tests.rs
-index 223e118..218b2e5 100644
+index 223e118b4a..218b2e55bb 100644
 --- a/crates/workspace/src/multi_workspace_tests.rs
 +++ b/crates/workspace/src/multi_workspace_tests.rs
 @@ -1871,19 +1871,36 @@ async fn test_item_close_guard_preserves_discard_and_saved_formatting(cx: &mut T

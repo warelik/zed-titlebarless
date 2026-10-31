@@ -1,15 +1,13 @@
-From 195bfb42746ec5aaa5f24c0547a170ffe66c8147 Mon Sep 17 00:00:00 2001
+From 3154205305317eb599c87c0a7b1d6a34848572d6 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 08:31:34 +0000
-Subject: [PATCH] Retain pending fork relaunch state across polling failures
+Subject: [PATCH 37/90] Retain pending fork relaunch state across polling
+ failures
 
----
- crates/auto_update/src/auto_update.rs | 74 ++++++++++++++++++++++++++-
- 1 file changed, 73 insertions(+), 1 deletion(-)
 
 diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs
-index 96c9cd7..e1ee875 100644
+index 96c9cd7987..e1ee875b2d 100644
 --- a/crates/auto_update/src/auto_update.rs
 +++ b/crates/auto_update/src/auto_update.rs
 @@ -556,7 +556,10 @@ impl AutoUpdater {
@@ -121,6 +119,3 @@ index 96c9cd7..e1ee875 100644
      #[gpui::test]
      async fn test_fork_corrupt_dmg_never_invokes_installer(cx: &mut TestAppContext) {
          cx.background_executor.allow_parking();
--- 
-2.43.0
-

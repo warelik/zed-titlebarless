@@ -1,18 +1,14 @@
-From 12a42e14ff6b44faf2788e3f15fbd480618e098f Mon Sep 17 00:00:00 2001
+From ae51cbcb6cf042870c201a9a3a3a6f9346122830 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 19:04:03 +0000
-Subject: [PATCH] Preserve project groups until workspace close consent
+Subject: [PATCH 43/90] Preserve project groups until workspace close consent
  succeeds
 
 Keep cancelled and failed closes intact. Retain a same-group workspace opened during pending consent, and still remove unloaded project rows. Cover cancellation, successful retry and concurrent opening.
----
- crates/workspace/src/multi_workspace.rs       | 49 +++++++---
- crates/workspace/src/multi_workspace_tests.rs | 90 +++++++++++++++++++
- 2 files changed, 128 insertions(+), 11 deletions(-)
 
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 7dc7a10..53500f0 100644
+index 3683185595..1fb2f9de64 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -1034,9 +1034,8 @@ impl MultiWorkspace {
@@ -27,14 +23,11 @@ index 7dc7a10..53500f0 100644
          let active_workspace = self.workspace().clone();
          if active_workspace.read(cx).project_group_key(cx) == *group_key
              && !self.is_workspace_retained(&active_workspace)
-@@ -1047,12 +1046,41 @@ impl MultiWorkspace {
+@@ -1047,9 +1046,41 @@ impl MultiWorkspace {
  
          let workspaces = self.workspaces_for_project_group(group_key, cx);
  
 -        let task = self.remove(workspaces, RemovalIntent::CloseProject, window, cx);
--
--        self.project_groups.retain(|group| group.key != *group_key);
--        cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
 +        if workspaces.is_empty() {
 +            let previous_len = self.project_groups.len();
 +            self.project_groups.retain(|group| group.key != *group_key);
@@ -74,7 +67,7 @@ index 7dc7a10..53500f0 100644
      }
  
      /// Returns the nearest retained workspace outside the project group at
-@@ -1875,9 +1903,8 @@ impl MultiWorkspace {
+@@ -1872,9 +1903,8 @@ impl MultiWorkspace {
          let original_active = self.workspace().clone();
          let group_key = original_active.read(cx).project_group_key(cx);
  
@@ -87,7 +80,7 @@ index 7dc7a10..53500f0 100644
              .project_groups
              .iter()
 diff --git a/crates/workspace/src/multi_workspace_tests.rs b/crates/workspace/src/multi_workspace_tests.rs
-index 7c9dc56..17f3adc 100644
+index 7c9dc56fa7..17f3adc839 100644
 --- a/crates/workspace/src/multi_workspace_tests.rs
 +++ b/crates/workspace/src/multi_workspace_tests.rs
 @@ -2063,3 +2063,93 @@ async fn test_remove_with_pre_remove_keeps_edits_made_during_guard(cx: &mut Test

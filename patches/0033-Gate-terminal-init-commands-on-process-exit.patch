@@ -1,15 +1,13 @@
-From dbc5ac3760f2bcbfd39dd4e47fb362731f0ba188 Mon Sep 17 00:00:00 2001
+From ca9bedb9e046460b6c8ea1fff0814ab5d2404dd4 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 08:02:03 +0000
-Subject: [PATCH] Reject startup commands after a PTY exit without child status
+Subject: [PATCH 33/90] Reject startup commands after a PTY exit without child
+ status
 
----
- crates/terminal/src/terminal.rs | 41 +++++++++++++++++++++++++++++++--
- 1 file changed, 39 insertions(+), 2 deletions(-)
 
 diff --git a/crates/terminal/src/terminal.rs b/crates/terminal/src/terminal.rs
-index 3f74bb9..635538c 100644
+index bca7acd45c..d3b42e6c88 100644
 --- a/crates/terminal/src/terminal.rs
 +++ b/crates/terminal/src/terminal.rs
 @@ -2369,7 +2369,7 @@ impl Terminal {
@@ -30,7 +28,7 @@ index 3f74bb9..635538c 100644
              return false;
          }
  
-@@ -4992,6 +4992,43 @@ mod tests {
+@@ -4983,6 +4983,43 @@ mod tests {
          );
      }
  
@@ -74,6 +72,3 @@ index 3f74bb9..635538c 100644
      #[gpui::test]
      async fn test_write_output_converts_lf_to_crlf(cx: &mut TestAppContext) {
          let terminal = cx.new(|cx| {
--- 
-2.43.0
-

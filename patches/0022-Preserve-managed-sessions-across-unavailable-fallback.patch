@@ -1,19 +1,15 @@
-From 5491bde5cba5a7749187243273136d2f1ebfd20f Mon Sep 17 00:00:00 2001
+From e35e8ff9f1becbbc161a36118ef83e1e87a65321 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex@example.invalid>
 Date: Sat, 17 Oct 2026 17:31:36 +0000
-Subject: [PATCH] Preserve managed sessions across unavailable fallback closes
+Subject: [PATCH 22/90] Preserve managed sessions across unavailable fallback
+ closes
 
----
- crates/agent_ui/src/agent_panel.rs  | 178 ++++++++++++++++++++++++++--
- crates/sidebar/src/sidebar.rs       |   2 +-
- crates/sidebar/src/sidebar_tests.rs |  64 ++++++++++
- 3 files changed, 235 insertions(+), 9 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 108ec1d..cd8d2c2 100644
+index 747c078817..67bedee1db 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -2295,7 +2295,10 @@ impl AgentPanel {
+@@ -2296,7 +2296,10 @@ impl AgentPanel {
              this.update_in(cx, |this, window, cx| {
                  this.pending_terminal_spawns.remove(&terminal_id);
                  if this.closed_terminal_spawns.remove(&terminal_id) {
@@ -25,7 +21,7 @@ index 108ec1d..cd8d2c2 100644
                          if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
                              store.update(cx, |store, cx| store.delete(terminal_id, cx));
                          }
-@@ -2621,10 +2624,12 @@ impl AgentPanel {
+@@ -2622,10 +2625,12 @@ impl AgentPanel {
          self.close_terminal_internal(terminal_id, false, true, window, cx);
      }
  
@@ -42,7 +38,7 @@ index 108ec1d..cd8d2c2 100644
      }
  
      pub fn close_terminal_after_session_kill(
-@@ -2647,9 +2652,8 @@ impl AgentPanel {
+@@ -2648,9 +2653,8 @@ impl AgentPanel {
      ) {
          let was_active = self.active_terminal_id() == Some(terminal_id);
          let should_kill_persistent_session = self
@@ -54,7 +50,7 @@ index 108ec1d..cd8d2c2 100644
  
          let spawn_is_pending = self.pending_terminal_spawns.remove(&terminal_id)
              || self.closed_terminal_spawns.contains(&terminal_id);
-@@ -17226,6 +17230,88 @@ mod tests {
+@@ -17272,6 +17276,88 @@ mod tests {
          });
      }
  
@@ -143,7 +139,7 @@ index 108ec1d..cd8d2c2 100644
      #[gpui::test]
      async fn test_close_loaded_unmanaged_terminal_does_not_kill_shpool(cx: &mut TestAppContext) {
          let (panel, mut cx) = setup_panel(cx).await;
-@@ -17276,6 +17362,82 @@ mod tests {
+@@ -17322,6 +17408,82 @@ mod tests {
          });
      }
  
@@ -227,7 +223,7 @@ index 108ec1d..cd8d2c2 100644
      async fn test_close_during_pending_spawn_error_branch_cleans_state_and_preserves_open_errors(
          cx: &mut TestAppContext,
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 30be973..6b953e2 100644
+index 0c7585f238..16ebdb5d10 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -5205,7 +5205,7 @@ impl Sidebar {
@@ -240,7 +236,7 @@ index 30be973..6b953e2 100644
              ThreadEntryWorkspace::Closed { .. } => true,
          };
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 10fd816..3aae052 100644
+index 5e74876f14..7a50ce17b6 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
 @@ -2527,6 +2527,70 @@ async fn test_sidebar_shows_live_dragged_terminal_without_persisting_it(
@@ -314,6 +310,3 @@ index 10fd816..3aae052 100644
  #[gpui::test]
  async fn test_closing_last_agent_panel_terminal_restores_empty_header(cx: &mut TestAppContext) {
      let project = init_test_project_with_agent_panel("/my-project", cx).await;
--- 
-2.43.0
-

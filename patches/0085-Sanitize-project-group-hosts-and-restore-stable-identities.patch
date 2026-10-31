@@ -1,18 +1,13 @@
-From e8f301ec3f849769407c81f071417aaedbe0df2b Mon Sep 17 00:00:00 2001
+From dba4f9f890705438154faab6f55cc540cefb5652 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 05:56:01 +0000
-Subject: [PATCH] Sanitize persisted project group hosts and restore stable
- connection identities
+Subject: [PATCH 86/90] Sanitize persisted project group hosts and restore
+ stable connection identities
 
----
- crates/workspace/src/multi_workspace.rs   | 12 +++-
- crates/workspace/src/persistence/model.rs | 36 +++++++++-
- crates/workspace/src/workspace.rs         | 84 ++++++++++++++++++++++-
- 3 files changed, 126 insertions(+), 6 deletions(-)
 
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 0b4bd1b1ab..cac2ad12a1 100644
+index b14517a855..bee8f1e4ca 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -916,20 +916,26 @@ impl MultiWorkspace {
@@ -112,10 +107,10 @@ index b56279a8b0..6cdb212317 100644
          SerializedProjectGroupState {
              key: ProjectGroupKey::new(host, path_list),
 diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
-index 426ed3676f..3896df60f4 100644
+index 8ccc78faff..ab97b946f2 100644
 --- a/crates/workspace/src/workspace.rs
 +++ b/crates/workspace/src/workspace.rs
-@@ -10560,7 +10560,7 @@ pub async fn apply_restored_multiworkspace_state(
+@@ -10572,7 +10572,7 @@ pub async fn apply_restored_multiworkspace_state(
                  }
              }
              let resolved = ProjectGroupKey::new(key.host(), PathList::new(&resolved_paths));
@@ -124,7 +119,7 @@ index 426ed3676f..3896df60f4 100644
                  resolved_groups.push(SerializedProjectGroupState {
                      key: resolved,
                      expanded,
-@@ -12720,6 +12720,88 @@ mod tests {
+@@ -12734,6 +12734,88 @@ mod tests {
          }).unwrap();
      }
  

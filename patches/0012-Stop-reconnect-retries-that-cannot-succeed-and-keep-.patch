@@ -1,7 +1,7 @@
-From 9f29d1ecd207ed44f17af631780c0031563af557 Mon Sep 17 00:00:00 2001
+From 948e4015c095533af1796c7c9a34989081b35dd4 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Thu, 15 Oct 2026 23:49:19 +0300
-Subject: [PATCH 12/12] Stop reconnect retries that cannot succeed and keep
+Subject: [PATCH 12/90] Stop reconnect retries that cannot succeed and keep
  reconnect available
 
 An automatic reconnect can reuse a delegate whose password prompt has
@@ -26,22 +26,9 @@ Keep legacy askpass cancellation ordered after its response channel is
 closed, so ending a remote Git operation rejects late replies without
 leaving a detached adapter waiting for input. Preserve normal successful
 password handoff and cancellation notification ordering as well.
----
- crates/askpass/src/askpass.rs                 | 240 ++++++--
- crates/git/src/repository.rs                  |   3 +
- crates/project/src/project.rs                 |   2 +
- crates/project_benchmarks/src/main.rs         |   4 +-
- .../src/disconnected_overlay.rs               | 531 ++++++++++++++++--
- .../recent_projects/src/remote_connections.rs |  53 ++
- crates/remote/src/remote.rs                   |   7 +-
- crates/remote/src/remote_client.rs            | 318 ++++++++++-
- crates/remote/src/transport/mock.rs           |   4 +-
- crates/remote/src/transport/ssh.rs            | 171 +++++-
- .../src/remote_connection.rs                  | 102 +++-
- 11 files changed, 1287 insertions(+), 148 deletions(-)
 
 diff --git a/crates/askpass/src/askpass.rs b/crates/askpass/src/askpass.rs
-index 6579538a2650bf3eb48cacbe3bd3458c8630fccd..d8235082f295d55bd4591d603dadcf2373bf1927 100644
+index 6579538a26..d8235082f2 100644
 --- a/crates/askpass/src/askpass.rs
 +++ b/crates/askpass/src/askpass.rs
 @@ -36,18 +36,59 @@ use util::{paths::PathExt, shell::ShellKind};
@@ -366,10 +353,10 @@ index 6579538a2650bf3eb48cacbe3bd3458c8630fccd..d8235082f295d55bd4591d603dadcf23
      }
  }
 diff --git a/crates/git/src/repository.rs b/crates/git/src/repository.rs
-index de42e3ec1e9de529884ba5e15ac6bdae0ed3af49..351ea6bfac8d7cf1736bc3a6c1ee8c963f057d45 100644
+index 58423167ef..8184605daa 100644
 --- a/crates/git/src/repository.rs
 +++ b/crates/git/src/repository.rs
-@@ -4095,6 +4095,9 @@ async fn run_askpass_command(
+@@ -4104,6 +4104,9 @@ async fn run_askpass_command(
          // hooks), so completion is determined by the process itself.
          result = ask_pass.run(None).fuse() => {
              match result {
@@ -380,10 +367,10 @@ index de42e3ec1e9de529884ba5e15ac6bdae0ed3af49..351ea6bfac8d7cf1736bc3a6c1ee8c96
                      Err(anyhow!(REMOTE_CANCELLED_BY_USER))?
                  }
 diff --git a/crates/project/src/project.rs b/crates/project/src/project.rs
-index 197db63dcf651193a11ede3a8090cc063ecc66a7..1cfe0d15bfed657c7642dc52459ffa400ae8a916 100644
+index 14355c9255..286e9655df 100644
 --- a/crates/project/src/project.rs
 +++ b/crates/project/src/project.rs
-@@ -1671,6 +1671,8 @@ impl Project {
+@@ -1738,6 +1738,8 @@ impl Project {
                  last_worktree_paths: WorktreePaths::default(),
              };
  
@@ -393,7 +380,7 @@ index 197db63dcf651193a11ede3a8090cc063ecc66a7..1cfe0d15bfed657c7642dc52459ffa40
              remote_proto.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &cx.entity());
              remote_proto.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &this.buffer_store);
 diff --git a/crates/project_benchmarks/src/main.rs b/crates/project_benchmarks/src/main.rs
-index 60afe8065900788eeae512399fd22a5912d47f16..dc9ff100dc911902b29c1c9ebb23680796f05723 100644
+index 60afe80659..dc9ff100dc 100644
 --- a/crates/project_benchmarks/src/main.rs
 +++ b/crates/project_benchmarks/src/main.rs
 @@ -48,7 +48,7 @@ impl RemoteClientDelegate for BenchmarkRemoteClient {
@@ -415,7 +402,7 @@ index 60afe8065900788eeae512399fd22a5912d47f16..dc9ff100dc911902b29c1c9ebb236807
                      }
                  }
 diff --git a/crates/recent_projects/src/disconnected_overlay.rs b/crates/recent_projects/src/disconnected_overlay.rs
-index e78762eb283160f84b163771b9835188d2ffce4a..719f30047e151cf141ccf0848715ff29af29cf49 100644
+index e78762eb28..719f30047e 100644
 --- a/crates/recent_projects/src/disconnected_overlay.rs
 +++ b/crates/recent_projects/src/disconnected_overlay.rs
 @@ -1,8 +1,12 @@
@@ -1040,7 +1027,7 @@ index e78762eb283160f84b163771b9835188d2ffce4a..719f30047e151cf141ccf0848715ff29
 +    }
 +}
 diff --git a/crates/recent_projects/src/remote_connections.rs b/crates/recent_projects/src/remote_connections.rs
-index c6829727d0736e12ff4460d63d98387011c7ccf8..6834cae3ad903538fa3c1e0477fb87b6de27ddb7 100644
+index c6829727d0..6834cae3ad 100644
 --- a/crates/recent_projects/src/remote_connections.rs
 +++ b/crates/recent_projects/src/remote_connections.rs
 @@ -1014,6 +1014,59 @@ mod tests {
@@ -1104,10 +1091,10 @@ index c6829727d0736e12ff4460d63d98387011c7ccf8..6834cae3ad903538fa3c1e0477fb87b6
          cx.update(|cx| {
              let state = AppState::test(cx);
 diff --git a/crates/remote/src/remote.rs b/crates/remote/src/remote.rs
-index de8f9348752f622c91e8a544ee7f1c7fe2c5e952..eabb4de58af038b76290d8f61daa584c9ddde8bd 100644
+index 2a8e5160ff..59aec72b6a 100644
 --- a/crates/remote/src/remote.rs
 +++ b/crates/remote/src/remote.rs
-@@ -8,9 +8,10 @@ mod transport;
+@@ -9,9 +9,10 @@ mod transport;
  #[cfg(target_os = "windows")]
  pub use remote_client::OpenWslPath;
  pub use remote_client::{
@@ -1122,10 +1109,10 @@ index de8f9348752f622c91e8a544ee7f1c7fe2c5e952..eabb4de58af038b76290d8f61daa584c
  pub use remote_identity::{
      RemoteConnectionIdentity, remote_connection_identity, same_remote_connection_identity,
 diff --git a/crates/remote/src/remote_client.rs b/crates/remote/src/remote_client.rs
-index 4dd7cc2135b44fc15949dd2c0d0a33a7ce0038f6..c062a310f6f4c368a3a0b5de4aabb4eaecc10e1e 100644
+index c5ed18535f..a58e5eff3c 100644
 --- a/crates/remote/src/remote_client.rs
 +++ b/crates/remote/src/remote_client.rs
-@@ -26,7 +26,7 @@ use futures::{
+@@ -27,7 +27,7 @@ use futures::{
  };
  use gpui::{
      App, AppContext as _, AsyncApp, BackgroundExecutor, BorrowAppContext, Context, Entity,
@@ -1134,7 +1121,7 @@ index 4dd7cc2135b44fc15949dd2c0d0a33a7ce0038f6..c062a310f6f4c368a3a0b5de4aabb4ea
  };
  use parking_lot::Mutex;
  
-@@ -132,11 +132,21 @@ pub enum Interactive {
+@@ -133,11 +133,21 @@ pub enum Interactive {
      No,
  }
  
@@ -1157,7 +1144,7 @@ index 4dd7cc2135b44fc15949dd2c0d0a33a7ce0038f6..c062a310f6f4c368a3a0b5de4aabb4ea
          cancellation: oneshot::Receiver<()>,
          cx: &mut AsyncApp,
      );
-@@ -195,7 +205,9 @@ enum State {
+@@ -199,7 +209,9 @@ enum State {
          error: anyhow::Error,
          attempts: usize,
      },
@@ -1168,7 +1155,7 @@ index 4dd7cc2135b44fc15949dd2c0d0a33a7ce0038f6..c062a310f6f4c368a3a0b5de4aabb4ea
      ServerNotRunning,
  }
  
-@@ -206,7 +218,7 @@ impl fmt::Display for State {
+@@ -210,7 +222,7 @@ impl fmt::Display for State {
              Self::Connected { .. } => write!(f, "connected"),
              Self::Reconnecting => write!(f, "reconnecting"),
              Self::ReconnectFailed { .. } => write!(f, "reconnect failed"),
@@ -1177,7 +1164,7 @@ index 4dd7cc2135b44fc15949dd2c0d0a33a7ce0038f6..c062a310f6f4c368a3a0b5de4aabb4ea
              Self::HeartbeatMissed { .. } => write!(f, "heartbeat missed"),
              Self::ServerNotRunning { .. } => write!(f, "server not running"),
          }
-@@ -236,7 +248,7 @@ impl State {
+@@ -240,7 +252,7 @@ impl State {
              | Self::ReconnectFailed { .. } => true,
              State::Connecting
              | State::Reconnecting
@@ -1186,7 +1173,7 @@ index 4dd7cc2135b44fc15949dd2c0d0a33a7ce0038f6..c062a310f6f4c368a3a0b5de4aabb4ea
              | State::ServerNotRunning => false,
          }
      }
-@@ -324,7 +336,7 @@ impl From<&State> for ConnectionState {
+@@ -328,7 +340,7 @@ impl From<&State> for ConnectionState {
              State::Connected { .. } => Self::Connected,
              State::Reconnecting | State::ReconnectFailed { .. } => Self::Reconnecting,
              State::HeartbeatMissed { .. } => Self::HeartbeatMissed,
@@ -1195,7 +1182,7 @@ index 4dd7cc2135b44fc15949dd2c0d0a33a7ce0038f6..c062a310f6f4c368a3a0b5de4aabb4ea
              State::ServerNotRunning => Self::Disconnected,
          }
      }
-@@ -340,7 +352,7 @@ pub struct RemoteClient {
+@@ -344,7 +356,7 @@ pub struct RemoteClient {
      state: Option<State>,
  }
  
@@ -1204,7 +1191,7 @@ index 4dd7cc2135b44fc15949dd2c0d0a33a7ce0038f6..c062a310f6f4c368a3a0b5de4aabb4ea
  pub enum RemoteClientEvent {
      Disconnected { server_not_running: bool },
      Reconnected,
-@@ -609,7 +621,7 @@ impl RemoteClient {
+@@ -613,7 +625,7 @@ impl RemoteClient {
          }
  
          let state = self.state.take().unwrap();
@@ -1213,7 +1200,7 @@ index 4dd7cc2135b44fc15949dd2c0d0a33a7ce0038f6..c062a310f6f4c368a3a0b5de4aabb4ea
              State::Connected {
                  remote_connection,
                  delegate,
-@@ -625,17 +637,22 @@ impl RemoteClient {
+@@ -629,17 +641,22 @@ impl RemoteClient {
              } => {
                  drop(multiplex_task);
                  drop(heartbeat_task);
@@ -1240,7 +1227,7 @@ index 4dd7cc2135b44fc15949dd2c0d0a33a7ce0038f6..c062a310f6f4c368a3a0b5de4aabb4ea
              | State::ServerNotRunning => unreachable!(),
          };
  
-@@ -645,7 +662,7 @@ impl RemoteClient {
+@@ -649,7 +666,7 @@ impl RemoteClient {
                  "Failed to reconnect to after {} attempts, giving up",
                  MAX_RECONNECT_ATTEMPTS
              );
@@ -1249,7 +1236,7 @@ index 4dd7cc2135b44fc15949dd2c0d0a33a7ce0038f6..c062a310f6f4c368a3a0b5de4aabb4ea
              return Ok(());
          }
  
-@@ -659,11 +676,31 @@ impl RemoteClient {
+@@ -663,11 +680,31 @@ impl RemoteClient {
          let unique_identifier = self.unique_identifier.clone();
          let client = self.client.clone();
          let reconnect_task = cx.spawn(async move |this, cx| {
@@ -1283,7 +1270,7 @@ index 4dd7cc2135b44fc15949dd2c0d0a33a7ce0038f6..c062a310f6f4c368a3a0b5de4aabb4ea
                          attempts: $attempts,
                          remote_connection: $remote_connection,
                          delegate: $delegate,
-@@ -702,7 +739,22 @@ impl RemoteClient {
+@@ -706,7 +743,22 @@ impl RemoteClient {
                          )
                      })
                      .await
@@ -1307,7 +1294,7 @@ index 4dd7cc2135b44fc15949dd2c0d0a33a7ce0038f6..c062a310f6f4c368a3a0b5de4aabb4ea
  
                  let io_task = remote_connection.start_proxy(
                      unique_identifier,
-@@ -762,7 +814,7 @@ impl RemoteClient {
+@@ -777,7 +829,7 @@ impl RemoteClient {
                                      error
                                  );
                              }
@@ -1316,7 +1303,7 @@ index 4dd7cc2135b44fc15949dd2c0d0a33a7ce0038f6..c062a310f6f4c368a3a0b5de4aabb4ea
                                  log::error!("Reconnect attempt failed and all attempts exhausted");
                              }
                          }
-@@ -938,7 +990,15 @@ impl RemoteClient {
+@@ -953,7 +1005,15 @@ impl RemoteClient {
      fn try_set_state(&mut self, cx: &mut Context<Self>, map: impl FnOnce(&State) -> Option<State>) {
          let new_state = self.state.as_ref().and_then(map);
          if let Some(new_state) = new_state {
@@ -1332,7 +1319,7 @@ index 4dd7cc2135b44fc15949dd2c0d0a33a7ce0038f6..c062a310f6f4c368a3a0b5de4aabb4ea
              cx.notify();
          }
      }
-@@ -1043,6 +1103,14 @@ impl RemoteClient {
+@@ -1068,6 +1128,14 @@ impl RemoteClient {
          self.connection_state() == ConnectionState::Disconnected
      }
  
@@ -1347,7 +1334,7 @@ index 4dd7cc2135b44fc15949dd2c0d0a33a7ce0038f6..c062a310f6f4c368a3a0b5de4aabb4ea
      pub fn path_style(&self) -> PathStyle {
          self.path_style
      }
-@@ -1726,6 +1794,13 @@ mod tests {
+@@ -1751,6 +1819,13 @@ mod downstream_tests {
                  heartbeat_task: Task::ready(Ok(())),
              }),
          });
@@ -1361,7 +1348,7 @@ index 4dd7cc2135b44fc15949dd2c0d0a33a7ce0038f6..c062a310f6f4c368a3a0b5de4aabb4ea
  
          assert!(remote_client.read_with(cx, |c, _| c.state.as_ref().unwrap().can_reconnect()));
          assert!(remote_client.read_with(cx, |c, _| c.remote_connection().is_some()));
-@@ -1787,6 +1862,215 @@ mod tests {
+@@ -1812,6 +1887,215 @@ mod downstream_tests {
                  "reconnect exhausted"
              );
          });
@@ -1578,10 +1565,10 @@ index 4dd7cc2135b44fc15949dd2c0d0a33a7ce0038f6..c062a310f6f4c368a3a0b5de4aabb4ea
  }
  
 diff --git a/crates/remote/src/transport/mock.rs b/crates/remote/src/transport/mock.rs
-index e39d123a1ce3633d7223511d3a041852687a98b5..a80b8c5ce7761144eceeeae2b63bff6b5409d02d 100644
+index 734b98bf7a..1e5365b9ce 100644
 --- a/crates/remote/src/transport/mock.rs
 +++ b/crates/remote/src/transport/mock.rs
-@@ -323,7 +323,9 @@ impl RemoteClientDelegate for MockDelegate {
+@@ -453,7 +453,9 @@ impl RemoteClientDelegate for MockDelegate {
      fn ask_password(
          &self,
          _prompt: String,
@@ -1593,18 +1580,18 @@ index e39d123a1ce3633d7223511d3a041852687a98b5..a80b8c5ce7761144eceeeae2b63bff6b
          _cx: &mut AsyncApp,
      ) {
 diff --git a/crates/remote/src/transport/ssh.rs b/crates/remote/src/transport/ssh.rs
-index 86ad4c41afb35c4642b4cf0992f91731c6b60a68..fc2cd793b76e0cf0afeaca58b4d2f98fe96529bb 100644
+index f199988e7a..29e169c392 100644
 --- a/crates/remote/src/transport/ssh.rs
 +++ b/crates/remote/src/transport/ssh.rs
-@@ -31,6 +31,7 @@ use std::{
+@@ -33,6 +33,7 @@ use std::{
  use tempfile::TempDir;
- use util::command::{Child, Stdio};
+ use util::command::{Child, Command, Stdio};
  use util::{
 +    ResultExt as _,
      paths::{PathStyle, RemotePathBuf},
      rel_path::RelPath,
      shell::ShellKind,
-@@ -39,6 +40,61 @@ use util::{
+@@ -41,6 +42,61 @@ use util::{
  /// How long to wait for SSH to connect when no askpass prompt has opened.
  const SSH_CONNECTION_PROMPT_TIMEOUT: Duration = Duration::from_secs(17);
  
@@ -1666,7 +1653,7 @@ index 86ad4c41afb35c4642b4cf0992f91731c6b60a68..fc2cd793b76e0cf0afeaca58b4d2f98f
  pub(crate) struct SshRemoteConnection {
      socket: SshSocket,
      master_process: Mutex<Option<MasterProcess>>,
-@@ -658,7 +714,7 @@ impl SshRemoteConnection {
+@@ -821,7 +877,7 @@ impl SshRemoteConnection {
              let socket = SshSocket::new(connection_options, reused_path).await?;
              (socket, None)
          } else {
@@ -1675,7 +1662,7 @@ index 86ad4c41afb35c4642b4cf0992f91731c6b60a68..fc2cd793b76e0cf0afeaca58b4d2f98f
                  let delegate = delegate.clone();
                  move |prompt, tx, cancellation, cx| {
                      delegate.ask_password(prompt, tx, cancellation, cx)
-@@ -684,15 +740,13 @@ impl SshRemoteConnection {
+@@ -847,15 +903,13 @@ impl SshRemoteConnection {
  
              let result = select_biased! {
                  result = askpass.run(Some(SSH_CONNECTION_PROMPT_TIMEOUT)).fuse() => {
@@ -1697,7 +1684,7 @@ index 86ad4c41afb35c4642b4cf0992f91731c6b60a68..fc2cd793b76e0cf0afeaca58b4d2f98f
                  }
                  _ = master_process.wait_connected().fuse() => {
                      anyhow::Ok(())
-@@ -708,11 +762,7 @@ impl SshRemoteConnection {
+@@ -871,11 +925,7 @@ impl SshRemoteConnection {
                  let mut stderr = master_process.as_mut().stderr.take().unwrap();
                  stderr.read_to_end(&mut output).await?;
  
@@ -1710,7 +1697,7 @@ index 86ad4c41afb35c4642b4cf0992f91731c6b60a68..fc2cd793b76e0cf0afeaca58b4d2f98f
              }
  
              let socket = SshSocket::new(connection_options, socket_path).await?;
-@@ -722,7 +772,7 @@ impl SshRemoteConnection {
+@@ -885,7 +935,7 @@ impl SshRemoteConnection {
  
          #[cfg(windows)]
          let (socket, master_process_option) = {
@@ -1719,7 +1706,7 @@ index 86ad4c41afb35c4642b4cf0992f91731c6b60a68..fc2cd793b76e0cf0afeaca58b4d2f98f
                  let delegate = delegate.clone();
                  move |prompt, tx, cancellation, cx| {
                      delegate.ask_password(prompt, tx, cancellation, cx)
-@@ -744,15 +794,13 @@ impl SshRemoteConnection {
+@@ -907,15 +957,13 @@ impl SshRemoteConnection {
  
              let result = select_biased! {
                  result = askpass.run(Some(SSH_CONNECTION_PROMPT_TIMEOUT)).fuse() => {
@@ -1741,7 +1728,7 @@ index 86ad4c41afb35c4642b4cf0992f91731c6b60a68..fc2cd793b76e0cf0afeaca58b4d2f98f
                  }
                  _ = master_process.wait_connected().fuse() => {
                      anyhow::Ok(())
-@@ -768,11 +816,7 @@ impl SshRemoteConnection {
+@@ -931,11 +979,7 @@ impl SshRemoteConnection {
                  let mut stderr = master_process.as_mut().stderr.take().unwrap();
                  stderr.read_to_end(&mut output).await?;
  
@@ -1754,7 +1741,7 @@ index 86ad4c41afb35c4642b4cf0992f91731c6b60a68..fc2cd793b76e0cf0afeaca58b4d2f98f
              }
  
              let socket = SshSocket::new(
-@@ -2409,4 +2453,75 @@ mod tests {
+@@ -3087,4 +3131,75 @@ mod tests {
  
          Ok(())
      }
@@ -1831,7 +1818,7 @@ index 86ad4c41afb35c4642b4cf0992f91731c6b60a68..fc2cd793b76e0cf0afeaca58b4d2f98f
 +    }
  }
 diff --git a/crates/remote_connection/src/remote_connection.rs b/crates/remote_connection/src/remote_connection.rs
-index 15645b9b9bbf8c08c316ed32452f88d09c6c1530..9ceb03f10d01017670f6375556f0b3576bca83ca 100644
+index 15645b9b9b..9ceb03f10d 100644
 --- a/crates/remote_connection/src/remote_connection.rs
 +++ b/crates/remote_connection/src/remote_connection.rs
 @@ -463,20 +463,45 @@ impl remote::RemoteClientDelegate for RemoteClientDelegate {
@@ -1970,6 +1957,3 @@ index 15645b9b9bbf8c08c316ed32452f88d09c6c1530..9ceb03f10d01017670f6375556f0b357
      fn initialize_test(cx: &mut TestAppContext) {
          cx.update(|cx| {
              let settings_store = SettingsStore::test(cx);
--- 
-2.55.0
-

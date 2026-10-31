@@ -1,18 +1,14 @@
-From 816d5cdc6c963ae4e8be5a3c67da5ea3525ebf86 Mon Sep 17 00:00:00 2001
+From d567e820a554823bd57665c391d0360d08ef38a0 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 20:04:15 +0000
-Subject: [PATCH] Bound persistent session kills and keep failed closes
+Subject: [PATCH 48/90] Bound persistent session kills and keep failed closes
  retryable
 
 Apply the existing17-second probe deadline to the common kill API, including preparation. Cancel owned probe/kill clients on task drop and exec the final client command without terminating shared daemons or SSH masters. Cover timeout cancellation, metadata retention, cleared closing state and successful retry.
----
- crates/project/src/terminals.rs     | 69 ++++++++++++++++++++++++++---
- crates/sidebar/src/sidebar_tests.rs | 58 ++++++++++++++++++++++++
- 2 files changed, 122 insertions(+), 5 deletions(-)
 
 diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
-index 9c9809c..a64e429 100644
+index 9c9809cb65..a64e4295ba 100644
 --- a/crates/project/src/terminals.rs
 +++ b/crates/project/src/terminals.rs
 @@ -172,11 +172,12 @@ const SHPOOL_PROBE_SCRIPT: &str = concat!(
@@ -132,10 +128,10 @@ index 9c9809c..a64e429 100644
      async fn test_shpool_probe_timeout_returns_error_without_plain_shell_fallback(
          cx: &mut gpui::TestAppContext,
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 1d2e4c2..08134ab 100644
+index 7d792d1b07..0197f24dfe 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -4964,6 +4964,64 @@ async fn test_successful_delayed_terminal_kill_deletes_metadata_after_sidebar_is
+@@ -5065,6 +5065,64 @@ async fn test_successful_delayed_terminal_kill_deletes_metadata_after_sidebar_is
      });
  }
  

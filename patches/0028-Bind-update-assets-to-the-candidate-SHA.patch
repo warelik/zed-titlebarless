@@ -1,14 +1,11 @@
-From b16b641c9e86ef3de95b33921394c4e893804df0 Mon Sep 17 00:00:00 2001
+From a5e53a0ef740eeb3f91bdaff4fd690eb73f7aa18 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex@example.invalid>
 Date: Sun, 18 Oct 2026 05:57:59 +0000
-Subject: [PATCH] Bind update assets to the candidate SHA
+Subject: [PATCH 28/90] Bind update assets to the candidate SHA
 
----
- crates/auto_update/src/auto_update.rs | 19 +++++++++++++++----
- 1 file changed, 15 insertions(+), 4 deletions(-)
 
 diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs
-index 7bb8413..96c9cd7 100644
+index 7bb8413376..96c9cd7987 100644
 --- a/crates/auto_update/src/auto_update.rs
 +++ b/crates/auto_update/src/auto_update.rs
 @@ -1278,10 +1278,11 @@ fn validate_fork_release(
@@ -62,6 +59,3 @@ index 7bb8413..96c9cd7 100644
          let mut missing_field = valid_manifest;
          missing_field.as_object_mut().expect("manifest is an object").remove("sha256");
          assert!(
--- 
-2.43.0
-

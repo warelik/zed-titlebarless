@@ -1,21 +1,17 @@
-From 56787c235bec649a03d2e6077181bfa6eb0cc5a0 Mon Sep 17 00:00:00 2001
+From 5f4e44c85cff7c0c5161d3d2864689795252913d Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Mon, 19 Oct 2026 07:24:33 +0000
-Subject: [PATCH] Preserve unmanaged fallback and account for failed
+Subject: [PATCH 71/90] Preserve unmanaged fallback and account for failed
  original-client attempts
 
 Repair the complete four-case runtime batch from final39211469726 (203of207 passed). Record failed fake commands against the matching original backend before availability failure while preserving wrong-socket rejection. An existing-only legacy probe with no client may return the original Unavailable plain shell; available daemons still require a positive UUID match and pinned-context absence still fails. Correct only the newly added locator field of the original unmanaged fixture to None; retain every prior fixture value, call and assertion. Extend the existing legacy-match regression with absent-client fallback, no attachment and no invented locator checks. No compiler recipe, policy or test-selector changes.
----
- crates/agent_ui/src/agent_panel.rs |  2 +-
- crates/project/src/terminals.rs    | 27 +++++++++++++++++++++++++--
- 2 files changed, 26 insertions(+), 3 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index efd6b5d..d8a2903 100644
+index af2a7b9e25..f7e9cd8bac 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -17739,7 +17739,7 @@ mod tests {
+@@ -17785,7 +17785,7 @@ mod tests {
  
          let terminal_id = TerminalId::new();
          let metadata = TerminalThreadMetadata {
@@ -25,7 +21,7 @@ index efd6b5d..d8a2903 100644
              title: "Unmanaged".into(),
              custom_title: None,
 diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
-index 7dd39ee..9638da4 100644
+index 7dd39eea54..9638da4b4c 100644
 --- a/crates/project/src/terminals.rs
 +++ b/crates/project/src/terminals.rs
 @@ -778,8 +778,11 @@ impl Project {

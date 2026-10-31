@@ -1,23 +1,17 @@
-From 5b84d1f3879d2af9b58955cf1179176e9944c986 Mon Sep 17 00:00:00 2001
+From 5ba5168ff734d1e973782a843568f78b38d3d9c3 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Mon, 19 Oct 2026 05:15:54 +0000
-Subject: [PATCH] Atomically claim a legacy daemon locator across projects
- before attachment
+Subject: [PATCH 69/90] Atomically claim a legacy daemon locator across
+ projects before attachment
 
 Use the existing process-wide metadata row as the reservation after discovery and before any Project starts the client. Preserve low-level APIs, do not create provisional records for failed new spawns, and notify shared metadata without holding a Project lease. Add a deterministic two-window two-project conflicting-client regression.
----
- crates/agent_ui/src/agent_panel.rs            | 19 +++--
- .../src/terminal_thread_metadata_store.rs     | 23 ++++++
- crates/project/src/terminals.rs               | 27 +++++++
- crates/sidebar/src/sidebar_tests.rs           | 75 +++++++++++++++++++
- 4 files changed, 139 insertions(+), 5 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 22a64e8..efd6b5d 100644
+index 1fc9cb91c4..af2a7b9e25 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -2484,14 +2484,22 @@ impl AgentPanel {
+@@ -2485,14 +2485,22 @@ impl AgentPanel {
          restoring_existing: bool,
          cx: &mut Context<Self>,
      ) -> Task<Result<PersistentTerminal>> {
@@ -42,7 +36,7 @@ index 22a64e8..efd6b5d 100644
          // A real shell ties the spawn's timing to the host, so a test that needs
          // to observe the panel mid-spawn installs a gate to pause before calling
          // project.create_persistent_terminal_shell.
-@@ -2504,12 +2512,13 @@ impl AgentPanel {
+@@ -2505,12 +2513,13 @@ impl AgentPanel {
                  gate.await.ok();
                  let shell_task = cx.update(|cx| {
                      project.update(cx, |project, cx| {
@@ -57,7 +51,7 @@ index 22a64e8..efd6b5d 100644
                              cx,
                          )
                      })
-@@ -2521,8 +2530,8 @@ impl AgentPanel {
+@@ -2522,8 +2531,8 @@ impl AgentPanel {
          let session_name = terminal_id.session_name();
          let bounds = self.laid_out_terminal_bounds(Some(terminal_id), cx);
          self.project.update(cx, |project, cx| {
@@ -69,7 +63,7 @@ index 22a64e8..efd6b5d 100644
          })
      }
 diff --git a/crates/agent_ui/src/terminal_thread_metadata_store.rs b/crates/agent_ui/src/terminal_thread_metadata_store.rs
-index a420759..c9cf0ab 100644
+index a4207594b0..c9cf0abaac 100644
 --- a/crates/agent_ui/src/terminal_thread_metadata_store.rs
 +++ b/crates/agent_ui/src/terminal_thread_metadata_store.rs
 @@ -456,6 +456,29 @@ impl TerminalThreadMetadataStore {
@@ -103,7 +97,7 @@ index a420759..c9cf0ab 100644
      /// completed closes must never be resurrected by a late spawn result.
      pub fn remember_shpool_context(
 diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
-index 3bc30ac..5515b26 100644
+index 3bc30ac79d..5515b261b7 100644
 --- a/crates/project/src/terminals.rs
 +++ b/crates/project/src/terminals.rs
 @@ -109,6 +109,11 @@ impl ShpoolSessionContext {
@@ -155,10 +149,10 @@ index 3bc30ac..5515b26 100644
                  .update(cx, |project, cx| {
                      if let Some(context) = &context {
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 4f15b16..67c7692 100644
+index 55af66a4ca..bea8de76d5 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -5314,6 +5314,81 @@ async fn test_saved_terminal_checks_every_root_and_allows_retry(cx: &mut TestApp
+@@ -5415,6 +5415,81 @@ async fn test_saved_terminal_checks_every_root_and_allows_retry(cx: &mut TestApp
      });
  }
  

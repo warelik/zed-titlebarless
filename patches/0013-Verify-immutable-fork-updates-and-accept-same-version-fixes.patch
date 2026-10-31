@@ -1,19 +1,15 @@
-From abc06c6b6959272a8ebdfb5c623ee9478def3f1b Mon Sep 17 00:00:00 2001
+From 45cddee16db2fe65251bdee645445213602c1834 Mon Sep 17 00:00:00 2001
 From: Zed Patch Preparation Bot <zed-patch-preparation-bot@localhost>
 Date: Fri, 16 Oct 2026 20:23:53 +0000
-Subject: [PATCH] Verify immutable fork releases and accept same-version fixes
+Subject: [PATCH 13/90] Verify immutable fork releases and accept same-version
+ fixes
 
----
- Cargo.lock                            |    1 +
- crates/auto_update/Cargo.toml         |    1 +
- crates/auto_update/src/auto_update.rs | 1001 ++++++++++++++++++++++++-
- 3 files changed, 964 insertions(+), 39 deletions(-)
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 7e8f3a1..dfb964f 100644
+index 4b27054f08..c430c36b6f 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -1394,6 +1394,7 @@ dependencies = [
+@@ -1403,6 +1403,7 @@ dependencies = [
   "serde",
   "serde_json",
   "settings",
@@ -22,7 +18,7 @@ index 7e8f3a1..dfb964f 100644
   "tempfile",
   "util",
 diff --git a/crates/auto_update/Cargo.toml b/crates/auto_update/Cargo.toml
-index 47b4f7a..cf92e47 100644
+index 47b4f7a038..cf92e47b52 100644
 --- a/crates/auto_update/Cargo.toml
 +++ b/crates/auto_update/Cargo.toml
 @@ -26,6 +26,7 @@ semver.workspace = true
@@ -34,7 +30,7 @@ index 47b4f7a..cf92e47 100644
  tempfile.workspace = true
  util.workspace = true
 diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs
-index 6afd897..80c6250 100644
+index 6afd897a5c..2f35195e41 100644
 --- a/crates/auto_update/src/auto_update.rs
 +++ b/crates/auto_update/src/auto_update.rs
 @@ -10,8 +10,9 @@ use http_client::{HttpClient, HttpClientWithUrl};
@@ -1148,6 +1144,3 @@ index 6afd897..80c6250 100644
      #[gpui::test]
      fn test_auto_update_defaults_to_true(cx: &mut TestAppContext) {
          cx.update(|cx| {
--- 
-2.43.0
-

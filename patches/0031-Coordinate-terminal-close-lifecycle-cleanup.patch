@@ -1,20 +1,11 @@
-From d93c70eaf942ca586cbe3dc262b005a42614029d Mon Sep 17 00:00:00 2001
+From 5746680a651ff93fff73daab513178f5d8d83a14 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex-repair@example.invalid>
 Date: Sun, 18 Oct 2026 06:34:09 +0000
-Subject: [PATCH] Coordinate terminal close lifecycle cleanup
+Subject: [PATCH 31/90] Coordinate terminal close lifecycle cleanup
 
----
- crates/agent_ui/src/agent_panel.rs            | 117 ++++++++++++++-
- .../src/terminal_thread_metadata_store.rs     |  66 +++++++++
- crates/sidebar/src/sidebar.rs                 | 127 +++++++++++++----
- crates/sidebar/src/sidebar_tests.rs           | 134 ++++++++++++++++++
- crates/workspace/src/item.rs                  |  45 +++---
- crates/workspace/src/multi_workspace.rs       |  41 ++++--
- crates/workspace/src/multi_workspace_tests.rs |  86 +++++++++++
- 7 files changed, 550 insertions(+), 66 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 19c4525..7724599 100644
+index f1be89a380..1322ab0ebe 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
 @@ -149,17 +149,46 @@ fn reconnect_if_remote_disconnected(project: Entity<Project>, cx: &mut App) {
@@ -67,7 +58,7 @@ index 19c4525..7724599 100644
              }
          });
          anyhow::Ok(())
-@@ -2105,6 +2134,7 @@ impl AgentPanel {
+@@ -2106,6 +2135,7 @@ impl AgentPanel {
  
      fn is_terminal_spawn_pending(&self, terminal_id: TerminalId) -> bool {
          self.pending_terminal_spawns.contains(&terminal_id)
@@ -75,7 +66,7 @@ index 19c4525..7724599 100644
      }
  
      fn has_pending_terminal_spawns(&self) -> bool {
-@@ -2197,9 +2227,11 @@ impl AgentPanel {
+@@ -2198,9 +2228,11 @@ impl AgentPanel {
                  Err(error) => {
                      this.update_in(cx, |this, window, cx| {
                          this.pending_terminal_spawns.remove(&terminal_id);
@@ -87,7 +78,7 @@ index 19c4525..7724599 100644
                                  terminal_id,
                                  cx,
                              );
-@@ -2294,17 +2326,19 @@ impl AgentPanel {
+@@ -2295,17 +2327,19 @@ impl AgentPanel {
              let init_command = init_command.filter(|_| session != PersistentSession::Reattached);
              this.update_in(cx, |this, window, cx| {
                  this.pending_terminal_spawns.remove(&terminal_id);
@@ -108,7 +99,7 @@ index 19c4525..7724599 100644
                              terminal_id,
                              cx,
                          );
-@@ -2670,11 +2704,12 @@ impl AgentPanel {
+@@ -2671,11 +2705,12 @@ impl AgentPanel {
          } else if kill_persistent_session && should_kill_persistent_session {
              kill_persistent_terminal_session_and_delete_metadata(
                  self.project.clone(),
@@ -122,7 +113,7 @@ index 19c4525..7724599 100644
          }
          self.terminals.remove(&terminal_id);
          if was_active {
-@@ -2689,6 +2724,47 @@ impl AgentPanel {
+@@ -2690,6 +2725,47 @@ impl AgentPanel {
          cx.notify();
      }
  
@@ -170,7 +161,7 @@ index 19c4525..7724599 100644
      fn terminal_has_exited(&self, terminal_id: TerminalId, cx: &App) -> bool {
          self.terminals.get(&terminal_id).is_some_and(|terminal| {
              terminal.exited || terminal.view.read(cx).terminal().read(cx).has_exited()
-@@ -2975,7 +3051,10 @@ impl AgentPanel {
+@@ -2976,7 +3052,10 @@ impl AgentPanel {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
@@ -182,7 +173,7 @@ index 19c4525..7724599 100644
              return;
          }
          if self.has_terminal(metadata.terminal_id)
-@@ -5749,6 +5828,7 @@ impl AgentPanel {
+@@ -5750,6 +5829,7 @@ impl AgentPanel {
                          );
                      } else {
                          this.pending_terminal_spawns.remove(&terminal_id);
@@ -190,7 +181,7 @@ index 19c4525..7724599 100644
                      }
                  });
              } else {
-@@ -16378,15 +16458,24 @@ mod tests {
+@@ -16424,15 +16504,24 @@ mod tests {
          };
          cx.update(|_, cx| {
              TerminalThreadMetadataStore::global(cx)
@@ -216,7 +207,7 @@ index 19c4525..7724599 100644
          cx.update(|_, cx| {
              assert!(
                  TerminalThreadMetadataStore::global(cx)
-@@ -16397,8 +16486,15 @@ mod tests {
+@@ -16443,8 +16532,15 @@ mod tests {
              );
          });
          assert!(fake.has_session(&terminal_id.session_name()));
@@ -232,7 +223,7 @@ index 19c4525..7724599 100644
          panel.update_in(cx, |panel, window, cx| {
              panel.close_terminal(terminal_id, window, cx);
          });
-@@ -16413,6 +16509,13 @@ mod tests {
+@@ -16459,6 +16555,13 @@ mod tests {
              );
          });
          assert!(!fake.has_session(&terminal_id.session_name()));
@@ -247,7 +238,7 @@ index 19c4525..7724599 100644
  
      #[gpui::test]
 diff --git a/crates/agent_ui/src/terminal_thread_metadata_store.rs b/crates/agent_ui/src/terminal_thread_metadata_store.rs
-index 4ca941d..ca71def 100644
+index 4ca941d45c..ca71def46e 100644
 --- a/crates/agent_ui/src/terminal_thread_metadata_store.rs
 +++ b/crates/agent_ui/src/terminal_thread_metadata_store.rs
 @@ -178,6 +178,8 @@ pub struct TerminalThreadMetadataStore {
@@ -350,7 +341,7 @@ index 4ca941d..ca71def 100644
      fn test_terminal_metadata_persistence_strips_ssh_password() {
          let connection = RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index d4251df..c9726d6 100644
+index 70e3143017..90f2a2d5ec 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -609,6 +609,24 @@ fn workspace_has_terminal_metadata_except(
@@ -553,10 +544,10 @@ index d4251df..c9726d6 100644
  
      fn archived_worktree_item_membership_matches(
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 9d32d7b..a817f97 100644
+index d39b07f300..535e08e062 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -4841,6 +4841,104 @@ async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes
+@@ -4942,6 +4942,104 @@ async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes
      });
  }
  
@@ -661,7 +652,7 @@ index 9d32d7b..a817f97 100644
  #[gpui::test]
  async fn test_failed_close_terminal_entry_retains_metadata_until_session_kill_succeeds(
      cx: &mut TestAppContext,
-@@ -17368,3 +17466,39 @@ async fn test_project_tab_opens_panel_only_after_closed_target_workspace_loads(
+@@ -17488,3 +17586,39 @@ async fn test_project_tab_opens_panel_only_after_closed_target_workspace_loads(
          AgentPanel::is_visible(&source_workspace, cx)
      }), "opening a closed project tab must not reopen the source project's panel");
  }
@@ -702,7 +693,7 @@ index 9d32d7b..a817f97 100644
 +    cx.update(|_, cx| assert!(TerminalThreadMetadataStore::global(cx).read(cx).entry(terminal_id).is_none()));
 +}
 diff --git a/crates/workspace/src/item.rs b/crates/workspace/src/item.rs
-index 908cddc..6e34d61 100644
+index 908cddcbb5..6e34d61a8e 100644
 --- a/crates/workspace/src/item.rs
 +++ b/crates/workspace/src/item.rs
 @@ -480,47 +480,58 @@ where
@@ -782,10 +773,10 @@ index 908cddc..6e34d61 100644
  }
  
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index f2f1800..7dc7a10 100644
+index 96b9a94068..3683185595 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
-@@ -1895,20 +1895,6 @@ impl MultiWorkspace {
+@@ -1892,20 +1892,6 @@ impl MultiWorkspace {
          });
  
          cx.spawn_in(window, async move |this, cx| {
@@ -806,7 +797,7 @@ index f2f1800..7dc7a10 100644
              let item_ids = workspaces
                  .iter()
                  .map(|workspace| {
-@@ -1938,7 +1924,32 @@ impl MultiWorkspace {
+@@ -1935,7 +1921,32 @@ impl MultiWorkspace {
                      })
                  })
                  .collect();
@@ -841,7 +832,7 @@ index f2f1800..7dc7a10 100644
              if !before_remove(cx).await? {
                  return Ok(false);
 diff --git a/crates/workspace/src/multi_workspace_tests.rs b/crates/workspace/src/multi_workspace_tests.rs
-index db91d13..7c9dc56 100644
+index db91d131d7..7c9dc56fa7 100644
 --- a/crates/workspace/src/multi_workspace_tests.rs
 +++ b/crates/workspace/src/multi_workspace_tests.rs
 @@ -1846,6 +1846,92 @@ async fn test_nearest_retained_workspace_skips_disconnected_workspace(cx: &mut T
@@ -937,6 +928,3 @@ index db91d13..7c9dc56 100644
  #[gpui::test]
  async fn test_remove_with_pre_remove_keeps_edits_made_during_guard(cx: &mut TestAppContext) {
      use crate::item::ItemEvent;
--- 
-2.43.0
-

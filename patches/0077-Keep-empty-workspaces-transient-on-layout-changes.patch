@@ -1,17 +1,13 @@
-From cb28a62f11e54f03b3414341dc831059071bd5bb Mon Sep 17 00:00:00 2001
+From a8ac18c548dde71a26c5310902a2e31dba764edb Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 21:42:25 +0000
-Subject: [PATCH] Keep empty workspaces transient when changing the threads
- sidebar layout
+Subject: [PATCH 76/90] Keep empty workspaces transient when changing the
+ threads sidebar layout
 
----
- crates/workspace/src/multi_workspace.rs       |  9 ++-
- crates/workspace/src/multi_workspace_tests.rs | 60 +++++++++++++++++++
- 2 files changed, 68 insertions(+), 1 deletion(-)
 
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 5a6c8c99fa..38513f18ce 100644
+index 9cb044299c..53857b1bdc 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -412,7 +412,14 @@ impl MultiWorkspace {

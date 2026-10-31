@@ -1,7 +1,7 @@
-From 084f194f2753d9809f940a30a9e030a686a0d9d0 Mon Sep 17 00:00:00 2001
+From a4ad2686700fcd03b7266d7f205c5c9e4a3a468f Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 16:05:02 +0300
-Subject: [PATCH 02/12] Add tab width bounds and tab chip settings
+Subject: [PATCH 02/90] Add tab width bounds and tab chip settings
 
 Tabs size to their title by default, which makes the tab bar uneven.
 tabs.min_width and tabs.max_width clamp the tab width; editor and
@@ -19,23 +19,12 @@ TabBarSettings::from_settings deserializes pinned_tab_chips and
 unpinned_tab_chips with unwrap_or(false), preventing panics when tab
 chip configuration keys are omitted. Unit test coverage for default
 fallback is introduced in commit 5.
----
- assets/settings/default.json               |  8 +++
- crates/settings/src/vscode_import.rs       |  4 ++
- crates/settings_content/src/workspace.rs   | 17 ++++++
- crates/terminal_view/src/terminal_view.rs  | 12 +++-
- crates/ui/src/components/tab.rs            | 69 ++++++++++++++++++++++
- crates/workspace/src/item.rs               |  4 ++
- crates/workspace/src/pane.rs               | 30 ++++++++--
- crates/workspace/src/workspace.rs          | 38 ++++++++++++
- crates/workspace/src/workspace_settings.rs |  4 ++
- 9 files changed, 179 insertions(+), 7 deletions(-)
 
 diff --git a/assets/settings/default.json b/assets/settings/default.json
-index 04a922488254b1a243ecdc2d91db7ebf0da71a9a..b41faccf25951f26d8525acf8a71497c6e1fbad3 100644
+index 270f5f96ca..2a2b74dde4 100644
 --- a/assets/settings/default.json
 +++ b/assets/settings/default.json
-@@ -1477,6 +1477,10 @@
+@@ -1483,6 +1483,10 @@
      // When enabled, pinned tabs appear in a top row and unpinned tabs in a bottom row.
      // When disabled, all tabs appear in a single row (default behavior).
      "show_pinned_tabs_in_separate_row": false,
@@ -44,9 +33,9 @@ index 04a922488254b1a243ecdc2d91db7ebf0da71a9a..b41faccf25951f26d8525acf8a71497c
 +    // Whether to render unpinned tabs as compact borderless chips.
 +    "unpinned_tab_chips": false,
    },
-   // Settings related to the editor's tabs
-   "tabs": {
-@@ -1516,6 +1520,10 @@
+   // Settings related to the tab switcher (Ctrl-Tab).
+   "tab_switcher": {
+@@ -1529,6 +1533,10 @@
      // 3. Mark files with errors and warnings:
      //    "all"
      "show_diagnostics": "off",
@@ -58,10 +47,10 @@ index 04a922488254b1a243ecdc2d91db7ebf0da71a9a..b41faccf25951f26d8525acf8a71497c
    // Settings related to preview tabs.
    "preview_tabs": {
 diff --git a/crates/settings/src/vscode_import.rs b/crates/settings/src/vscode_import.rs
-index d9138ee781a67b27639cdcb08ee70075ef91a496..a458433589f84fd9066e31e795f98e6f6d1d7aac 100644
+index 0703edb17b..0966e1338c 100644
 --- a/crates/settings/src/vscode_import.rs
 +++ b/crates/settings/src/vscode_import.rs
-@@ -802,6 +802,8 @@ impl VsCodeSettings {
+@@ -803,6 +803,8 @@ impl VsCodeSettings {
                          ShowCloseButton::Hidden
                      }
                  }),
@@ -70,7 +59,7 @@ index d9138ee781a67b27639cdcb08ee70075ef91a496..a458433589f84fd9066e31e795f98e6f
          })
      }
  
-@@ -831,6 +833,8 @@ impl VsCodeSettings {
+@@ -832,6 +834,8 @@ impl VsCodeSettings {
                  .read_str("workbench.editor.editorActionsLocation")
                  .and_then(|str| if str == "hidden" { Some(false) } else { None }),
              show_pinned_tabs_in_separate_row: None,
@@ -80,10 +69,10 @@ index d9138ee781a67b27639cdcb08ee70075ef91a496..a458433589f84fd9066e31e795f98e6f
      }
  
 diff --git a/crates/settings_content/src/workspace.rs b/crates/settings_content/src/workspace.rs
-index d106cc9f1552943e652f5794f592c31c7b6f6c2b..43d0e48d63410073cc055d3c4b5d981b3e97e855 100644
+index 4523b22530..e0f1acd791 100644
 --- a/crates/settings_content/src/workspace.rs
 +++ b/crates/settings_content/src/workspace.rs
-@@ -207,6 +207,15 @@ pub struct ItemSettingsContent {
+@@ -211,6 +211,15 @@ pub struct ItemSettingsContent {
      ///
      /// Default: false
      pub show_close_button: Option<ShowCloseButton>,
@@ -99,7 +88,7 @@ index d106cc9f1552943e652f5794f592c31c7b6f6c2b..43d0e48d63410073cc055d3c4b5d981b
  }
  
  #[with_fallible_options]
-@@ -556,6 +565,14 @@ pub struct TabBarSettingsContent {
+@@ -560,6 +569,14 @@ pub struct TabBarSettingsContent {
      ///
      /// Default: false
      pub show_pinned_tabs_in_separate_row: Option<bool>,
@@ -115,7 +104,7 @@ index d106cc9f1552943e652f5794f592c31c7b6f6c2b..43d0e48d63410073cc055d3c4b5d981b
  
  #[with_fallible_options]
 diff --git a/crates/terminal_view/src/terminal_view.rs b/crates/terminal_view/src/terminal_view.rs
-index c821c4b0f3f826c93a1ec7ec290b6a4799e9822c..223c5fa60750922f654cf898dddab94b16423132 100644
+index c1e5105e10..49a319d8d8 100644
 --- a/crates/terminal_view/src/terminal_view.rs
 +++ b/crates/terminal_view/src/terminal_view.rs
 @@ -53,7 +53,8 @@ use workspace::{
@@ -128,7 +117,7 @@ index c821c4b0f3f826c93a1ec7ec290b6a4799e9822c..223c5fa60750922f654cf898dddab94b
      },
      register_serializable_item,
      searchable::{
-@@ -1600,10 +1601,17 @@ impl Item for TerminalView {
+@@ -1634,10 +1635,17 @@ impl Item for TerminalView {
              None => (IconName::Terminal, Color::Muted, None),
          };
  
@@ -146,7 +135,7 @@ index c821c4b0f3f826c93a1ec7ec290b6a4799e9822c..223c5fa60750922f654cf898dddab94b
              .when(!params.selected, |this| {
                  this.track_focus(&self.focus_handle)
              })
-@@ -1634,10 +1642,12 @@ impl Item for TerminalView {
+@@ -1668,10 +1676,12 @@ impl Item for TerminalView {
              .child(
                  div()
                      .relative()
@@ -160,7 +149,7 @@ index c821c4b0f3f826c93a1ec7ec290b6a4799e9822c..223c5fa60750922f654cf898dddab94b
                      )
                      .when_some(self.rename_editor.clone(), |this, editor| {
 diff --git a/crates/ui/src/components/tab.rs b/crates/ui/src/components/tab.rs
-index 6a25ad4345752c223f29c0111913303adfe550e9..8b197a91d145a07462bcf497581b5fcc00dcb0c8 100644
+index 6a25ad4345..8b197a91d1 100644
 --- a/crates/ui/src/components/tab.rs
 +++ b/crates/ui/src/components/tab.rs
 @@ -38,6 +38,8 @@ pub struct Tab {
@@ -279,7 +268,7 @@ index 6a25ad4345752c223f29c0111913303adfe550e9..8b197a91d145a07462bcf497581b5fcc
              .h(Tab::container_height(cx))
              .bg(tab_bg)
 diff --git a/crates/workspace/src/item.rs b/crates/workspace/src/item.rs
-index ab4195f6a4e57c662cb081ebb30a279d05014154..15cd5e17236de2067143e3842151a418daa506bc 100644
+index ab4195f6a4..15cd5e1723 100644
 --- a/crates/workspace/src/item.rs
 +++ b/crates/workspace/src/item.rs
 @@ -61,6 +61,8 @@ pub struct ItemSettings {
@@ -301,7 +290,7 @@ index ab4195f6a4e57c662cb081ebb30a279d05014154..15cd5e17236de2067143e3842151a418
      }
  }
 diff --git a/crates/workspace/src/pane.rs b/crates/workspace/src/pane.rs
-index 528dfa297694c8c189e28d3d1ccb05a92515b691..40bc7bb9f9004ce2d6868509671bd4b1b2d7230a 100644
+index 0e73fb90a8..0bbf7896d5 100644
 --- a/crates/workspace/src/pane.rs
 +++ b/crates/workspace/src/pane.rs
 @@ -2842,6 +2842,7 @@ impl Pane {
@@ -397,10 +386,10 @@ index 528dfa297694c8c189e28d3d1ccb05a92515b691..40bc7bb9f9004ce2d6868509671bd4b1
              self.render_two_row_tab_bar(
                  pinned_tabs,
 diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
-index 357e80e59212254b0ff3d981c691726710f7123b..b4bf4caf139a831d5cd66e16632b76e99b37f92a 100644
+index 6bd106430d..a668dd808c 100644
 --- a/crates/workspace/src/workspace.rs
 +++ b/crates/workspace/src/workspace.rs
-@@ -13239,6 +13239,44 @@ mod tests {
+@@ -13253,6 +13253,44 @@ mod tests {
          assert!(first_tab_left(true, cx) >= without_spacer + px(ui::utils::TRAFFIC_LIGHT_PADDING));
      }
  
@@ -446,10 +435,10 @@ index 357e80e59212254b0ff3d981c691726710f7123b..b4bf4caf139a831d5cd66e16632b76e9
      async fn test_window_title_format_empty_project(cx: &mut TestAppContext) {
          init_test(cx);
 diff --git a/crates/workspace/src/workspace_settings.rs b/crates/workspace/src/workspace_settings.rs
-index 830b7b2145b60291b736975672cec64352d269c4..89b1bab9419936d77831e89b41b3e00aa3e36701 100644
+index 8d3b027e30..8f39a1bdb2 100644
 --- a/crates/workspace/src/workspace_settings.rs
 +++ b/crates/workspace/src/workspace_settings.rs
-@@ -92,6 +92,8 @@ pub struct TabBarSettings {
+@@ -93,6 +93,8 @@ pub struct TabBarSettings {
      pub show_nav_history_buttons: bool,
      pub show_tab_bar_buttons: bool,
      pub show_pinned_tabs_in_separate_row: bool,
@@ -458,7 +447,7 @@ index 830b7b2145b60291b736975672cec64352d269c4..89b1bab9419936d77831e89b41b3e00a
  }
  
  impl Settings for WorkspaceSettings {
-@@ -211,6 +213,8 @@ impl Settings for TabBarSettings {
+@@ -213,6 +215,8 @@ impl Settings for TabBarSettings {
              show_nav_history_buttons: tab_bar.show_nav_history_buttons.unwrap(),
              show_tab_bar_buttons: tab_bar.show_tab_bar_buttons.unwrap(),
              show_pinned_tabs_in_separate_row: tab_bar.show_pinned_tabs_in_separate_row.unwrap(),
@@ -467,6 +456,3 @@ index 830b7b2145b60291b736975672cec64352d269c4..89b1bab9419936d77831e89b41b3e00a
          }
      }
  }
--- 
-2.55.0
-

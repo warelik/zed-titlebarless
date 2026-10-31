@@ -1,7 +1,7 @@
-From b448478a854337acce05c47013d7f37d5630193a Mon Sep 17 00:00:00 2001
+From ae3e8b529cdc91b7ae877478e8ee62ede38be295 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 16:10:17 +0300
-Subject: [PATCH 05/12] Add toolbar.compact and panel_rows_tab_height settings
+Subject: [PATCH 05/90] Add toolbar.compact and panel_rows_tab_height settings
 
 Both settings line rows up with the tab bar height.
 
@@ -45,29 +45,9 @@ tests ensuring safe defaults when configuration keys are omitted.
 Share compact row-height calculations through existing dependency
 boundaries. Preserve rem-based defaults and each caller's distinction
 between an exact height and a minimum height.
----
- assets/settings/default.json               |  5 +++
- crates/agent_ui/src/agent_panel.rs         |  6 ++-
- crates/breadcrumbs/src/breadcrumbs.rs      |  4 +-
- crates/git_ui/src/git_panel.rs             | 19 +++++----
- crates/language_onboarding/src/python.rs   |  9 +++-
- crates/onboarding/src/multibuffer_hint.rs  |  6 ++-
- crates/outline_panel/src/outline_panel.rs  |  3 ++
- crates/project_panel/src/project_panel.rs  |  4 ++
- crates/search/src/buffer_search.rs         | 27 +++++-------
- crates/search/src/project_search.rs        | 47 +++++++++------------
- crates/search/src/search_bar.rs            | 35 ++++++++++++++--
- crates/settings/src/vscode_import.rs       |  1 +
- crates/settings_content/src/editor.rs      |  4 ++
- crates/settings_content/src/theme.rs       |  4 ++
- crates/theme_settings/src/settings.rs      | 16 +++++++
- crates/workspace/src/toolbar.rs            | 49 ++++++++++++++++++----
- crates/workspace/src/workspace.rs          |  6 +++
- crates/workspace/src/workspace_settings.rs | 31 ++++++++++++++
- 18 files changed, 205 insertions(+), 71 deletions(-)
 
 diff --git a/assets/settings/default.json b/assets/settings/default.json
-index 4e990e125d06f59b34eeaa69db089ac23c38b7f6..f68fad05aacc5ce109f13898c06e7adfd50242d1 100644
+index 852d1a51e0..bf3c847ab6 100644
 --- a/assets/settings/default.json
 +++ b/assets/settings/default.json
 @@ -12,6 +12,9 @@
@@ -80,7 +60,7 @@ index 4e990e125d06f59b34eeaa69db089ac23c38b7f6..f68fad05aacc5ce109f13898c06e7adf
    // The name of a base set of key bindings to use.
    // This setting can take the following values:
    //
-@@ -607,6 +610,8 @@
+@@ -609,6 +612,8 @@
      "agent_review": true,
      // Whether to show code action buttons in the editor toolbar.
      "code_actions": false,
@@ -90,7 +70,7 @@ index 4e990e125d06f59b34eeaa69db089ac23c38b7f6..f68fad05aacc5ce109f13898c06e7adf
    // Whether to allow windows to tab together based on the user's tabbing preference (macOS only).
    "use_system_window_tabs": false,
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 5ef03a5a8ed169ab6e2fd0b35703796a56ae8cdd..057bbcbf07ae6c2be7b852a9050cd7ffcb7641bd 100644
+index d992a67390..ed33ad6de4 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
 @@ -99,7 +99,7 @@ use ui::{
@@ -102,7 +82,7 @@ index 5ef03a5a8ed169ab6e2fd0b35703796a56ae8cdd..057bbcbf07ae6c2be7b852a9050cd7ff
      dock::{DockPosition, Panel, PanelEvent},
      item::{ItemEvent, ItemHandle},
  };
-@@ -6678,7 +6678,9 @@ impl Render for AgentPanel {
+@@ -6679,7 +6679,9 @@ impl Render for AgentPanel {
                                      v_flex()
                                          .group("toolbar")
                                          .relative()
@@ -114,7 +94,7 @@ index 5ef03a5a8ed169ab6e2fd0b35703796a56ae8cdd..057bbcbf07ae6c2be7b852a9050cd7ff
                                          .border_b_1()
                                          .border_color(cx.theme().colors().border_variant)
 diff --git a/crates/breadcrumbs/src/breadcrumbs.rs b/crates/breadcrumbs/src/breadcrumbs.rs
-index b981e17c33a50d379048755f90734bc4b85021f1..68b331fcc730875ece42aa81cbc56a5a24ed41ac 100644
+index b981e17c33..68b331fcc7 100644
 --- a/crates/breadcrumbs/src/breadcrumbs.rs
 +++ b/crates/breadcrumbs/src/breadcrumbs.rs
 @@ -3,7 +3,7 @@ use gpui::{
@@ -136,10 +116,10 @@ index b981e17c33a50d379048755f90734bc4b85021f1..68b331fcc730875ece42aa81cbc56a5a
              .text_ui(cx);
  
 diff --git a/crates/git_ui/src/git_panel.rs b/crates/git_ui/src/git_panel.rs
-index 6f43798ee2a34d34a5b5e71bc3645fa04c1df1e7..1172505eb6c070c10ce46dad54d04c3cc4fc8546 100644
+index 0101070516..3e906fded9 100644
 --- a/crates/git_ui/src/git_panel.rs
 +++ b/crates/git_ui/src/git_panel.rs
-@@ -8135,7 +8135,7 @@ impl GitPanel {
+@@ -8311,7 +8311,7 @@ impl GitPanel {
                                              ));
                                          }
                                          Some(GitListEntry::EmptySection(section)) => {
@@ -148,7 +128,7 @@ index 6f43798ee2a34d34a5b5e71bc3645fa04c1df1e7..1172505eb6c070c10ce46dad54d04c3c
                                          }
                                          None => {}
                                      }
-@@ -8185,8 +8185,11 @@ impl GitPanel {
+@@ -8361,8 +8361,11 @@ impl GitPanel {
          Label::new(label.into()).single_line().color(color)
      }
  
@@ -162,7 +142,7 @@ index 6f43798ee2a34d34a5b5e71bc3645fa04c1df1e7..1172505eb6c070c10ce46dad54d04c3c
      }
  
      fn render_list_header(
-@@ -8224,7 +8227,7 @@ impl GitPanel {
+@@ -8400,7 +8403,7 @@ impl GitPanel {
          h_flex()
              .id(id)
              .group(group_name)
@@ -171,7 +151,7 @@ index 6f43798ee2a34d34a5b5e71bc3645fa04c1df1e7..1172505eb6c070c10ce46dad54d04c3c
              .w_full()
              .pl_2p5()
              .pr_1()
-@@ -8306,14 +8309,14 @@ impl GitPanel {
+@@ -8482,14 +8485,14 @@ impl GitPanel {
              .into_any_element()
      }
  
@@ -188,7 +168,7 @@ index 6f43798ee2a34d34a5b5e71bc3645fa04c1df1e7..1172505eb6c070c10ce46dad54d04c3c
              .w_full()
              .pl_2p5()
              .pr_1()
-@@ -8724,7 +8727,7 @@ impl GitPanel {
+@@ -8906,7 +8909,7 @@ impl GitPanel {
  
          h_flex()
              .id(id)
@@ -197,7 +177,7 @@ index 6f43798ee2a34d34a5b5e71bc3645fa04c1df1e7..1172505eb6c070c10ce46dad54d04c3c
              .w_full()
              .pl_2p5()
              .pr_1()
-@@ -8947,7 +8950,7 @@ impl GitPanel {
+@@ -9129,7 +9132,7 @@ impl GitPanel {
              .child(self.entry_label(entry.name.clone(), label_color).truncate());
          h_flex()
              .id(id)
@@ -207,7 +187,7 @@ index 6f43798ee2a34d34a5b5e71bc3645fa04c1df1e7..1172505eb6c070c10ce46dad54d04c3c
              .w_full()
              .pl_2p5()
 diff --git a/crates/language_onboarding/src/python.rs b/crates/language_onboarding/src/python.rs
-index 64b6502327f71e7a68f40b5a7690f308ecbf8c40..6c2d3049c697ba9db1ca00784ea68591a50f8a94 100644
+index 64b6502327..6c2d3049c6 100644
 --- a/crates/language_onboarding/src/python.rs
 +++ b/crates/language_onboarding/src/python.rs
 @@ -2,7 +2,7 @@ use db::kvp::Dismissable;
@@ -234,7 +214,7 @@ index 64b6502327f71e7a68f40b5a7690f308ecbf8c40..6c2d3049c697ba9db1ca00784ea68591
                                      }),
                                  ))
 diff --git a/crates/onboarding/src/multibuffer_hint.rs b/crates/onboarding/src/multibuffer_hint.rs
-index 56092863c8b5ae1a18694a23419fc2127c5bdc81..a0bc7c6ab8c6e1cca8539a58b4eaaae7bd7e3907 100644
+index 56092863c8..a0bc7c6ab8 100644
 --- a/crates/onboarding/src/multibuffer_hint.rs
 +++ b/crates/onboarding/src/multibuffer_hint.rs
 @@ -6,7 +6,7 @@ use db::kvp::KeyValueStore;
@@ -258,7 +238,7 @@ index 56092863c8b5ae1a18694a23419fc2127c5bdc81..a0bc7c6ab8c6e1cca8539a58b4eaaae7
              .bg(cx.theme().status().info_background.opacity(0.5))
              .border_1()
 diff --git a/crates/outline_panel/src/outline_panel.rs b/crates/outline_panel/src/outline_panel.rs
-index 861d506da94999a00668c8e9332ca29be07d01d6..956f98e3fdaa93525dd18f8526e09fd4a3620d37 100644
+index fb0936c554..2b22c597ca 100644
 --- a/crates/outline_panel/src/outline_panel.rs
 +++ b/crates/outline_panel/src/outline_panel.rs
 @@ -3032,9 +3032,11 @@ impl OutlinePanel {
@@ -282,10 +262,10 @@ index 861d506da94999a00668c8e9332ca29be07d01d6..956f98e3fdaa93525dd18f8526e09fd4
                      .indent_step_size(px(settings.indent_size))
                      .toggle_state(is_active)
 diff --git a/crates/project_panel/src/project_panel.rs b/crates/project_panel/src/project_panel.rs
-index fbd3459d389a1c62e2e4583743120641476000bc..bc1fd0d67640d06995337a0a4eb58b08895fe757 100644
+index 1a79e146a4..3cc30f8b7c 100644
 --- a/crates/project_panel/src/project_panel.rs
 +++ b/crates/project_panel/src/project_panel.rs
-@@ -6104,8 +6104,11 @@ impl ProjectPanel {
+@@ -6203,8 +6203,11 @@ impl ProjectPanel {
                      .into_owned()
              });
  
@@ -297,7 +277,7 @@ index fbd3459d389a1c62e2e4583743120641476000bc..bc1fd0d67640d06995337a0a4eb58b08
              .relative()
              .group(GROUP_NAME)
              .when_some(
-@@ -6482,6 +6485,7 @@ impl ProjectPanel {
+@@ -6581,6 +6584,7 @@ impl ProjectPanel {
              )
              .child(
                  ListItem::new(id)
@@ -306,7 +286,7 @@ index fbd3459d389a1c62e2e4583743120641476000bc..bc1fd0d67640d06995337a0a4eb58b08
                      .indent_step_size(px(settings.indent_size))
                      .spacing(match settings.entry_spacing {
 diff --git a/crates/search/src/buffer_search.rs b/crates/search/src/buffer_search.rs
-index f68d5874d61b1179f6227277a8a2090a19ec8bae..ec75cfcdb5c48c62907c2dccc0b9d359ac353009 100644
+index f68d5874d6..ec75cfcdb5 100644
 --- a/crates/search/src/buffer_search.rs
 +++ b/crates/search/src/buffer_search.rs
 @@ -6,9 +6,9 @@ use crate::{
@@ -387,7 +367,7 @@ index f68d5874d61b1179f6227277a8a2090a19ec8bae..ec75cfcdb5c48c62907c2dccc0b9d359
              .track_scroll(&self.scroll_handle)
              .key_context(key_context)
 diff --git a/crates/search/src/project_search.rs b/crates/search/src/project_search.rs
-index 51be4def1a9740edbcf9653a831ef9d49f05bef0..865fce896403041ec14c84e44bb7d1d01c43cf80 100644
+index 904516f074..e72d0f3820 100644
 --- a/crates/search/src/project_search.rs
 +++ b/crates/search/src/project_search.rs
 @@ -5,8 +5,9 @@ use crate::{
@@ -411,7 +391,7 @@ index 51be4def1a9740edbcf9653a831ef9d49f05bef0..865fce896403041ec14c84e44bb7d1d0
      ToolbarItemView, Workspace, WorkspaceId,
      item::{Item, ItemBufferKind, ItemEvent, ItemHandle, SaveOptions},
      searchable::{Direction, SearchEvent, SearchToken, SearchableItem, SearchableItemHandle},
-@@ -2997,10 +2998,14 @@ impl Render for ProjectSearchBar {
+@@ -2998,10 +2999,14 @@ impl Render for ProjectSearchBar {
          let input_width = SearchInputWidth::calc_width(container_width);
  
          let input_base_styles = |panel: InputPanel| {
@@ -430,7 +410,7 @@ index 51be4def1a9740edbcf9653a831ef9d49f05bef0..865fce896403041ec14c84e44bb7d1d0
          };
          let theme_colors = cx.theme().colors();
          let project_search = search.entity.read(cx);
-@@ -3049,7 +3054,7 @@ impl Render for ProjectSearchBar {
+@@ -3050,7 +3055,7 @@ impl Render for ProjectSearchBar {
              .on_action(
                  cx.listener(|this, action, window, cx| this.next_history_query(action, window, cx)),
              )
@@ -439,7 +419,7 @@ index 51be4def1a9740edbcf9653a831ef9d49f05bef0..865fce896403041ec14c84e44bb7d1d0
                  &search.query_editor,
                  color_override,
                  cx,
-@@ -3212,11 +3217,7 @@ impl Render for ProjectSearchBar {
+@@ -3213,11 +3218,7 @@ impl Render for ProjectSearchBar {
  
          let replace_line = search.replace_enabled.then(|| {
              let replace_column = input_base_styles(InputPanel::Replacement).child(
@@ -452,7 +432,7 @@ index 51be4def1a9740edbcf9653a831ef9d49f05bef0..865fce896403041ec14c84e44bb7d1d0
              );
  
              let focus_handle = search.replacement_editor.read(cx).focus_handle(cx);
-@@ -3310,28 +3311,18 @@ impl Render for ProjectSearchBar {
+@@ -3311,28 +3312,18 @@ impl Render for ProjectSearchBar {
          let query_error_line = search
              .panels_with_errors
              .get(&InputPanel::Query)
@@ -487,7 +467,7 @@ index 51be4def1a9740edbcf9653a831ef9d49f05bef0..865fce896403041ec14c84e44bb7d1d0
              .key_context(key_context)
              .on_action(cx.listener(|this, _: &ToggleFocus, window, cx| {
 diff --git a/crates/search/src/search_bar.rs b/crates/search/src/search_bar.rs
-index a4757631a188752aed7cc631d987a22cd57b06c6..51eecceafeae7b57c8e12d0ddda7a1f5f8e43661 100644
+index a4757631a1..51eecceafe 100644
 --- a/crates/search/src/search_bar.rs
 +++ b/crates/search/src/search_bar.rs
 @@ -4,6 +4,7 @@ use settings::Settings;
@@ -550,10 +530,10 @@ index a4757631a188752aed7cc631d987a22cd57b06c6..51eecceafeae7b57c8e12d0ddda7a1f5
              .mr_2()
              .px_2()
 diff --git a/crates/settings/src/vscode_import.rs b/crates/settings/src/vscode_import.rs
-index ed1d3a3cbbd9761edbf89333fc8d5d27ad68f36f..753be0d369cf03a89404bc0b074b87756abe80a8 100644
+index 23a4a0a7b7..588a0ba478 100644
 --- a/crates/settings/src/vscode_import.rs
 +++ b/crates/settings/src/vscode_import.rs
-@@ -1044,6 +1044,7 @@ impl VsCodeSettings {
+@@ -1045,6 +1045,7 @@ impl VsCodeSettings {
              mermaid_font_family: None,
              theme: None,
              icon_theme: None,
@@ -562,7 +542,7 @@ index ed1d3a3cbbd9761edbf89333fc8d5d27ad68f36f..753be0d369cf03a89404bc0b074b8775
              shadows: None,
              unnecessary_code_fade: None,
 diff --git a/crates/settings_content/src/editor.rs b/crates/settings_content/src/editor.rs
-index 23ff824a88b1a2dfc0614fdad97e6b5b95ebc10c..e2a4c646019c45d13612e0818a6ef6987763f2b3 100644
+index 23ff824a88..e2a4c64601 100644
 --- a/crates/settings_content/src/editor.rs
 +++ b/crates/settings_content/src/editor.rs
 @@ -400,6 +400,10 @@ pub struct ToolbarContent {
@@ -577,7 +557,7 @@ index 23ff824a88b1a2dfc0614fdad97e6b5b95ebc10c..e2a4c646019c45d13612e0818a6ef698
  
  /// Scrollbar related settings
 diff --git a/crates/settings_content/src/theme.rs b/crates/settings_content/src/theme.rs
-index 8cc6ea474ac7cec09f34fc14ba222f5ba30c72f1..1ae62495c013bf95412d55459c421d8cefaed961 100644
+index 8cc6ea474a..1ae62495c0 100644
 --- a/crates/settings_content/src/theme.rs
 +++ b/crates/settings_content/src/theme.rs
 @@ -221,6 +221,10 @@ pub struct ThemeSettingsContent {
@@ -592,7 +572,7 @@ index 8cc6ea474ac7cec09f34fc14ba222f5ba30c72f1..1ae62495c013bf95412d55459c421d8c
      /// UNSTABLE: Expect many elements to be broken.
      ///
 diff --git a/crates/theme_settings/src/settings.rs b/crates/theme_settings/src/settings.rs
-index dc72cfbd8350ba1c1f6391da2537b667e5f13c92..43a4414794ed0872001a4067427793877caec892 100644
+index dc72cfbd83..43a4414794 100644
 --- a/crates/theme_settings/src/settings.rs
 +++ b/crates/theme_settings/src/settings.rs
 @@ -96,6 +96,8 @@ pub struct ThemeSettings {
@@ -633,7 +613,7 @@ index dc72cfbd8350ba1c1f6391da2537b667e5f13c92..43a4414794ed0872001a406742779387
          crate::refine_theme(&crate::ThemeContent {
              name: "Test".into(),
 diff --git a/crates/workspace/src/toolbar.rs b/crates/workspace/src/toolbar.rs
-index b14775f289d27d31e57ef554478a8ddfcd5cfe86..c7213d027532c1e79a73301a03f63ce0cb969456 100644
+index b14775f289..c7213d0275 100644
 --- a/crates/workspace/src/toolbar.rs
 +++ b/crates/workspace/src/toolbar.rs
 @@ -1,9 +1,10 @@
@@ -735,7 +715,7 @@ index b14775f289d27d31e57ef554478a8ddfcd5cfe86..c7213d027532c1e79a73301a03f63ce0
  }
  
 diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
-index b4bf4caf139a831d5cd66e16632b76e99b37f92a..f316b5d46ed2dae9942033ccb31dd9f6e05e7629 100644
+index a668dd808c..399b7820f0 100644
 --- a/crates/workspace/src/workspace.rs
 +++ b/crates/workspace/src/workspace.rs
 @@ -334,6 +334,12 @@ pub fn title_bar_in_status_bar(cx: &App) -> bool {
@@ -752,10 +732,10 @@ index b4bf4caf139a831d5cd66e16632b76e99b37f92a..f316b5d46ed2dae9942033ccb31dd9f6
  /// bottom border of the tab-height header beside them, as far from the left edge as from the top.
  /// The button size depends on the macOS SDK, so it is only known once the window exists; until
 diff --git a/crates/workspace/src/workspace_settings.rs b/crates/workspace/src/workspace_settings.rs
-index 89b1bab9419936d77831e89b41b3e00aa3e36701..37e5d7b0e9d66cc51ecab2d784bb4a5ae00913c2 100644
+index 8f39a1bdb2..76e8de2a7b 100644
 --- a/crates/workspace/src/workspace_settings.rs
 +++ b/crates/workspace/src/workspace_settings.rs
-@@ -47,6 +47,7 @@ pub struct WorkspaceSettings {
+@@ -48,6 +48,7 @@ pub struct WorkspaceSettings {
      pub window_decorations: settings::WindowDecorations,
      pub title_bar_to_status_bar: bool,
      pub focus_follows_mouse: FocusFollowsMouse,
@@ -763,7 +743,7 @@ index 89b1bab9419936d77831e89b41b3e00aa3e36701..37e5d7b0e9d66cc51ecab2d784bb4a5a
  }
  
  #[cfg(target_os = "macos")]
-@@ -168,6 +169,12 @@ impl Settings for WorkspaceSettings {
+@@ -170,6 +171,12 @@ impl Settings for WorkspaceSettings {
                          .unwrap_or(250),
                  ),
              },
@@ -776,7 +756,7 @@ index 89b1bab9419936d77831e89b41b3e00aa3e36701..37e5d7b0e9d66cc51ecab2d784bb4a5a
          }
      }
  }
-@@ -244,3 +251,27 @@ impl Settings for StatusBarSettings {
+@@ -246,3 +253,27 @@ impl Settings for StatusBarSettings {
          }
      }
  }
@@ -804,6 +784,3 @@ index 89b1bab9419936d77831e89b41b3e00aa3e36701..37e5d7b0e9d66cc51ecab2d784bb4a5a
 +        assert!(!tab_settings.unpinned_tab_chips);
 +    }
 +}
--- 
-2.55.0
-

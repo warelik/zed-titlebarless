@@ -1,14 +1,11 @@
-From 02386625c8e8f21a381fef96d26975bce13874f4 Mon Sep 17 00:00:00 2001
+From 8cadff7c1591b52d404a3f440f3aead271b67078 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex-repair@example.invalid>
 Date: Sat, 17 Oct 2026 17:09:44 +0000
-Subject: [PATCH] Bound fork update downloads by manifest size
+Subject: [PATCH 21/90] Bound fork update downloads by manifest size
 
----
- crates/auto_update/src/auto_update.rs | 63 ++++++++++++++++++++++++---
- 1 file changed, 58 insertions(+), 5 deletions(-)
 
 diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs
-index 2f35195..324b80a 100644
+index 2f35195e41..324b80a57e 100644
 --- a/crates/auto_update/src/auto_update.rs
 +++ b/crates/auto_update/src/auto_update.rs
 @@ -902,7 +902,14 @@ impl AutoUpdater {
@@ -124,6 +121,3 @@ index 2f35195..324b80a 100644
              let reported = reported.clone();
              move |fraction| {
                  reported.borrow_mut().push(fraction);
--- 
-2.43.0
-

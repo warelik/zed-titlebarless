@@ -1,18 +1,14 @@
-From d48f38c5a7ccbe7f64f08ee4315d028e16f6e5aa Mon Sep 17 00:00:00 2001
+From 1d8b2a3e202cfde4531f94b23b6ec42060c0d648 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 21:49:21 +0000
-Subject: [PATCH] Isolate corrupt terminal metadata rows and surface
+Subject: [PATCH 53/90] Isolate corrupt terminal metadata rows and surface
  restoration failures
 
 Keep each malformed saved row intact, restore every valid row independently, and show a persistent sidebar warning. Cover malformed and unknown remote JSON, invalid timestamps, raw-data preservation, and recovery after repair without changing existing regression assertions.
----
- .../src/terminal_thread_metadata_store.rs     | 125 ++++++++++++++++--
- crates/sidebar/src/sidebar.rs                 |  11 ++
- 2 files changed, 128 insertions(+), 8 deletions(-)
 
 diff --git a/crates/agent_ui/src/terminal_thread_metadata_store.rs b/crates/agent_ui/src/terminal_thread_metadata_store.rs
-index a36b04e..4b003c8 100644
+index a36b04ef1e..4b003c8e0b 100644
 --- a/crates/agent_ui/src/terminal_thread_metadata_store.rs
 +++ b/crates/agent_ui/src/terminal_thread_metadata_store.rs
 @@ -175,6 +175,7 @@ pub struct TerminalThreadMetadataStore {
@@ -218,10 +214,10 @@ index a36b04e..4b003c8 100644
                  _db_operations_task: Task::ready(()),
                  deleted_terminal_ids: HashSet::default(),
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 30a6df4..50a2cc6 100644
+index 4158e4db58..267afbeb9f 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
-@@ -8816,6 +8816,8 @@ impl Render for Sidebar {
+@@ -8861,6 +8861,8 @@ impl Render for Sidebar {
  
          let no_open_projects = !self.contents.has_open_projects;
          let no_search_results = self.contents.entries.is_empty();
@@ -230,7 +226,7 @@ index 30a6df4..50a2cc6 100644
  
          v_flex()
              .id("workspace-sidebar")
-@@ -8898,6 +8900,15 @@ impl Render for Sidebar {
+@@ -8943,6 +8945,15 @@ impl Render for Sidebar {
              .map(|this| match &self.view {
                  SidebarView::ThreadList => this
                      .child(self.render_sidebar_header(no_open_projects, window, cx))

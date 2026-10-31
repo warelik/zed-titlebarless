@@ -1,7 +1,7 @@
-From db34635f1445285ae2b20dd18045888d5dee9660 Mon Sep 17 00:00:00 2001
+From 7bb043bf07580542744ba694c22b934032b5798b Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 13:09:08 +0300
-Subject: [PATCH 11/12] Keep agent panel terminal threads alive in shpool
+Subject: [PATCH 11/90] Keep agent panel terminal threads alive in shpool
  sessions
 
 A managed terminal thread in the agent panel runs its shell in the shpool session
@@ -108,27 +108,12 @@ interrupt a connection that has already recovered.
 
 Exercise restored active threads against the same fake shpool session and
 workspace database identity, without rerunning their initialization command.
----
- Cargo.lock                                    |    2 +
- crates/acp_thread/src/acp_thread.rs           |    1 +
- crates/agent_ui/src/agent_panel.rs            | 3394 ++++++++++++++++-
- crates/agent_ui/src/conversation_view.rs      |    1 -
- .../src/terminal_thread_metadata_store.rs     |  425 ++-
- crates/project/src/project.rs                 |   57 +
- crates/project/src/terminals.rs               | 1196 +++++-
- crates/remote/src/remote_client.rs            |  200 +-
- crates/sidebar/Cargo.toml                     |    2 +
- crates/sidebar/src/sidebar.rs                 |   76 +-
- crates/sidebar/src/sidebar_tests.rs           |  405 +-
- crates/terminal/src/terminal.rs               |  479 ++-
- crates/terminal_view/src/terminal_view.rs     |    1 +
- 13 files changed, 5983 insertions(+), 256 deletions(-)
 
 diff --git a/Cargo.lock b/Cargo.lock
-index e9bedbf02cf36a0c74ec8569c1dc1670eda5eeb0..7e8f3a1a3170bee4272f047fa9f4df67dda9c982 100644
+index 03f1870a37..4b27054f08 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -16639,6 +16639,8 @@ dependencies = [
+@@ -16752,6 +16752,8 @@ dependencies = [
   "serde_json",
   "settings",
   "telemetry",
@@ -138,10 +123,10 @@ index e9bedbf02cf36a0c74ec8569c1dc1670eda5eeb0..7e8f3a1a3170bee4272f047fa9f4df67
   "theme_settings",
   "ui",
 diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs
-index 6eea0a2ec54883b5f8bcdab9192b6912f0e2ccbc..952ceb16a39b09944875858d4e4497765c3e4b6d 100644
+index fbfab0e6f5..0afee76201 100644
 --- a/crates/acp_thread/src/acp_thread.rs
 +++ b/crates/acp_thread/src/acp_thread.rs
-@@ -10259,6 +10259,7 @@ mod tests {
+@@ -11037,6 +11037,7 @@ mod tests {
                      cx,
                      vec![],
                      PathStyle::local(),
@@ -150,7 +135,7 @@ index 6eea0a2ec54883b5f8bcdab9192b6912f0e2ccbc..952ceb16a39b09944875858d4e449776
              })
              .await
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946374bcb99 100644
+index 8d2527fe1b..25fdbe106f 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
 @@ -75,19 +75,21 @@ use fs::Fs;
@@ -253,7 +238,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
  struct SerializedActiveThread {
      /// For drafts this is `None`; use `thread_id` to address them instead.
      session_id: Option<String>,
-@@ -960,8 +984,10 @@ struct AgentTerminal {
+@@ -961,8 +985,10 @@ struct AgentTerminal {
      last_known_terminal_title: String,
      last_observed_program: Option<String>,
      working_directory: Option<PathBuf>,
@@ -264,7 +249,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
      search_bar: Option<Entity<BufferSearchBar>>,
      notification_windows: Vec<WindowHandle<AgentNotification>>,
      notification_subscriptions: Vec<Subscription>,
-@@ -1129,13 +1155,23 @@ pub struct AgentPanel {
+@@ -1130,13 +1156,23 @@ pub struct AgentPanel {
      draft_thread: Option<Entity<ConversationView>>,
      retained_threads: HashMap<ThreadId, Entity<ConversationView>>,
      terminals: HashMap<TerminalId, AgentTerminal>,
@@ -289,7 +274,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
      zoomed: bool,
      pending_serialization: Option<Task<Result<()>>>,
      persist_selected_agent_task: Task<()>,
-@@ -1155,6 +1191,13 @@ pub struct AgentPanel {
+@@ -1156,6 +1192,13 @@ pub struct AgentPanel {
      is_active: bool,
  }
  
@@ -303,7 +288,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
  impl AgentPanel {
      fn serialize(&mut self, cx: &mut App) {
          let Some(workspace_id) = self.workspace_id else {
-@@ -1165,7 +1208,15 @@ impl AgentPanel {
+@@ -1166,7 +1209,15 @@ impl AgentPanel {
          let last_created_entry_kind = self.last_created_entry_kind;
          let last_active_terminal_id = self
              .active_terminal_id()
@@ -320,7 +305,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
  
          let last_active_thread = if last_active_terminal_id.is_some() {
              None
-@@ -1199,20 +1250,26 @@ impl AgentPanel {
+@@ -1200,20 +1251,26 @@ impl AgentPanel {
                      if is_draft_active {
                          return None;
                      }
@@ -361,7 +346,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
                  })
          };
  
-@@ -1221,6 +1278,8 @@ impl AgentPanel {
+@@ -1222,6 +1279,8 @@ impl AgentPanel {
              .as_ref()
              .map(|draft| draft.read(cx).thread_id);
  
@@ -370,7 +355,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
          let kvp = KeyValueStore::global(cx);
          self.pending_serialization = Some(cx.background_spawn(async move {
              save_serialized_panel(
-@@ -1231,6 +1290,7 @@ impl AgentPanel {
+@@ -1232,6 +1291,7 @@ impl AgentPanel {
                      last_active_thread,
                      last_active_terminal_id,
                      new_draft_thread_id,
@@ -378,7 +363,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
                  },
                  kvp,
              )
-@@ -1267,7 +1327,10 @@ impl AgentPanel {
+@@ -1268,7 +1328,10 @@ impl AgentPanel {
                  .await;
  
              let has_open_project = workspace
@@ -390,7 +375,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
                  .unwrap_or(false);
              let terminal_id_to_restore = if has_open_project {
                  serialized_panel
-@@ -1285,36 +1348,27 @@ impl AgentPanel {
+@@ -1286,36 +1349,27 @@ impl AgentPanel {
              } else {
                  None
              };
@@ -444,7 +429,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
              } else {
                  None
              };
-@@ -1388,6 +1442,7 @@ impl AgentPanel {
+@@ -1389,6 +1443,7 @@ impl AgentPanel {
  
                      if let Some(serialized_panel) = &serialized_panel {
                          panel.last_created_entry_kind = serialized_panel.last_created_entry_kind;
@@ -452,7 +437,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
                      } else if let Some(entry_kind) = global_last_created_entry_kind {
                          panel.last_created_entry_kind = entry_kind;
                      }
-@@ -1420,6 +1475,16 @@ impl AgentPanel {
+@@ -1421,6 +1476,16 @@ impl AgentPanel {
                          panel.selected_agent = agent;
                      }
  
@@ -469,7 +454,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
                      if let Some(metadata) = terminal_to_restore {
                          panel.restore_terminal_for_panel_load(
                              metadata,
-@@ -1458,7 +1523,7 @@ impl AgentPanel {
+@@ -1459,7 +1524,7 @@ impl AgentPanel {
          })
      }
  
@@ -478,7 +463,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
          let fs = workspace.app_state().fs.clone();
          let user_store = workspace.app_state().user_store.clone();
          let project = workspace.project();
-@@ -1509,6 +1574,7 @@ impl AgentPanel {
+@@ -1510,6 +1575,7 @@ impl AgentPanel {
                  | project::Event::WorktreePathsChanged { .. } => {
                      this.ensure_native_agent_connection(cx);
                      this.update_thread_work_dirs(cx);
@@ -486,7 +471,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
                      this.persist_all_terminal_metadata(cx);
                      cx.notify();
                  }
-@@ -1525,6 +1591,8 @@ impl AgentPanel {
+@@ -1526,6 +1592,8 @@ impl AgentPanel {
              },
          );
  
@@ -495,7 +480,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
          let _settings_subscription = cx.observe_global::<SettingsStore>(|this, cx| {
              this.cleanup_retained_threads(cx);
          });
-@@ -1534,7 +1602,7 @@ impl AgentPanel {
+@@ -1535,7 +1603,7 @@ impl AgentPanel {
          })
          .detach();
  
@@ -504,7 +489,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
              workspace_id,
              base_view,
              last_created_entry_kind: AgentPanelEntryKind::Thread,
-@@ -1550,7 +1618,8 @@ impl AgentPanel {
+@@ -1551,7 +1619,8 @@ impl AgentPanel {
              persist_selected_agent_task: Task::ready(()),
              retained_threads: HashMap::default(),
              terminals: HashMap::default(),
@@ -514,7 +499,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
              #[cfg(test)]
              test_terminal_spawn_gate: None,
              new_thread_menu_handle: PopoverMenuHandle::default(),
-@@ -1558,6 +1627,14 @@ impl AgentPanel {
+@@ -1559,6 +1628,14 @@ impl AgentPanel {
  
              _extension_subscription: extension_subscription,
              _project_subscription,
@@ -529,7 +514,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
              zoomed: false,
              pending_serialization: None,
              new_user_onboarding: onboarding,
-@@ -1576,6 +1653,15 @@ impl AgentPanel {
+@@ -1577,6 +1654,15 @@ impl AgentPanel {
              is_active: false,
          };
  
@@ -545,7 +530,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
          panel.ensure_native_agent_connection(cx);
          panel
      }
-@@ -1988,7 +2074,7 @@ impl AgentPanel {
+@@ -1989,7 +2075,7 @@ impl AgentPanel {
              None,
              None,
              None,
@@ -554,7 +539,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
              true,
              true,
              source,
-@@ -1997,6 +2083,14 @@ impl AgentPanel {
+@@ -1998,6 +2084,14 @@ impl AgentPanel {
          );
      }
  
@@ -569,7 +554,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
      fn terminal_working_directory(
          &self,
          workspace: Option<&Workspace>,
-@@ -2008,7 +2102,8 @@ impl AgentPanel {
+@@ -2009,7 +2103,8 @@ impl AgentPanel {
      }
  
      pub fn supports_terminal(&self, cx: &App) -> bool {
@@ -579,7 +564,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
      }
  
      pub fn should_create_terminal_for_new_entry(&self, cx: &App) -> bool {
-@@ -2035,6 +2130,20 @@ impl AgentPanel {
+@@ -2036,6 +2131,20 @@ impl AgentPanel {
          .detach();
      }
  
@@ -600,7 +585,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
      fn spawn_terminal(
          &mut self,
          terminal_id: TerminalId,
-@@ -2042,7 +2151,7 @@ impl AgentPanel {
+@@ -2043,7 +2152,7 @@ impl AgentPanel {
          custom_title: Option<SharedString>,
          initial_title: Option<SharedString>,
          created_at: Option<DateTime<Utc>>,
@@ -609,7 +594,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
          focus: bool,
          run_init_command: bool,
          source: AgentThreadSource,
-@@ -2053,33 +2162,132 @@ impl AgentPanel {
+@@ -2054,33 +2163,132 @@ impl AgentPanel {
          // the terminal lands. Marking the spawn as pending stops
          // `ensure_thread_initialized` from treating a still-uninitialized panel
          // as empty and spawning a second, "initial" terminal on activation.
@@ -753,7 +738,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
                  let terminal_for_init_command = terminal.clone();
                  let terminal_view = cx.new(|cx| {
                      let mut view =
-@@ -2094,7 +2302,8 @@ impl AgentPanel {
+@@ -2095,7 +2303,8 @@ impl AgentPanel {
                      custom_title,
                      initial_title,
                      created_at,
@@ -763,7 +748,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
                      focus,
                      source,
                      window,
-@@ -2109,25 +2318,68 @@ impl AgentPanel {
+@@ -2110,25 +2319,68 @@ impl AgentPanel {
  
      fn create_terminal_shell(
          &mut self,
@@ -838,7 +823,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
      fn terminal_init_command(run_init_command: bool, cx: &App) -> Option<String> {
          run_init_command
              .then(|| AgentSettings::get_global(cx).terminal_init_command.clone())
-@@ -2199,7 +2451,8 @@ impl AgentPanel {
+@@ -2200,7 +2452,8 @@ impl AgentPanel {
          custom_title: Option<SharedString>,
          initial_title: Option<SharedString>,
          created_at: Option<DateTime<Utc>>,
@@ -848,7 +833,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
          focus: bool,
          source: AgentThreadSource,
          window: &mut Window,
-@@ -2233,10 +2486,29 @@ impl AgentPanel {
+@@ -2234,10 +2487,29 @@ impl AgentPanel {
                      this.report_terminal_program(terminal_id, source, cx);
                  }
                  TerminalEvent::Bell => this.mark_terminal_notification(terminal_id, window, cx),
@@ -881,7 +866,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
                  | TerminalEvent::OutputReplaced
                  | TerminalEvent::SelectionsChanged
                  | TerminalEvent::NewNavigationTarget(_)
-@@ -2256,22 +2528,32 @@ impl AgentPanel {
+@@ -2257,22 +2529,32 @@ impl AgentPanel {
              last_known_terminal_title,
              last_observed_program: None,
              working_directory,
@@ -917,7 +902,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
              self.set_base_view(BaseView::Terminal { terminal_id }, focus, window, cx);
          }
          cx.emit(AgentPanelEvent::EntryChanged);
-@@ -2326,14 +2608,26 @@ impl AgentPanel {
+@@ -2327,14 +2609,26 @@ impl AgentPanel {
          cx: &mut Context<Self>,
      ) {
          let was_active = self.active_terminal_id() == Some(terminal_id);
@@ -948,7 +933,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
          if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
              store.update(cx, |store, cx| {
                  store.delete(terminal_id, cx);
-@@ -2351,14 +2645,62 @@ impl AgentPanel {
+@@ -2352,14 +2646,62 @@ impl AgentPanel {
          cx.notify();
      }
  
@@ -1015,7 +1000,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
      }
  
      fn emit_terminal_thread_started(
-@@ -2398,6 +2740,79 @@ impl AgentPanel {
+@@ -2399,6 +2741,79 @@ impl AgentPanel {
          }
      }
  
@@ -1095,7 +1080,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
      fn persist_all_terminal_metadata(&self, cx: &mut Context<Self>) {
          let terminal_ids = self.terminals.keys().copied().collect::<Vec<_>>();
          for terminal_id in terminal_ids {
-@@ -2421,20 +2836,53 @@ impl AgentPanel {
+@@ -2422,20 +2837,53 @@ impl AgentPanel {
          &self,
          terminal_id: TerminalId,
          cx: &App,
@@ -1151,7 +1136,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
      pub fn restore_terminal(
          &mut self,
          metadata: TerminalThreadMetadata,
-@@ -2444,12 +2892,68 @@ impl AgentPanel {
+@@ -2445,12 +2893,68 @@ impl AgentPanel {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
@@ -1222,7 +1207,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
              return;
          }
  
-@@ -2461,7 +2965,7 @@ impl AgentPanel {
+@@ -2462,7 +2966,7 @@ impl AgentPanel {
              metadata.custom_title.clone(),
              initial_title,
              Some(metadata.created_at),
@@ -1231,7 +1216,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
              focus,
              true,
              source,
-@@ -2479,12 +2983,15 @@ impl AgentPanel {
+@@ -2480,12 +2984,15 @@ impl AgentPanel {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
@@ -1253,7 +1238,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
      }
  
      fn terminal_restore_working_directory(
-@@ -2796,9 +3303,7 @@ impl AgentPanel {
+@@ -2797,9 +3304,7 @@ impl AgentPanel {
                  AgentPanelEvent::ActiveViewChanged | AgentPanelEvent::ActiveViewFocused => {
                      this.dismiss_terminal_pop_up_if_visible(terminal_id, &pop_up_weak, window, cx);
                  }
@@ -1264,7 +1249,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
              }
          });
  
-@@ -4346,6 +4851,10 @@ impl AgentPanel {
+@@ -4347,6 +4852,10 @@ impl AgentPanel {
          cx: &mut Context<Self>,
      ) {
          let old_view = std::mem::replace(&mut self.base_view, new_view);
@@ -1275,7 +1260,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
          self.retain_running_thread(old_view, cx);
  
          if let BaseView::AgentThread { conversation_view } = &self.base_view {
-@@ -5030,7 +5539,6 @@ pub enum AgentPanelEvent {
+@@ -5031,7 +5540,6 @@ pub enum AgentPanelEvent {
      ActiveViewChanged,
      ActiveViewFocused,
      EntryChanged,
@@ -1283,7 +1268,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
      ThreadInteracted { thread_id: ThreadId },
  }
  
-@@ -5168,15 +5676,25 @@ impl Panel for AgentPanel {
+@@ -5169,15 +5677,25 @@ impl Panel for AgentPanel {
  impl AgentPanel {
      fn ensure_thread_initialized(&mut self, window: &mut Window, cx: &mut Context<Self>) {
          if matches!(self.base_view, BaseView::Uninitialized) {
@@ -1312,7 +1297,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
                          && this.should_create_terminal_for_new_entry(cx)
                      {
                          this.create_initial_terminal(
-@@ -5185,8 +5703,8 @@ impl AgentPanel {
+@@ -5186,8 +5704,8 @@ impl AgentPanel {
                              window,
                              cx,
                          );
@@ -1323,7 +1308,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
                      }
                  });
              } else {
-@@ -5203,9 +5721,7 @@ impl AgentPanel {
+@@ -5204,9 +5722,7 @@ impl AgentPanel {
          cx: &mut Context<Self>,
      ) {
          if !self.supports_terminal(cx) {
@@ -1334,7 +1319,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
              return;
          }
          let working_directory = self.terminal_working_directory(None, cx);
-@@ -5227,7 +5743,7 @@ impl AgentPanel {
+@@ -5228,7 +5744,7 @@ impl AgentPanel {
              None,
              None,
              None,
@@ -1343,7 +1328,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
              false,
              true,
              source,
-@@ -5259,10 +5775,8 @@ impl AgentPanel {
+@@ -5260,10 +5776,8 @@ impl AgentPanel {
              cx,
          ) {
              log::error!("failed to spawn test agent panel terminal: {error:#}");
@@ -1356,7 +1341,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
          }
      }
  
-@@ -6581,6 +7095,16 @@ impl AgentPanel {
+@@ -6582,6 +7096,16 @@ impl AgentPanel {
          });
      }
  
@@ -1373,7 +1358,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
      fn handle_dragged_terminal_tab(
          &mut self,
          tab: &DraggedTab,
-@@ -6609,6 +7133,11 @@ impl AgentPanel {
+@@ -6610,6 +7134,11 @@ impl AgentPanel {
              return true;
          }
  
@@ -1385,7 +1370,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
          let (working_directory, custom_title, initial_title) = {
              let terminal_view = terminal_view.read(cx);
              let working_directory = terminal_view.terminal().read(cx).working_directory();
-@@ -6637,7 +7166,8 @@ impl AgentPanel {
+@@ -6638,7 +7167,8 @@ impl AgentPanel {
              custom_title,
              initial_title,
              None,
@@ -1395,7 +1380,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
              true,
              AgentThreadSource::AgentPanel,
              window,
-@@ -6769,6 +7299,9 @@ impl Render for AgentPanel {
+@@ -6770,6 +7300,9 @@ impl Render for AgentPanel {
                          .active_terminal_id()
                          .and_then(|terminal_id| self.terminals.get(&terminal_id))
                          .and_then(|terminal| terminal.search_bar.clone());
@@ -1405,7 +1390,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
                      let terminal_content = v_flex()
                          .size_full()
                          .when_some(search_bar, |this, search_bar| {
-@@ -6788,7 +7321,20 @@ impl Render for AgentPanel {
+@@ -6789,7 +7322,20 @@ impl Render for AgentPanel {
                                  )
                              })
                          })
@@ -1427,7 +1412,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
  
                      parent
                          .child(terminal_content)
-@@ -7003,21 +7549,6 @@ impl AgentPanel {
+@@ -7004,21 +7550,6 @@ impl AgentPanel {
          )
      }
  
@@ -1449,7 +1434,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
      #[cfg(any(test, feature = "test-support"))]
      fn insert_display_only_terminal(
          &mut self,
-@@ -7055,7 +7586,12 @@ impl AgentPanel {
+@@ -7056,7 +7587,12 @@ impl AgentPanel {
              custom_title,
              initial_title,
              created_at,
@@ -1463,7 +1448,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
              focus,
              source,
              window,
-@@ -7080,7 +7616,7 @@ impl AgentPanel {
+@@ -7081,7 +7617,7 @@ impl AgentPanel {
      }
  
      #[cfg(any(test, feature = "test-support"))]
@@ -1472,7 +1457,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
          let Some(terminal_entity) = self
              .terminals
              .get(&terminal_id)
-@@ -7089,6 +7625,7 @@ impl AgentPanel {
+@@ -7090,6 +7626,7 @@ impl AgentPanel {
              return;
          };
          terminal_entity.update(cx, |_terminal, cx| {
@@ -1480,7 +1465,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
              cx.emit(TerminalEvent::CloseTerminal);
          });
      }
-@@ -7108,9 +7645,12 @@ mod tests {
+@@ -7110,9 +7647,12 @@ mod tests {
      use anyhow::{Result, anyhow};
      use feature_flags::FeatureFlagAppExt;
      use fs::FakeFs;
@@ -1494,7 +1479,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
      use settings::{SettingsStore, WorkingDirectory};
      use std::any::Any;
  
-@@ -7697,6 +8237,7 @@ mod tests {
+@@ -7701,6 +8241,7 @@ mod tests {
          fs.insert_tree("/project", json!({ "file.txt": "" })).await;
          cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
          let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
@@ -1502,7 +1487,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
  
          let multi_workspace =
              cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-@@ -7845,7 +8386,7 @@ mod tests {
+@@ -7849,7 +8390,7 @@ mod tests {
  
          panel.update_in(&mut cx, |panel, window, cx| {
              panel.last_created_entry_kind = AgentPanelEntryKind::Terminal;
@@ -1511,7 +1496,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
              panel.set_active(true, window, cx);
          });
          for _ in 0..4 {
-@@ -7893,6 +8434,8 @@ mod tests {
+@@ -7897,6 +8438,8 @@ mod tests {
      #[gpui::test]
      async fn test_new_terminal_prevents_initial_terminal_creation(cx: &mut TestAppContext) {
          let (panel, mut cx) = setup_panel(cx).await;
@@ -1520,7 +1505,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
  
          let (terminal_landed, spawn_gate) = futures::channel::oneshot::channel::<()>();
  
-@@ -7904,7 +8447,7 @@ mod tests {
+@@ -7908,7 +8451,7 @@ mod tests {
              panel.test_terminal_spawn_gate = Some(spawn_gate);
              panel.new_terminal(None, AgentThreadSource::AgentPanel, window, cx);
              assert!(
@@ -1529,7 +1514,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
                  "a new terminal spawn should be marked pending until it lands"
              );
              panel.set_active(true, window, cx);
-@@ -7917,7 +8460,7 @@ mod tests {
+@@ -7921,7 +8464,7 @@ mod tests {
                  "no terminal should land while the spawn is held"
              );
              assert!(
@@ -1538,7 +1523,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
                  "the in-flight spawn should still be pending after activation"
              );
          });
-@@ -7940,7 +8483,7 @@ mod tests {
+@@ -7944,7 +8487,7 @@ mod tests {
                  "the terminal that was spawned should be the active one"
              );
              assert!(
@@ -1547,7 +1532,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
                  "the pending marker should be cleared once the terminal lands"
              );
          });
-@@ -8052,7 +8595,7 @@ mod tests {
+@@ -8056,7 +8599,7 @@ mod tests {
                  None,
                  None,
                  None,
@@ -1556,7 +1541,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
                  true,
                  true,
                  AgentThreadSource::AgentPanel,
-@@ -8179,7 +8722,9 @@ mod tests {
+@@ -8183,7 +8726,9 @@ mod tests {
          cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
  
          let project_a = Project::test(fs.clone(), [Path::new("/project-a")], cx).await;
@@ -1566,7 +1551,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
          let multi_workspace =
              cx.add_window(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
          let multi_workspace_entity = multi_workspace.root(cx).unwrap();
-@@ -10166,6 +10711,262 @@ mod tests {
+@@ -10170,6 +10715,262 @@ mod tests {
          });
      }
  
@@ -1829,7 +1814,7 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
      #[gpui::test]
      async fn test_external_file_drop_on_thread_does_not_paste_into_later_terminal(
          cx: &mut TestAppContext,
-@@ -14866,4 +15667,2315 @@ mod tests {
+@@ -14912,4 +15713,2315 @@ mod tests {
              );
          });
      }
@@ -4146,10 +4131,10 @@ index 03384589c293393a7a5678a6087958124f8549a5..c8680513b5508a098d3c3cdb1362a946
 +    }
  }
 diff --git a/crates/agent_ui/src/conversation_view.rs b/crates/agent_ui/src/conversation_view.rs
-index e14b7a6d1c9db9158ea14c341f93292bc3af5fd2..143e17053530ee359abffca6227793da08439baa 100644
+index cc08fef2fa..9c4795e43a 100644
 --- a/crates/agent_ui/src/conversation_view.rs
 +++ b/crates/agent_ui/src/conversation_view.rs
-@@ -3390,7 +3390,6 @@ impl ConversationView {
+@@ -3658,7 +3658,6 @@ impl ConversationView {
                              dismiss_if_visible(this, window, cx);
                          }
                          AgentPanelEvent::EntryChanged
@@ -4158,7 +4143,7 @@ index e14b7a6d1c9db9158ea14c341f93292bc3af5fd2..143e17053530ee359abffca6227793da
                      },
                  ));
 diff --git a/crates/agent_ui/src/terminal_thread_metadata_store.rs b/crates/agent_ui/src/terminal_thread_metadata_store.rs
-index 528f2e23e83739deb951e4aaa34e4d7fa4518f41..7c4f72c5dc17305066964f6d93efb9c4b4e45506 100644
+index 528f2e23e8..7c4f72c5dc 100644
 --- a/crates/agent_ui/src/terminal_thread_metadata_store.rs
 +++ b/crates/agent_ui/src/terminal_thread_metadata_store.rs
 @@ -162,6 +162,7 @@ pub struct TerminalThreadMetadataStore {
@@ -4653,7 +4638,7 @@ index 528f2e23e83739deb951e4aaa34e4d7fa4518f41..7c4f72c5dc17305066964f6d93efb9c4
 +    }
  }
 diff --git a/crates/project/src/project.rs b/crates/project/src/project.rs
-index b85cf191e029a2123e111b1e646378c1b29eac56..197db63dcf651193a11ede3a8090cc063ecc66a7 100644
+index 5235a3efe9..14355c9255 100644
 --- a/crates/project/src/project.rs
 +++ b/crates/project/src/project.rs
 @@ -20,6 +20,8 @@ pub mod task_inventory;
@@ -4665,7 +4650,7 @@ index b85cf191e029a2123e111b1e646378c1b29eac56..197db63dcf651193a11ede3a8090cc06
  pub mod toolchain_store;
  pub mod trusted_worktrees;
  pub mod worktree_store;
-@@ -244,6 +246,8 @@ pub struct Project {
+@@ -247,6 +249,8 @@ pub struct Project {
      git_diff_debouncer: DebouncedDelay<Self>,
      remotely_created_models: Arc<Mutex<RemotelyCreatedModels>>,
      terminals: Terminals,
@@ -4674,7 +4659,7 @@ index b85cf191e029a2123e111b1e646378c1b29eac56..197db63dcf651193a11ede3a8090cc06
      node: Option<NodeRuntime>,
      search_history: SearchHistory,
      search_included_history: SearchHistory,
-@@ -1405,6 +1409,8 @@ impl Project {
+@@ -1472,6 +1476,8 @@ impl Project {
                  terminals: Terminals {
                      local_handles: Vec::new(),
                  },
@@ -4683,7 +4668,7 @@ index b85cf191e029a2123e111b1e646378c1b29eac56..197db63dcf651193a11ede3a8090cc06
                  node: Some(node),
                  search_history: Self::new_search_history(),
                  environment,
-@@ -1649,6 +1655,8 @@ impl Project {
+@@ -1716,6 +1722,8 @@ impl Project {
                  terminals: Terminals {
                      local_handles: Vec::new(),
                  },
@@ -4692,7 +4677,7 @@ index b85cf191e029a2123e111b1e646378c1b29eac56..197db63dcf651193a11ede3a8090cc06
                  node: Some(node),
                  search_history: Self::new_search_history(),
                  environment,
-@@ -1942,6 +1950,8 @@ impl Project {
+@@ -2009,6 +2017,8 @@ impl Project {
                  terminals: Terminals {
                      local_handles: Vec::new(),
                  },
@@ -4701,7 +4686,7 @@ index b85cf191e029a2123e111b1e646378c1b29eac56..197db63dcf651193a11ede3a8090cc06
                  node: None,
                  search_history: Self::new_search_history(),
                  search_included_history: Self::new_search_history(),
-@@ -2119,6 +2129,49 @@ impl Project {
+@@ -2186,6 +2196,49 @@ impl Project {
          Self::test_project(fs, root_paths, true, cx).await
      }
  
@@ -4751,7 +4736,7 @@ index b85cf191e029a2123e111b1e646378c1b29eac56..197db63dcf651193a11ede3a8090cc06
      #[cfg(feature = "test-support")]
      async fn test_project(
          fs: Arc<dyn Fs>,
-@@ -3913,6 +3966,10 @@ impl Project {
+@@ -3986,6 +4039,10 @@ impl Project {
          }
      }
  
@@ -4763,7 +4748,7 @@ index b85cf191e029a2123e111b1e646378c1b29eac56..197db63dcf651193a11ede3a8090cc06
          &mut self,
          _: Entity<SettingsObserver>,
 diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
-index c9406078c9d7c47144d3e07d75749384f54117e0..6ae37867cd64905c64ba8498475dc61931ec8895 100644
+index c9406078c9..6ae37867cd 100644
 --- a/crates/project/src/terminals.rs
 +++ b/crates/project/src/terminals.rs
 @@ -16,7 +16,7 @@ use std::{
@@ -6047,12 +6032,12 @@ index c9406078c9d7c47144d3e07d75749384f54117e0..6ae37867cd64905c64ba8498475dc619
 +    }
  }
 diff --git a/crates/remote/src/remote_client.rs b/crates/remote/src/remote_client.rs
-index c645a31d1297d6f5076e809735f49fcb1c6d938b..4dd7cc2135b44fc15949dd2c0d0a33a7ce0038f6 100644
+index 70c70537e5..c5ed18535f 100644
 --- a/crates/remote/src/remote_client.rs
 +++ b/crates/remote/src/remote_client.rs
-@@ -163,7 +163,11 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
- const INITIAL_CONNECTION_TIMEOUT: Duration =
-     Duration::from_secs(if cfg!(debug_assertions) { 5 } else { 60 });
+@@ -167,7 +167,11 @@ const RECONNECT_HANDSHAKE_TIMEOUT: Duration =
+     Duration::from_secs(if cfg!(debug_assertions) { 5 } else { 15 });
+ const RESYNC_TIMEOUT: Duration = Duration::from_secs(if cfg!(debug_assertions) { 5 } else { 15 });
  
 -pub const MAX_RECONNECT_ATTEMPTS: usize = 3;
 +pub const MAX_RECONNECT_ATTEMPTS: usize = 10;
@@ -6063,7 +6048,7 @@ index c645a31d1297d6f5076e809735f49fcb1c6d938b..4dd7cc2135b44fc15949dd2c0d0a33a7
  
  enum State {
      Connecting,
-@@ -667,6 +671,12 @@ impl RemoteClient {
+@@ -671,6 +675,12 @@ impl RemoteClient {
                  };
              }
  
@@ -6076,10 +6061,210 @@ index c645a31d1297d6f5076e809735f49fcb1c6d938b..4dd7cc2135b44fc15949dd2c0d0a33a7
              if let Err(error) = remote_connection
                  .kill()
                  .await
-@@ -1590,6 +1600,194 @@ mod tests {
- 
-         assert_eq!(options.host(), "1.2.3.4");
+@@ -1415,6 +1425,396 @@ impl RemoteConnectionOptions {
      }
+ }
+ 
++#[cfg(test)]
++mod downstream_tests {
++    use super::*;
++    use gpui::TestAppContext;
++    use rpc::{ErrorCodeExt, proto::ErrorCode};
++
++    #[test]
++    fn test_ssh_display_name_prefers_nickname() {
++        let options = RemoteConnectionOptions::Ssh(SshConnectionOptions {
++            host: "1.2.3.4".into(),
++            nickname: Some("My Cool Project".to_string()),
++            ..Default::default()
++        });
++
++        assert_eq!(options.display_name(), "My Cool Project");
++    }
++
++    #[test]
++    fn test_ssh_display_name_falls_back_to_host() {
++        let options = RemoteConnectionOptions::Ssh(SshConnectionOptions {
++            host: "1.2.3.4".into(),
++            ..Default::default()
++        });
++
++        assert_eq!(options.display_name(), "1.2.3.4");
++    }
++
++    #[test]
++    fn test_connection_type() {
++        assert_eq!(
++            RemoteConnectionOptions::Ssh(SshConnectionOptions::default()).connection_type(),
++            "ssh"
++        );
++        assert_eq!(
++            RemoteConnectionOptions::Wsl(WslConnectionOptions {
++                distro_name: "Ubuntu".to_string(),
++                user: None,
++            })
++            .connection_type(),
++            "wsl"
++        );
++        assert_eq!(
++            RemoteConnectionOptions::Docker(DockerConnectionOptions {
++                use_podman: false,
++                ..Default::default()
++            })
++            .connection_type(),
++            "docker"
++        );
++        assert_eq!(
++            RemoteConnectionOptions::Docker(DockerConnectionOptions {
++                use_podman: true,
++                ..Default::default()
++            })
++            .connection_type(),
++            "podman"
++        );
++    }
++
++    #[gpui::test]
++    async fn test_channel_client_request_stream_terminates_on_error(cx: &mut TestAppContext) {
++        let (incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
++        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded::<Envelope>();
++
++        let client =
++            cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test-client", false));
++
++        // The client sends RemoteStarted on startup; drain the outgoing channel
++        // so it doesn't block.
++        let _drain_outgoing = cx
++            .executor()
++            .spawn(async move { while outgoing_rx.next().await.is_some() {} });
++
++        let mut stream = client
++            .request_stream_dynamic(proto::Test { id: 0 }.into_envelope(0, None, None), "Test")
++            .await
++            .unwrap();
++
++        let request_id = 0;
++
++        incoming_tx
++            .unbounded_send(proto::Test { id: 1 }.into_envelope(100, Some(request_id), None))
++            .unwrap();
++
++        let first = stream.next().await.unwrap().unwrap();
++        assert_eq!(
++            proto::Test::from_envelope(first).unwrap(),
++            proto::Test { id: 1 }
++        );
++
++        // Send an Error without a trailing EndStream. The Error alone should
++        // terminate the stream.
++        incoming_tx
++            .unbounded_send(
++                ErrorCode::Internal
++                    .message("boom".to_string())
++                    .to_proto()
++                    .into_envelope(101, Some(request_id), None),
++            )
++            .unwrap();
++
++        let second = stream.next().await.unwrap();
++        let error = second.unwrap_err();
++        assert!(
++            format!("{error}").contains("boom"),
++            "expected error to surface server message, got: {error}"
++        );
++
++        assert!(stream.next().await.is_none());
++        assert_eq!(client.stream_response_channels.lock().len(), 0);
++    }
++
++    #[gpui::test]
++    async fn test_channel_client_dropping_stream_request_before_response_cleans_up_channel(
++        cx: &mut TestAppContext,
++    ) {
++        let (_incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
++        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded::<Envelope>();
++
++        let client =
++            cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test-client", false));
++
++        let _drain_outgoing = cx
++            .executor()
++            .spawn(async move { while outgoing_rx.next().await.is_some() {} });
++
++        let stream = client
++            .request_stream_dynamic(proto::Test { id: 0 }.into_envelope(0, None, None), "Test")
++            .await
++            .unwrap();
++
++        assert_eq!(client.stream_response_channels.lock().len(), 1);
++
++        drop(stream);
++        cx.run_until_parked();
++
++        assert_eq!(
++            client.stream_response_channels.lock().len(),
++            0,
++            "dropping a stream before any responses arrive should remove response channel bookkeeping"
++        );
++    }
++
++    #[gpui::test]
++    async fn test_channel_client_dropping_stream_request_before_completion(
++        cx: &mut TestAppContext,
++    ) {
++        let (incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
++        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded::<Envelope>();
++
++        let client =
++            cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test-client", false));
++
++        let _drain_outgoing = cx
++            .executor()
++            .spawn(async move { while outgoing_rx.next().await.is_some() {} });
++
++        let mut stream = client
++            .request_stream_dynamic(proto::Test { id: 0 }.into_envelope(0, None, None), "Test")
++            .await
++            .unwrap();
++
++        let request_id = 0;
++
++        incoming_tx
++            .unbounded_send(proto::Test { id: 1 }.into_envelope(100, Some(request_id), None))
++            .unwrap();
++        let _ = stream.next().await.unwrap().unwrap();
++
++        assert_eq!(client.stream_response_channels.lock().len(), 1);
++
++        drop(stream);
++
++        // Inject an orphaned non-terminal response. The read loop should detect
++        // that the consumer has been dropped and clean up its bookkeeping (no
++        // EndStream sent here on purpose, otherwise the cleanup would happen
++        // via the terminal-response path and mask the bug under test).
++        incoming_tx
++            .unbounded_send(proto::Test { id: 2 }.into_envelope(101, Some(request_id), None))
++            .unwrap();
++
++        cx.run_until_parked();
++
++        assert_eq!(
++            client.stream_response_channels.lock().len(),
++            0,
++            "stream channel should be removed once the consumer has dropped the stream"
++        );
++    }
++
++    #[test]
++    fn test_ssh_host_ignores_nickname() {
++        let options = RemoteConnectionOptions::Ssh(SshConnectionOptions {
++            host: "1.2.3.4".into(),
++            nickname: Some("My Cool Project".to_string()),
++            ..Default::default()
++        });
++
++        assert_eq!(options.host(), "1.2.3.4");
++    }
 +
 +    struct TestDummyConnection(pub Option<RemoteConnectionOptions>);
 +    #[async_trait::async_trait(?Send)]
@@ -6268,11 +6453,13 @@ index c645a31d1297d6f5076e809735f49fcb1c6d938b..4dd7cc2135b44fc15949dd2c0d0a33a7
 +            );
 +        });
 +    }
- }
- 
++}
++
  impl From<SshConnectionOptions> for RemoteConnectionOptions {
+     fn from(opts: SshConnectionOptions) -> Self {
+         RemoteConnectionOptions::Ssh(opts)
 diff --git a/crates/sidebar/Cargo.toml b/crates/sidebar/Cargo.toml
-index 6d4b5b8e320ca2c55f1ff27ef90879c89df1049a..bfc663120e4ea6145729adaa96452051a0ed0ff9 100644
+index 6d4b5b8e32..bfc663120e 100644
 --- a/crates/sidebar/Cargo.toml
 +++ b/crates/sidebar/Cargo.toml
 @@ -80,4 +80,6 @@ remote = { workspace = true, features = ["test-support"] }
@@ -6283,7 +6470,7 @@ index 6d4b5b8e320ca2c55f1ff27ef90879c89df1049a..bfc663120e4ea6145729adaa96452051
 +terminal_view.workspace = true
  workspace = { workspace = true, features = ["test-support"] }
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 77b783e606ee0d90714532bec0f16fc333487ead..2bca37b38109650e891e0b416bf74ef0d9095c94 100644
+index 4cd953484c..69cc1c1611 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -1086,10 +1086,10 @@ impl Sidebar {
@@ -6430,7 +6617,7 @@ index 77b783e606ee0d90714532bec0f16fc333487ead..2bca37b38109650e891e0b416bf74ef0
  
          self.start_detached_archive_worktree_task(roots_to_archive, cx);
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index de25aa92ca840b879a0325620c91e900537e4f58..283219fa3325cb33c67455d7b43f0cc50165820b 100644
+index 4574cf49b8..35eae977d1 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
 @@ -26,6 +26,29 @@ use std::{
@@ -6846,7 +7033,7 @@ index de25aa92ca840b879a0325620c91e900537e4f58..283219fa3325cb33c67455d7b43f0cc5
  }
  
  #[gpui::test]
-@@ -4421,6 +4599,95 @@ async fn test_closing_active_agent_panel_terminal_activates_neighbor(cx: &mut Te
+@@ -4522,6 +4700,95 @@ async fn test_closing_active_agent_panel_terminal_activates_neighbor(cx: &mut Te
      );
  }
  
@@ -6943,7 +7130,7 @@ index de25aa92ca840b879a0325620c91e900537e4f58..283219fa3325cb33c67455d7b43f0cc5
  async fn test_parallel_threads_shown_with_live_status(cx: &mut TestAppContext) {
      let project = init_test_project_with_agent_panel("/my-project", cx).await;
 diff --git a/crates/terminal/src/terminal.rs b/crates/terminal/src/terminal.rs
-index aee760ec582fdd80fcd0f9dcb821cdfd7fab5d96..3f74bb998e909af5e8d89f4c3bfa240c8e66addb 100644
+index 141a9224f1..bca7acd45c 100644
 --- a/crates/terminal/src/terminal.rs
 +++ b/crates/terminal/src/terminal.rs
 @@ -670,6 +670,8 @@ pub enum Event {
@@ -7219,7 +7406,7 @@ index aee760ec582fdd80fcd0f9dcb821cdfd7fab5d96..3f74bb998e909af5e8d89f4c3bfa240c
      /// Write the Input payload to the PTY, if applicable.
      /// (This is a no-op for display-only terminals.)
      fn write_to_pty(&self, input: impl Into<Cow<'static, [u8]>>) {
-@@ -3210,6 +3352,15 @@ impl Terminal {
+@@ -3201,6 +3343,15 @@ impl Terminal {
          Task::ready(None)
      }
  
@@ -7235,7 +7422,7 @@ index aee760ec582fdd80fcd0f9dcb821cdfd7fab5d96..3f74bb998e909af5e8d89f4c3bfa240c
      fn register_task_finished(
          &mut self,
          exit_status: Option<ExitStatus>,
-@@ -3218,8 +3369,12 @@ impl Terminal {
+@@ -3209,8 +3360,12 @@ impl Terminal {
          if let Some(tx) = &self.completion_tx {
              tx.try_send(exit_status).ok();
          }
@@ -7250,7 +7437,7 @@ index aee760ec582fdd80fcd0f9dcb821cdfd7fab5d96..3f74bb998e909af5e8d89f4c3bfa240c
          }
          self.complete_init_command_startup_handshake();
          let task = match &mut self.task {
-@@ -3305,6 +3460,7 @@ impl Terminal {
+@@ -3296,6 +3451,7 @@ impl Terminal {
              cx,
              self.activation_script.clone(),
              self.path_style,
@@ -7258,7 +7445,7 @@ index aee760ec582fdd80fcd0f9dcb821cdfd7fab5d96..3f74bb998e909af5e8d89f4c3bfa240c
          )
      }
  }
-@@ -3846,6 +4002,7 @@ mod tests {
+@@ -3837,6 +3993,7 @@ mod tests {
                      cx,
                      vec![],
                      PathStyle::local(),
@@ -7266,7 +7453,7 @@ index aee760ec582fdd80fcd0f9dcb821cdfd7fab5d96..3f74bb998e909af5e8d89f4c3bfa240c
                  )
              })
              .await
-@@ -3890,6 +4047,7 @@ mod tests {
+@@ -3881,6 +4038,7 @@ mod tests {
                      cx,
                      vec![],
                      PathStyle::local(),
@@ -7274,7 +7461,7 @@ index aee760ec582fdd80fcd0f9dcb821cdfd7fab5d96..3f74bb998e909af5e8d89f4c3bfa240c
                  )
              })
              .await
-@@ -4374,6 +4532,7 @@ mod tests {
+@@ -4365,6 +4523,7 @@ mod tests {
                      cx,
                      Vec::new(),
                      PathStyle::local(),
@@ -7282,7 +7469,7 @@ index aee760ec582fdd80fcd0f9dcb821cdfd7fab5d96..3f74bb998e909af5e8d89f4c3bfa240c
                  )
              })
              .await
-@@ -4441,6 +4600,7 @@ mod tests {
+@@ -4432,6 +4591,7 @@ mod tests {
                      cx,
                      Vec::new(),
                      PathStyle::local(),
@@ -7290,7 +7477,7 @@ index aee760ec582fdd80fcd0f9dcb821cdfd7fab5d96..3f74bb998e909af5e8d89f4c3bfa240c
                  )
              })
              .await
-@@ -4506,6 +4666,7 @@ mod tests {
+@@ -4497,6 +4657,7 @@ mod tests {
                      cx,
                      Vec::new(),
                      PathStyle::local(),
@@ -7298,7 +7485,7 @@ index aee760ec582fdd80fcd0f9dcb821cdfd7fab5d96..3f74bb998e909af5e8d89f4c3bfa240c
                  )
              })
              .await
-@@ -6469,4 +6630,312 @@ mod tests {
+@@ -6460,4 +6621,312 @@ mod tests {
          assert!(terminal.cwd_history.is_empty());
          assert_eq!(terminal.pending_cwd_boundary, None);
      }
@@ -7612,10 +7799,10 @@ index aee760ec582fdd80fcd0f9dcb821cdfd7fab5d96..3f74bb998e909af5e8d89f4c3bfa240c
 +    }
  }
 diff --git a/crates/terminal_view/src/terminal_view.rs b/crates/terminal_view/src/terminal_view.rs
-index 223c5fa60750922f654cf898dddab94b16423132..28a68047605d5db0113227d39fa068245e3bd8eb 100644
+index 49a319d8d8..117e705252 100644
 --- a/crates/terminal_view/src/terminal_view.rs
 +++ b/crates/terminal_view/src/terminal_view.rs
-@@ -1310,6 +1310,7 @@ fn subscribe_for_terminal_events(
+@@ -1332,6 +1332,7 @@ fn subscribe_for_terminal_events(
                      ),
                  },
                  Event::BreadcrumbsChanged => cx.emit(ItemEvent::UpdateBreadcrumbs),
@@ -7623,6 +7810,3 @@ index 223c5fa60750922f654cf898dddab94b16423132..28a68047605d5db0113227d39fa06824
                  Event::CloseTerminal => cx.emit(ItemEvent::CloseItem),
                  Event::SelectionsChanged => {
                      window.invalidate_character_coordinates();
--- 
-2.55.0
-

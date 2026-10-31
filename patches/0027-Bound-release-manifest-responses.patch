@@ -1,17 +1,14 @@
-From e62e7152752866b020da48f3384c6bdfc4907fd0 Mon Sep 17 00:00:00 2001
+From 71b24aa41d0bf6837c8cf23346f1a86edeb008d9 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex-repair@localhost>
 Date: Sun, 18 Oct 2026 02:00:00 +0000
-Subject: [PATCH] Bound release manifest responses
+Subject: [PATCH 27/90] Bound release manifest responses
 
----
- crates/auto_update/src/auto_update.rs | 39 ++++++++++++++++++++++++++-
- 1 file changed, 38 insertions(+), 1 deletion(-)
 
 diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs
-index 80c6250..62588e8 100644
+index 324b80a57e..7bb8413376 100644
 --- a/crates/auto_update/src/auto_update.rs
 +++ b/crates/auto_update/src/auto_update.rs
-@@ -1284,6 +1284,8 @@ fn validate_fork_release(
+@@ -1291,6 +1291,8 @@ fn validate_fork_release(
      Ok(version)
  }
  
@@ -20,7 +17,7 @@ index 80c6250..62588e8 100644
  async fn fetch_release_json<T: DeserializeOwned>(
      client: &HttpClientWithUrl,
      url: &str,
-@@ -1291,8 +1293,18 @@ async fn fetch_release_json<T: DeserializeOwned>(
+@@ -1298,8 +1300,18 @@ async fn fetch_release_json<T: DeserializeOwned>(
  ) -> Result<T> {
      let mut response = client.get(url, Default::default(), true).await?;
      let mut body = Vec::new();
@@ -40,7 +37,7 @@ index 80c6250..62588e8 100644
      anyhow::ensure!(
          response.status().is_success(),
          "failed to fetch {}: {:?}",
-@@ -2449,6 +2461,31 @@ mod tests {
+@@ -2502,6 +2514,31 @@ mod tests {
          assert_eq!(std::fs::read_to_string(path).unwrap(), "<fake-zed-update>");
      }
  
@@ -72,6 +69,3 @@ index 80c6250..62588e8 100644
      #[gpui::test]
      async fn test_download_release_reports_progress(cx: &mut TestAppContext) {
          cx.background_executor.allow_parking();
--- 
-2.43.0
-

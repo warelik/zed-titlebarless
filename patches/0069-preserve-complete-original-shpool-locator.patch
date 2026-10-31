@@ -1,21 +1,17 @@
-From 63c7e65880345ce34ba73951f8db06a8daeec6dd Mon Sep 17 00:00:00 2001
+From 6ad2aa4944129a9039c99b3af9669b39fff4412f Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Mon, 19 Oct 2026 04:59:00 +0000
-Subject: [PATCH] Reject conflicting clients for an already pinned shpool
+Subject: [PATCH 68/90] Reject conflicting clients for an already pinned shpool
  session
 
 Compare the complete original locator at creation, metadata restoration and kill boundaries, retaining socket-only comparison solely for shared-daemon ownership. A new regression rejects a replacement client on the same socket without attachment, kill, or cache mutation.
----
- crates/agent_ui/src/agent_panel.rs | 21 ++++-----
- crates/project/src/terminals.rs    | 74 ++++++++++++++++++++++++------
- 2 files changed, 70 insertions(+), 25 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 1b412bc..22a64e8 100644
+index a973eddf0a..1fc9cb91c4 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -2290,9 +2290,10 @@ impl AgentPanel {
+@@ -2291,9 +2291,10 @@ impl AgentPanel {
              let result = terminal_task.await;
              let closed = cx.update(|cx| {
                  let store = TerminalThreadMetadataStore::try_global(cx);
@@ -29,7 +25,7 @@ index 1b412bc..22a64e8 100644
                  }
                  let context = recovery_metadata.shpool_context.clone();
                  if result.as_ref().is_ok_and(|terminal| terminal.session != PersistentSession::Unavailable) {
-@@ -2300,13 +2301,11 @@ impl AgentPanel {
+@@ -2301,13 +2302,11 @@ impl AgentPanel {
                          store.update(cx, |store, cx| store.retain_created_session(recovery_metadata, cx));
                      }
                  }
@@ -48,7 +44,7 @@ index 1b412bc..22a64e8 100644
                  }
                  let closed = this.update(cx, |this, cx| {
                      let closed = this.closed_terminal_spawns.remove(&terminal_id);
-@@ -2488,7 +2487,7 @@ impl AgentPanel {
+@@ -2489,7 +2488,7 @@ impl AgentPanel {
          let saved = TerminalThreadMetadataStore::try_global(cx)
              .and_then(|store| store.read(cx).entry(terminal_id).cloned());
          let stored_context = saved.as_ref().and_then(|metadata| metadata.shpool_context.clone());
@@ -58,7 +54,7 @@ index 1b412bc..22a64e8 100644
          }
          let context = stored_context.or(context);
 diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
-index 672645e..3bc30ac 100644
+index 672645e18e..3bc30ac79d 100644
 --- a/crates/project/src/terminals.rs
 +++ b/crates/project/src/terminals.rs
 @@ -738,10 +738,15 @@ impl Project {

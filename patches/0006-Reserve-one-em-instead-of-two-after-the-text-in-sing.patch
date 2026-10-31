@@ -1,7 +1,7 @@
-From 3aa188585a5c32a18a4fe33f649bd0ac594a25aa Mon Sep 17 00:00:00 2001
+From 747ff0c89a183e05a6b66ad38c21f61cfb72f701 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 22:31:38 +0300
-Subject: [PATCH 06/12] Reserve one em instead of two after the text in
+Subject: [PATCH 06/90] Reserve one em instead of two after the text in
  single-line editors
 
 Single-line editors have nothing to scroll past their end, yet they
@@ -11,15 +11,12 @@ One em still keeps the cursor visible.
 
 Editors in the other modes keep the two ems. This applies without a
 setting.
----
- crates/editor/src/element.rs | 9 ++++++++-
- 1 file changed, 8 insertions(+), 1 deletion(-)
 
 diff --git a/crates/editor/src/element.rs b/crates/editor/src/element.rs
-index 5482f08f7e590886c8581363dc898bfe23f7bec5..ed4955932832e340430ee2806b5a1cb221b0767f 100644
+index 295d9b3fc6..e7fb66609c 100644
 --- a/crates/editor/src/element.rs
 +++ b/crates/editor/src/element.rs
-@@ -8570,7 +8570,14 @@ impl Element for EditorElement {
+@@ -8637,7 +8637,14 @@ impl Element for EditorElement {
  
                      let right_margin = minimap_width + vertical_scrollbar_width;
  
@@ -35,6 +32,3 @@ index 5482f08f7e590886c8581363dc898bfe23f7bec5..ed4955932832e340430ee2806b5a1cb2
                      let editor_width = text_width - gutter_dimensions.margin - extended_right;
                      let editor_margins = EditorMargins {
                          gutter: gutter_dimensions,
--- 
-2.55.0
-

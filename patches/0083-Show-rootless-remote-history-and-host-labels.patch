@@ -1,22 +1,16 @@
-From cc6031e8e00230d8e1487b26e3d3bcb40bd64816 Mon Sep 17 00:00:00 2001
+From 8b21a665e8a97e9286603093f170fe069dfa4161 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 05:07:51 +0000
-Subject: [PATCH] Show remote group history and distinct host labels without
- open roots
+Subject: [PATCH 82/90] Show remote group history and distinct host labels
+ without open roots
 
----
- crates/project/src/project.rs       |  4 +++-
- crates/project/src/terminals.rs     |  3 +++
- crates/sidebar/src/sidebar.rs       |  8 +++----
- crates/sidebar/src/sidebar_tests.rs | 35 +++++++++++++++++++++++++++++
- 4 files changed, 45 insertions(+), 5 deletions(-)
 
 diff --git a/crates/project/src/project.rs b/crates/project/src/project.rs
-index 02438a1b0e..17ec27a98d 100644
+index 7610a1ccee..7aab0bab43 100644
 --- a/crates/project/src/project.rs
 +++ b/crates/project/src/project.rs
-@@ -6821,7 +6821,9 @@ impl ProjectGroupKey {
+@@ -6956,7 +6956,9 @@ impl ProjectGroupKey {
              }
          }
          if names.is_empty() {
@@ -42,7 +36,7 @@ index b346d21e75..2c441bcfc2 100644
  
  
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index a60264d506..46ab5ea103 100644
+index 21179eda72..f2f6339350 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -1490,9 +1490,10 @@ impl Sidebar {
@@ -68,10 +62,10 @@ index a60264d506..46ab5ea103 100644
          for workspace in &workspaces {
              if let Some(agent_panel) = workspace.read(cx).panel::<AgentPanel>(cx) {
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 193a88f40e..768e3b422f 100644
+index 173d69ca14..3c297cdbb9 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -17951,6 +17951,7 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
+@@ -18071,6 +18071,7 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
              assert!(multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&remote_workspace)));
              multi_workspace.read_with(cx, |mw, cx| mw.assert_project_group_key_integrity(cx).unwrap());
          }
@@ -79,7 +73,7 @@ index 193a88f40e..768e3b422f 100644
      }
      let local = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
      multi_workspace.update_in(cx, |mw, window, cx| {
-@@ -17968,6 +17969,40 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
+@@ -18088,6 +18089,40 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
      assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.entries.iter().any(|entry| {
          matches!(entry, ListEntry::ProjectHeader { key, .. } if key == &remote_key)
      })));

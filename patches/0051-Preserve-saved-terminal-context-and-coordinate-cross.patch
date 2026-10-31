@@ -1,18 +1,14 @@
-From 4b628cf78efbf3ccd03faf14cc5ef37157a31bac Mon Sep 17 00:00:00 2001
+From 5944f70b8ef64430bad95a41046f563a38b27dc0 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 21:25:54 +0000
-Subject: [PATCH] Preserve saved terminal context and coordinate cross-window
- closes
+Subject: [PATCH 51/90] Preserve saved terminal context and coordinate
+ cross-window closes
 
 Use saved root insertion order and require exact ordered roots before same-host reuse. Coordinate all live/pending owners under the existing global terminal-ID intent, wait every startup, kill once and remove only matching views in their own windows. Keep active workspaces and files. Cover ordered/different roots, missing context, live and pending cross-window owners; retain existing assertions with reachable saved-root fixture data.
----
- crates/sidebar/src/sidebar.rs       | 120 +++++++++++++++++-
- crates/sidebar/src/sidebar_tests.rs | 190 ++++++++++++++++++++++++++++
- 2 files changed, 308 insertions(+), 2 deletions(-)
 
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index c5870e0..30a6df4 100644
+index 6d56592e42..4158e4db58 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -5243,7 +5243,10 @@ impl Sidebar {
@@ -195,10 +191,10 @@ index c5870e0..30a6df4 100644
          &self,
          remote_connection: Option<&RemoteConnectionOptions>,
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index ec74fb5..faa61c6 100644
+index f3c39a5df1..45e11b0a1b 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -4782,6 +4782,8 @@ async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes
+@@ -4883,6 +4883,8 @@ async fn test_close_terminal_entry_on_closed_workspace_kills_session_and_deletes
      cx: &mut TestAppContext,
  ) {
      let main_project = init_test_project_with_agent_panel("/main-project", cx).await;
@@ -207,7 +203,7 @@ index ec74fb5..faa61c6 100644
      let fake = main_project.update(cx, |p, _| p.enable_fake_shpool(&[]));
      let (multi_workspace, cx) =
          cx.add_window_view(|window, cx| MultiWorkspace::test_new(main_project.clone(), window, cx));
-@@ -4871,6 +4873,8 @@ async fn test_successful_delayed_terminal_kill_deletes_metadata_after_sidebar_is
+@@ -4972,6 +4974,8 @@ async fn test_successful_delayed_terminal_kill_deletes_metadata_after_sidebar_is
      cx: &mut TestAppContext,
  ) {
      let main_project = init_test_project_with_agent_panel("/main-project", cx).await;
@@ -216,7 +212,7 @@ index ec74fb5..faa61c6 100644
      let fake = main_project.update(cx, |p, _| p.enable_fake_shpool(&[]));
      let (multi_workspace, cx) =
          cx.add_window_view(|window, cx| MultiWorkspace::test_new(main_project.clone(), window, cx));
-@@ -4968,6 +4972,8 @@ async fn test_successful_delayed_terminal_kill_deletes_metadata_after_sidebar_is
+@@ -5069,6 +5073,8 @@ async fn test_successful_delayed_terminal_kill_deletes_metadata_after_sidebar_is
  async fn test_timed_out_terminal_close_keeps_metadata_and_allows_retry(cx: &mut TestAppContext) {
      cx.executor().allow_parking();
      let project = init_test_project_with_agent_panel("/main-project", cx).await;
@@ -225,7 +221,7 @@ index ec74fb5..faa61c6 100644
      let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
      let (multi_workspace, cx) = cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
      let (sidebar, _panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
-@@ -4988,6 +4994,9 @@ async fn test_timed_out_terminal_close_keeps_metadata_and_allows_retry(cx: &mut
+@@ -5089,6 +5095,9 @@ async fn test_timed_out_terminal_close_keeps_metadata_and_allows_retry(cx: &mut
      });
      save_thread_metadata_with_main_paths("blocking-thread", "Blocking Thread", closed_paths, main_paths,
                                           chrono::Utc::now(), cx);
@@ -235,7 +231,7 @@ index ec74fb5..faa61c6 100644
      sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
      cx.run_until_parked();
      close_terminal_from_sidebar(&sidebar, terminal_id, cx);
-@@ -5027,6 +5036,8 @@ async fn test_failed_close_terminal_entry_retains_metadata_until_session_kill_su
+@@ -5128,6 +5137,8 @@ async fn test_failed_close_terminal_entry_retains_metadata_until_session_kill_su
      cx: &mut TestAppContext,
  ) {
      let main_project = init_test_project_with_agent_panel("/main-project", cx).await;
@@ -244,7 +240,7 @@ index ec74fb5..faa61c6 100644
      let fake = main_project.update(cx, |p, _| p.enable_fake_shpool(&[]));
      let (multi_workspace, cx) =
          cx.add_window_view(|window, cx| MultiWorkspace::test_new(main_project.clone(), window, cx));
-@@ -5134,6 +5145,185 @@ async fn test_failed_close_terminal_entry_retains_metadata_until_session_kill_su
+@@ -5235,6 +5246,185 @@ async fn test_failed_close_terminal_entry_retains_metadata_until_session_kill_su
      });
  }
  

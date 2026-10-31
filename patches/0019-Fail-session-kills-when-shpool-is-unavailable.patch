@@ -1,14 +1,11 @@
-From 0bc07e3e340eb7daebdc2706758cde34ac03fbba Mon Sep 17 00:00:00 2001
+From ffd2642747acd09a9ce5c51644aa4f5f0d02c0b9 Mon Sep 17 00:00:00 2001
 From: Codex Repair <codex-repair@example.invalid>
 Date: Sat, 17 Oct 2026 10:36:57 +0000
-Subject: [PATCH] Fail terminal session kills when shpool is unavailable
+Subject: [PATCH 19/90] Fail terminal session kills when shpool is unavailable
 
----
- crates/project/src/terminals.rs | 23 ++++++++++++++++-------
- 1 file changed, 16 insertions(+), 7 deletions(-)
 
 diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
-index 4a2b03c..621b401 100644
+index 4a2b03ca0d..621b401a97 100644
 --- a/crates/project/src/terminals.rs
 +++ b/crates/project/src/terminals.rs
 @@ -123,8 +123,8 @@ impl FakeShpoolStore {
@@ -78,6 +75,3 @@ index 4a2b03c..621b401 100644
      #[gpui::test]
      #[cfg(unix)]
      async fn test_shpool_probe_script_syntax_under_posix_sh(cx: &mut gpui::TestAppContext) {
--- 
-2.43.0
-

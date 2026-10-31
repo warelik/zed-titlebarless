@@ -1,17 +1,10 @@
-From 19b02b61bfcbf979aef6ec4e7dbcb4b06efdcc48 Mon Sep 17 00:00:00 2001
+From d7d3dc055b79b5467b486d54d389027af591b169 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 09:20:00 +0000
-Subject: [PATCH] Preserve terminal directory and reversible workspace close
- consent
+Subject: [PATCH 87/90] Preserve terminal directory and reversible workspace
+ close consent
 
----
- crates/project/src/terminals.rs               | 87 ++++++++++++++++---
- crates/sidebar/src/sidebar.rs                 |  6 +-
- crates/workspace/src/multi_workspace.rs       | 31 ++++---
- crates/workspace/src/multi_workspace_tests.rs | 21 +++--
- crates/workspace/src/workspace.rs             | 21 ++++-
- 5 files changed, 128 insertions(+), 38 deletions(-)
 
 diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
 index d60f5e1b8b..9f3c03299c 100644
@@ -174,7 +167,7 @@ index d60f5e1b8b..9f3c03299c 100644
      fn test_shpool_kill_ignores_only_requested_session_not_found() {
          assert!(Project::shpool_session_not_found(
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 53fdc61928..e194179d2d 100644
+index 79cefbeeb3..f72b144158 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -5679,7 +5679,7 @@ impl Sidebar {
@@ -198,7 +191,7 @@ index 53fdc61928..e194179d2d 100644
                      if !safe_to_stop {
                          gpui::AsyncApp::update(cx, |cx| complete_terminal_close_metadata(terminal_id, false, cx));
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index cac2ad12a1..759d835406 100644
+index bee8f1e4ca..4dcd707ed5 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -1905,14 +1905,14 @@ impl MultiWorkspace {
@@ -366,7 +359,7 @@ index 199ae9ddeb..a1fab56fd4 100644
                  let _ = release_rx.await;
                  Ok(true)
 diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
-index 3896df60f4..2e84b77eb9 100644
+index ab97b946f2..16ce5cb554 100644
 --- a/crates/workspace/src/workspace.rs
 +++ b/crates/workspace/src/workspace.rs
 @@ -3775,6 +3775,24 @@ impl Workspace {
@@ -404,5 +397,3 @@ index 3896df60f4..2e84b77eb9 100644
                  && !save_last_workspace
                  && save_result.as_ref().is_ok_and(|&res| res)
              {
--- 
-2.43.0

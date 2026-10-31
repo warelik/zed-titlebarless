@@ -533,6 +533,10 @@
     ],
     [
       "project",
+      "test_shpool_discovery_uses_requested_root_environment"
+    ],
+    [
+      "project",
       "test_shpool_kill_ignores_only_requested_session_not_found"
     ],
     [
@@ -554,6 +558,34 @@
     [
       "recent_projects",
       "test_remove_project_group_waits_for_close_consent"
+    ],
+    [
+      "remote",
+      "test_channel_client_dropping_stream_request_before_completion"
+    ],
+    [
+      "remote",
+      "test_channel_client_dropping_stream_request_before_response_cleans_up_channel"
+    ],
+    [
+      "remote",
+      "test_channel_client_request_stream_terminates_on_error"
+    ],
+    [
+      "remote",
+      "test_connection_type"
+    ],
+    [
+      "remote",
+      "test_ssh_display_name_falls_back_to_host"
+    ],
+    [
+      "remote",
+      "test_ssh_display_name_prefers_nickname"
+    ],
+    [
+      "remote",
+      "test_ssh_host_ignores_nickname"
     ],
     [
       "sidebar",
@@ -821,6 +853,10 @@
     ],
     [
       "terminal",
+      "test_session_owned_shell_does_not_report_client_cwd"
+    ],
+    [
+      "terminal",
       "test_task_exit_preserves_output_and_emits_only_its_hide_decision"
     ],
     [
@@ -906,14 +942,6 @@
     [
       "workspace",
       "test_workspace_close_keeps_edits_made_during_another_consent_prompt"
-    ],
-    [
-      "project",
-      "test_shpool_discovery_uses_requested_root_environment"
-    ],
-    [
-      "terminal",
-      "test_session_owned_shell_does_not_report_client_cwd"
     ]
   ]
 }

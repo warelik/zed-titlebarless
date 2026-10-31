@@ -1,19 +1,16 @@
-From 2183fbfba32563c12f5db86bc70d3e553c8ed4c9 Mon Sep 17 00:00:00 2001
+From c31e591d4cf7d8d351e0f900d3fc0ac168c7c802 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 11:05:00 +0000
-Subject: [PATCH] Initialize shared application state in cross-window sidebar
- regressions
+Subject: [PATCH 88/90] Initialize shared application state in cross-window
+ sidebar regressions
 
----
- crates/sidebar/src/sidebar_tests.rs | 47 +++++++++++++++++++++++------
- 1 file changed, 38 insertions(+), 9 deletions(-)
 
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 4ba3a68ed0..cff74beabb 100644
+index 755750e285..a45b930fc2 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -10064,14 +10064,26 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window(cx: &m
+@@ -10182,14 +10182,26 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window(cx: &m
      cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
  
      let project_a = project::Project::test(fs.clone(), ["/project-a".as_ref()], cx).await;
@@ -44,7 +41,7 @@ index 4ba3a68ed0..cff74beabb 100644
      let multi_workspace_b_entity = multi_workspace_b.root(cx).unwrap();
  
      let cx_b = &mut gpui::VisualTestContext::from_window(multi_workspace_b.into(), cx);
-@@ -10144,14 +10156,26 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window_with_t
+@@ -10262,14 +10274,26 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window_with_t
      cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
  
      let project_a = project::Project::test(fs.clone(), ["/project-a".as_ref()], cx).await;
@@ -75,7 +72,7 @@ index 4ba3a68ed0..cff74beabb 100644
      let multi_workspace_b_entity = multi_workspace_b.root(cx).unwrap();
  
      let cx_a = &mut gpui::VisualTestContext::from_window(multi_workspace_a.into(), cx);
-@@ -17913,6 +17937,8 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
+@@ -18033,6 +18057,8 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
      server_cx: &mut TestAppContext,
  ) {
      init_test(cx);
@@ -84,7 +81,7 @@ index 4ba3a68ed0..cff74beabb 100644
      let params = cx.update(workspace::AppState::test);
      cx.update(|cx| cx.update_global::<settings::SettingsStore, _>(|store, cx| {
          store.set_user_settings(
-@@ -17953,7 +17979,10 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
+@@ -18073,7 +18099,10 @@ async fn test_agent_panel_retains_rootless_remote_workspace(
          }
          assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.has_open_projects));
      }
@@ -96,5 +93,3 @@ index 4ba3a68ed0..cff74beabb 100644
      multi_workspace.update_in(cx, |mw, window, cx| {
          let workspace = cx.new(|cx| workspace::Workspace::new(None, local, params, window, cx));
          mw.activate(workspace, None, window, cx)
--- 
-2.43.0

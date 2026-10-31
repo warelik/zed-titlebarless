@@ -1,17 +1,14 @@
-From 8394cb7fa09d13d5676d394f305d62db2882d262 Mon Sep 17 00:00:00 2001
+From 4e1e669f384625605e64e852959b832dc7e2388e Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Mon, 19 Oct 2026 00:10:55 +0000
-Subject: [PATCH] Isolate mismatched saved terminal worktree pairs without
- adopting their context
+Subject: [PATCH 60/90] Isolate mismatched saved terminal worktree pairs
+ without adopting their context
 
 Propagate the existing WorktreePaths corruption error instead of turning it into a rootless terminal. Add a separate regression for both mismatch directions and empty/nonempty variants, preservation of all raw path fields despite an unrelated matching cwd, and recovery after repair. Keep valid rooted, rootless and duplicate-main linked contexts usable. Every earlier fixture and assertion remains unchanged; compiler and test execution stay final-only.
----
- .../src/terminal_thread_metadata_store.rs     | 89 ++++++++++++++++++-
- 1 file changed, 88 insertions(+), 1 deletion(-)
 
 diff --git a/crates/agent_ui/src/terminal_thread_metadata_store.rs b/crates/agent_ui/src/terminal_thread_metadata_store.rs
-index 4b003c8..73bc8bb 100644
+index 4b003c8e0b..73bc8bb15a 100644
 --- a/crates/agent_ui/src/terminal_thread_metadata_store.rs
 +++ b/crates/agent_ui/src/terminal_thread_metadata_store.rs
 @@ -807,7 +807,7 @@ impl Column for TerminalThreadMetadata {

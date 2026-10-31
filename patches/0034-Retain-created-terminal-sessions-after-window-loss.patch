@@ -1,20 +1,16 @@
-From 953f942328f7a3264229f4f61f394417ce288e38 Mon Sep 17 00:00:00 2001
+From be37be0eb3eb664b6311a531eecfe819ae72bd64 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 08:18:18 +0000
-Subject: [PATCH] Retain confirmed sessions independently of startup window
- lifetime
+Subject: [PATCH 34/90] Retain confirmed sessions independently of startup
+ window lifetime
 
----
- crates/agent_ui/src/agent_panel.rs            | 146 +++++++++++++-----
- .../src/terminal_thread_metadata_store.rs     |  12 ++
- 2 files changed, 119 insertions(+), 39 deletions(-)
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 9d1a06f..47158e3 100644
+index 3faca5670c..f7da7c8513 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -2226,23 +2226,56 @@ impl AgentPanel {
+@@ -2227,23 +2227,56 @@ impl AgentPanel {
          let workspace_id = self.workspace_id;
          let project = self.project.downgrade();
  
@@ -86,7 +82,7 @@ index 9d1a06f..47158e3 100644
                          log::error!("failed to spawn agent panel terminal: {error:#}");
                          let is_remote_disconnected = project.upgrade().is_some_and(|project| {
                              is_remote_connection_disconnected(project.read(cx), cx)
-@@ -2330,29 +2363,7 @@ impl AgentPanel {
+@@ -2331,29 +2364,7 @@ impl AgentPanel {
              // A reattached session already ran the init command when it started,
              // and its program would receive the command as input.
              let init_command = init_command.filter(|_| session != PersistentSession::Reattached);
@@ -117,7 +113,7 @@ index 9d1a06f..47158e3 100644
                  let terminal_for_init_command = terminal.clone();
                  let terminal_view = cx.new(|cx| {
                      let mut view =
-@@ -2375,7 +2386,7 @@ impl AgentPanel {
+@@ -2376,7 +2387,7 @@ impl AgentPanel {
                      cx,
                  );
                  Self::write_terminal_init_command(&terminal_for_init_command, init_command, cx);
@@ -126,7 +122,7 @@ index 9d1a06f..47158e3 100644
              anyhow::Ok(())
          })
          .detach_and_log_err(cx);
-@@ -18543,4 +18554,61 @@ mod tests {
+@@ -18589,4 +18600,61 @@ mod tests {
          assert!(fake.kill_history().is_empty(), "an exited unmanaged shell needs no shpool cleanup");
      }
  
@@ -189,7 +185,7 @@ index 9d1a06f..47158e3 100644
 +
  }
 diff --git a/crates/agent_ui/src/terminal_thread_metadata_store.rs b/crates/agent_ui/src/terminal_thread_metadata_store.rs
-index 80a51f1..5164704 100644
+index 80a51f1ac6..5164704a51 100644
 --- a/crates/agent_ui/src/terminal_thread_metadata_store.rs
 +++ b/crates/agent_ui/src/terminal_thread_metadata_store.rs
 @@ -312,6 +312,18 @@ impl TerminalThreadMetadataStore {
@@ -211,6 +207,3 @@ index 80a51f1..5164704 100644
      pub fn begin_intentional_close(&mut self, terminal_id: TerminalId) -> bool {
          !self.intentionally_closed_terminal_ids.contains(&terminal_id)
              && self.closing_terminal_ids.insert(terminal_id)
--- 
-2.43.0
-
