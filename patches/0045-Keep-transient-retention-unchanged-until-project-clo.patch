@@ -1,4 +1,4 @@
-From 74e4200998f37691be7a6e2fc70233b037f83e53 Mon Sep 17 00:00:00 2001
+From f7c46e4e0188602c391213c9f02345d4094d0b4d Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 19:37:53 +0000
@@ -8,7 +8,7 @@ Subject: [PATCH 45/90] Keep transient retention unchanged until project close
 Include the active workspace directly in the removal set instead of pinning it before consent. Cancelled closes preserve transient state while a concurrent explicit user retention remains intact.
 
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index b013e0ae3f..69b44c191e 100644
+index 5540211d04..4723d44ba7 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -1032,20 +1032,16 @@ impl MultiWorkspace {
