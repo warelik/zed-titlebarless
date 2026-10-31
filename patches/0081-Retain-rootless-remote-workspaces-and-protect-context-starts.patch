@@ -1,4 +1,4 @@
-From 3370a3b6ed35d1d26ac36927b814cf6f514e3bb2 Mon Sep 17 00:00:00 2001
+From 4b03438a7b7f51887a2e18a4b703fd56031a062e Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 04:47:22 +0000
@@ -344,7 +344,7 @@ index 9b36d25548..a22a8ab4ef 100644
  async fn test_agent_panel_sidebar_keeps_empty_workspace_transient(cx: &mut TestAppContext) {
      init_test(cx);
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 53857b1bdc..b14517a855 100644
+index fc807dccbf..813adeee41 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -413,12 +413,7 @@ impl MultiWorkspace {

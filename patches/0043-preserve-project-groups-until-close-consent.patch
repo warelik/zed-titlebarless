@@ -1,4 +1,4 @@
-From 0edc716c6942d3eb465e2384e2de7dd49ea7cead Mon Sep 17 00:00:00 2001
+From 1fb2dc253469651904801c4bfa623c0e29922ee1 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 19:04:03 +0000
@@ -8,7 +8,7 @@ Subject: [PATCH 43/90] Preserve project groups until workspace close consent
 Keep cancelled and failed closes intact. Retain a same-group workspace opened during pending consent, and still remove unloaded project rows. Cover cancellation, successful retry and concurrent opening.
 
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 3683185595..1fb2f9de64 100644
+index 3683185595..b013e0ae3f 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -1034,9 +1034,8 @@ impl MultiWorkspace {
@@ -23,7 +23,7 @@ index 3683185595..1fb2f9de64 100644
          let active_workspace = self.workspace().clone();
          if active_workspace.read(cx).project_group_key(cx) == *group_key
              && !self.is_workspace_retained(&active_workspace)
-@@ -1047,9 +1046,41 @@ impl MultiWorkspace {
+@@ -1047,9 +1046,42 @@ impl MultiWorkspace {
  
          let workspaces = self.workspaces_for_project_group(group_key, cx);
  
@@ -49,8 +49,9 @@ index 3683185595..1fb2f9de64 100644
 +                this.update(cx, |this, cx| {
 +                    // A workspace opened while consent was pending was not part
 +                    // of that close request and must retain its project row.
-+                    let has_members = !this.workspaces_for_project_group(&group_key, cx).is_empty()
-+                        || this.workspace().read(cx).project_group_key(cx) == group_key;
++                    let has_members = this.workspaces().any(|workspace| {
++                        workspace.read(cx).project_group_key(cx) == group_key
++                    });
 +                    if !has_members {
 +                        let previous_len = this.project_groups.len();
 +                        this.project_groups.retain(|group| group.key != group_key);
@@ -67,7 +68,7 @@ index 3683185595..1fb2f9de64 100644
      }
  
      /// Returns the nearest retained workspace outside the project group at
-@@ -1872,9 +1903,8 @@ impl MultiWorkspace {
+@@ -1872,9 +1904,8 @@ impl MultiWorkspace {
          let original_active = self.workspace().clone();
          let group_key = original_active.read(cx).project_group_key(cx);
  

@@ -1,4 +1,4 @@
-From 8d56dd7a582022fb8a66e2608515ef29fdf14ce3 Mon Sep 17 00:00:00 2001
+From b9f470ae5d1f1c5faba9176ad9745103244b1c98 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 12:30:00 +0000
@@ -123,10 +123,10 @@ index a45b930fc2..090daad16c 100644
      cx.run_until_parked();
      assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.entries.iter().any(|entry| {
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 4dcd707ed5..3992a07b76 100644
+index 4f009aac9a..864833c66a 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
-@@ -1725,6 +1725,11 @@ impl MultiWorkspace {
+@@ -1726,6 +1726,11 @@ impl MultiWorkspace {
              );
  
              let live_key = workspace.read(cx).project_group_key(cx);

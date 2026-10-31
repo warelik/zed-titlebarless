@@ -1,4 +1,4 @@
-From 974cd5b49958b2161adda22692f2340ba5f0e8f8 Mon Sep 17 00:00:00 2001
+From a31f55e4480e6af7ec39873956e5dec00b09f380 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 09:20:00 +0000
@@ -191,10 +191,10 @@ index 79cefbeeb3..f72b144158 100644
                      if !safe_to_stop {
                          gpui::AsyncApp::update(cx, |cx| complete_terminal_close_metadata(terminal_id, false, cx));
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index bee8f1e4ca..4dcd707ed5 100644
+index 744789629d..4f009aac9a 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
-@@ -1905,14 +1905,14 @@ impl MultiWorkspace {
+@@ -1906,14 +1906,14 @@ impl MultiWorkspace {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) -> Task<Result<bool>> {
@@ -211,7 +211,7 @@ index bee8f1e4ca..4dcd707ed5 100644
          window: &mut Window,
          cx: &mut Context<Self>,
      ) -> Task<Result<bool>> {
-@@ -1980,7 +1980,7 @@ impl MultiWorkspace {
+@@ -1981,7 +1981,7 @@ impl MultiWorkspace {
              for workspace in &workspaces {
                  let should_continue = workspace
                      .update_in(cx, |workspace, window, cx| {
@@ -220,7 +220,7 @@ index bee8f1e4ca..4dcd707ed5 100644
                      })?
                      .await?;
  
-@@ -2000,25 +2000,24 @@ impl MultiWorkspace {
+@@ -2001,25 +2001,24 @@ impl MultiWorkspace {
                  return Ok(false);
              }
  
