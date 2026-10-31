@@ -1,4 +1,4 @@
-From c82ea34281f152464b025b9bd25e538add325e78 Mon Sep 17 00:00:00 2001
+From 2c243d219a0a635b0af8119de98fc927fca33f89 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 19:04:03 +0000
@@ -8,7 +8,7 @@ Subject: [PATCH 43/90] Preserve project groups until workspace close consent
 Keep cancelled and failed closes intact. Retain a same-group workspace opened during pending consent, and still remove unloaded project rows. Cover cancellation, successful retry and concurrent opening.
 
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 3683185595..abd566e524 100644
+index 3683185595..e890c7a92e 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -1034,9 +1034,8 @@ impl MultiWorkspace {
@@ -72,14 +72,14 @@ index 3683185595..abd566e524 100644
  
 -                    this.project_groups
 -                        .retain(|group| !workspace_to_delete_keys.contains(&group.key));
++                    let retained_projects: collections::HashSet<_> = this
++                        .workspaces()
++                        .filter(|workspace| !workspaces.contains(workspace))
++                        .map(|workspace| workspace.read(cx).project().entity_id())
++                        .collect();
 +                    this.project_groups.retain(|group| {
 +                        !workspace_to_delete_keys.contains(&group.key)
-+                            || this.workspaces().any(|workspace| {
-+                                !workspaces.contains(workspace)
-+                                    && projects_to_delete.contains(
-+                                        &workspace.read(cx).project().entity_id(),
-+                                    )
-+                            })
++                            || !retained_projects.is_disjoint(&projects_to_delete)
 +                    });
                      cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
                  }

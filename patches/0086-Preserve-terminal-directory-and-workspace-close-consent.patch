@@ -1,4 +1,4 @@
-From 8cef94db813f7b68137e9585a2367cbf3ccc7fbe Mon Sep 17 00:00:00 2001
+From 03bcd3b4b279aa1b6f971cf2bee6c2c301838f87 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 09:20:00 +0000
@@ -191,7 +191,7 @@ index 79cefbeeb3..f72b144158 100644
                      if !safe_to_stop {
                          gpui::AsyncApp::update(cx, |cx| complete_terminal_close_metadata(terminal_id, false, cx));
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index c1a1e88acb..9e6ad9aa91 100644
+index c95aed40a2..da759e8a01 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -1883,14 +1883,14 @@ impl MultiWorkspace {

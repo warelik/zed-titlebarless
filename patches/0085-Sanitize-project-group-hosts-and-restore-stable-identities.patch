@@ -1,4 +1,4 @@
-From eeca62ffe4ae96d835e94b7b30210491a7732259 Mon Sep 17 00:00:00 2001
+From 0fef63025eebdc0e5bcca5a95a5d4de42b277785 Mon Sep 17 00:00:00 2001
 From: "github-actions[bot]"
  <41898282+github-actions[bot]@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 05:56:01 +0000
@@ -7,7 +7,7 @@ Subject: [PATCH 86/90] Sanitize persisted project group hosts and restore
 
 
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 528f39701d..c1a1e88acb 100644
+index b34bf9bc01..c95aed40a2 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -916,20 +916,26 @@ impl MultiWorkspace {
