@@ -3202,7 +3202,10 @@ class InitialFirstReleaseTests(unittest.TestCase):
             for index, name in enumerate(names.values(), start=1)
         ]
 
+        artifact_queries = 0
+
         def run_case(heavy_state, run_conclusion="failure"):
+            nonlocal artifact_queries
             attempt_run = {
                 "id": run_id, "run_attempt": attempt,
                 "path": ".github/workflows/release.yml",
@@ -3231,6 +3234,17 @@ class InitialFirstReleaseTests(unittest.TestCase):
                     "completed_at": "2026-11-01T09:52:00Z",
                     "steps": [],
                 }
+            elif heavy_state == "started_incomplete":
+                heavy_job = {
+                    "id": 601, "name": release.FINAL_HEAVY_JOB,
+                    "status": "completed", "conclusion": "neutral",
+                    "started_at": "2026-11-01T09:52:00Z",
+                    "completed_at": "2026-11-01T10:04:00Z",
+                    "steps": [{"name": "Build macOS app", "status": "completed",
+                               "conclusion": "skipped",
+                               "started_at": "2026-11-01T09:52:05Z",
+                               "completed_at": "2026-11-01T10:03:55Z"}],
+                }
             else:
                 heavy_job = {
                     "id": 601, "name": release.FINAL_HEAVY_JOB,
@@ -3244,9 +3258,11 @@ class InitialFirstReleaseTests(unittest.TestCase):
                 }
 
             def native_api(path, *, method="GET", data=None, token=None):
+                nonlocal artifact_queries
                 if path == f"repos/{self.REPO}/actions/runs/{run_id}/attempts/{attempt}":
                     return attempt_run
                 if path == f"repos/{self.REPO}/actions/runs/{run_id}/artifacts?per_page=100":
+                    artifact_queries += 1
                     return {"total_count": len(artifacts), "artifacts": artifacts}
                 self.fail(f"Unexpected API call: {method} {path}")
 
@@ -3275,10 +3291,20 @@ class InitialFirstReleaseTests(unittest.TestCase):
         self.assertEqual(result["artifact_names"], names)
         self.assertEqual(result["artifact_ids"],
                          {name: index for index, name in enumerate(names.values(), 1)})
+        self.assertEqual(artifact_queries, 1)
 
-        for bad_state, bad_conclusion in (("incomplete_skipped", "success"),
-                                          ("incomplete_skipped", "failure"),
-                                          ("failed", "failure")):
+        # Unstarted skipped placeholders do not spend a heavy attempt in core (allow),
+        # so required_validated_run rejects artifact reuse at the recovery check; started
+        # incomplete or failed heavy attempts spend/fail the attempt and block in core.
+        for bad_state, bad_conclusion, expected_reason in (
+            ("incomplete_skipped", "success",
+             "Artifact recovery requires the exact earlier validated run attempt"),
+            ("incomplete_skipped", "failure",
+             "Artifact recovery requires the exact earlier validated run attempt"),
+            ("started_incomplete", "success", "Shared final validation is blocked"),
+            ("failed", "failure", "Shared final validation is blocked"),
+        ):
             with (self.subTest(bad_state=bad_state, bad_conclusion=bad_conclusion),
-                  self.assertRaisesRegex(ValueError, "Shared final validation is blocked")):
+                  self.assertRaisesRegex(ValueError, expected_reason)):
                 run_case(bad_state, run_conclusion=bad_conclusion)
+        self.assertEqual(artifact_queries, 1)
