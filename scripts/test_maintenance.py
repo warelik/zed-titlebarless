@@ -3173,3 +3173,112 @@ class InitialFirstReleaseTests(unittest.TestCase):
             self.assertEqual(writes[-1], (
                 f"repos/{self.REPO}/actions/variables/FORK_ACCEPTED_BASELINE",
                 "DELETE", "owner-token"))
+
+    def test_initial_already_validated_recovery_uses_real_core_heavy_evidence(self):
+        core = maintenance.load()
+        self.assertEqual(core.API_VERSION, 1)
+        candidate = self._candidate()
+        candidate_id = core.candidate_identity(candidate)
+        initial_proof = release.initial_baseline_proof(self.REPO)
+        run_id, attempt = 12, 1
+        names = release.candidate_artifact_names(self.APP_SHA, run_id, attempt)
+        final_marker = {
+            "schema": 1, "candidate_id": candidate_id, "run_id": run_id,
+            "run_attempt": attempt, "workflow_sha": self.CONFIG,
+        }
+        reservation_comment = {
+            "id": 7, "created_at": "2026-11-01T09:51:00Z",
+            "updated_at": "2026-11-01T09:51:00Z",
+            "user": {"login": "warelik", "type": "User", "id": 1001},
+            "body": ("<!-- fork-candidate:v1 "
+                     + json.dumps(candidate, sort_keys=True, separators=(",", ":"))
+                     + " -->\n<!-- fork-final:v1 "
+                     + json.dumps(final_marker, sort_keys=True, separators=(",", ":"))
+                     + " -->"),
+        }
+        artifacts = [
+            {"id": index, "name": name, "expired": False, "size_in_bytes": 100,
+             "digest": "sha256:" + "a" * 64, "workflow_run": {"id": run_id}}
+            for index, name in enumerate(names.values(), start=1)
+        ]
+
+        def run_case(heavy_state, run_conclusion="failure"):
+            attempt_run = {
+                "id": run_id, "run_attempt": attempt,
+                "path": ".github/workflows/release.yml",
+                "head_sha": self.CONFIG, "head_branch": "downstream",
+                "event": "workflow_dispatch",
+                "status": "completed", "conclusion": run_conclusion,
+                "created_at": "2026-11-01T09:50:00Z",
+                "updated_at": "2026-11-01T10:06:00Z",
+            }
+            if heavy_state == "success":
+                heavy_job = {
+                    "id": 601, "name": release.FINAL_HEAVY_JOB,
+                    "status": "completed", "conclusion": "success",
+                    "started_at": "2026-11-01T09:52:00Z",
+                    "completed_at": "2026-11-01T10:04:00Z",
+                    "steps": [{"name": "Build macOS app", "status": "completed",
+                               "conclusion": "success",
+                               "started_at": "2026-11-01T09:52:05Z",
+                               "completed_at": "2026-11-01T10:03:55Z"}],
+                }
+            elif heavy_state == "incomplete_skipped":
+                heavy_job = {
+                    "id": 601, "name": release.FINAL_HEAVY_JOB,
+                    "status": "completed", "conclusion": "skipped",
+                    "started_at": "2026-11-01T09:52:00Z",
+                    "completed_at": "2026-11-01T09:52:00Z",
+                    "steps": [],
+                }
+            else:
+                heavy_job = {
+                    "id": 601, "name": release.FINAL_HEAVY_JOB,
+                    "status": "completed", "conclusion": "failure",
+                    "started_at": "2026-11-01T09:52:00Z",
+                    "completed_at": "2026-11-01T10:04:00Z",
+                    "steps": [{"name": "Build macOS app", "status": "completed",
+                               "conclusion": "failure",
+                               "started_at": "2026-11-01T09:52:05Z",
+                               "completed_at": "2026-11-01T10:03:55Z"}],
+                }
+
+            def native_api(path, *, method="GET", data=None, token=None):
+                if path == f"repos/{self.REPO}/actions/runs/{run_id}/attempts/{attempt}":
+                    return attempt_run
+                if path == f"repos/{self.REPO}/actions/runs/{run_id}/artifacts?per_page=100":
+                    return {"total_count": len(artifacts), "artifacts": artifacts}
+                self.fail(f"Unexpected API call: {method} {path}")
+
+            def native_maintenance_pages(path, key):
+                if path == f"repos/{self.REPO}/actions/workflows/release.yml/runs" and key == "workflow_runs":
+                    return [attempt_run]
+                if path == f"repos/{self.REPO}/actions/runs/{run_id}/attempts/{attempt}/jobs" and key == "jobs":
+                    return [heavy_job]
+                self.fail(f"Unexpected paginated maintenance call: {key} {path}")
+
+            env = {
+                "GITHUB_REPOSITORY": self.REPO, "GITHUB_SHA": self.CONFIG,
+                "GITHUB_RUN_ID": "90", "GITHUB_RUN_ATTEMPT": "1",
+            }
+            with (patch.dict(os.environ, env, clear=False),
+                  patch.object(release, "pages", return_value=[reservation_comment]),
+                  patch.object(release, "maintenance_pages", side_effect=native_maintenance_pages),
+                  patch.object(release, "api", side_effect=native_api)):
+                return release.authorize_shared_final(
+                    candidate, initial_proof, required_validated_run=(run_id, attempt))
+
+        result = run_case("success", run_conclusion="failure")
+        self.assertEqual(result["decision"], "already-validated")
+        self.assertEqual(result["validated_run"], {"id": run_id, "run_attempt": attempt})
+        self.assertEqual(result["artifact_workflow_sha"], self.CONFIG)
+        self.assertEqual(result["artifact_names"], names)
+        self.assertEqual(result["artifact_ids"],
+                         {name: index for index, name in enumerate(names.values(), 1)})
+
+        for bad_state, bad_conclusion in (("incomplete_skipped", "success"),
+                                          ("incomplete_skipped", "failure"),
+                                          ("failed", "failure")):
+            with (self.subTest(bad_state=bad_state, bad_conclusion=bad_conclusion),
+                  self.assertRaisesRegex(ValueError, "Shared final validation is blocked")):
+                run_case(bad_state, run_conclusion=bad_conclusion)

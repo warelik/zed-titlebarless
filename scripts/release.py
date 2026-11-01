@@ -2083,7 +2083,7 @@ def authorize_shared_final(candidate, baseline_proof, *, allow_reuse=False, full
                 continue
             body = _metadata_scan_body(
                 comment, candidate["repository"].split("/")[0],
-                published_at=history["baseline"]["publication"]["published_at"])
+                published_at=history_published_at)
             final_markers = FINAL_RESERVATION.findall(body)
             candidate_markers = FINAL_CANDIDATE.findall(body)
             if not final_markers and not candidate_markers:

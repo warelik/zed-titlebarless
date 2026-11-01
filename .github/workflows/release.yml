@@ -946,7 +946,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: warelik/machine-maintenance
-          ref: 0cfc0e6cd5010c423e91db95c35d7a5c1e9473eb
+          ref: 49f021fca0c8e214bc28195d2cc993803946b562
           ssh-key: ${{ secrets.MAINTENANCE_READ_KEY }}
           path: maintenance-verifier
           persist-credentials: false
@@ -988,7 +988,7 @@ jobs:
           python3 -B - <<'PY'
           import json, os, pathlib, re, subprocess
           verifier_root = pathlib.Path("maintenance-verifier")
-          expected_verifier = "0cfc0e6cd5010c423e91db95c35d7a5c1e9473eb"
+          expected_verifier = "49f021fca0c8e214bc28195d2cc993803946b562"
           verifier_rev = subprocess.check_output(
               ["git", "-C", str(verifier_root), "rev-parse", "HEAD"], text=True).strip()
           if (not re.fullmatch(r"[0-9a-f]{40}", expected_verifier)
