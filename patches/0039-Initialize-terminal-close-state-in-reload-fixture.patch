@@ -1,0 +1,22 @@
+From 7474f4a7e0881904cc85f4411e1752e062c0f726 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 10:44:13 +0000
+Subject: [PATCH 39/90] Initialize close-state sets in the reload regression
+ fixture
+
+The controlled reload fixture builds the store directly to hold database writes. Initialize both lifecycle sets there just as in the production constructor. Keep its race assertions and mandatory test identity unchanged. All private store literal initializers were inspected; no tests or compilers were rerun.
+
+diff --git a/crates/agent_ui/src/terminal_thread_metadata_store.rs b/crates/agent_ui/src/terminal_thread_metadata_store.rs
+index 5164704a51..617125f9bf 100644
+--- a/crates/agent_ui/src/terminal_thread_metadata_store.rs
++++ b/crates/agent_ui/src/terminal_thread_metadata_store.rs
+@@ -1113,6 +1113,8 @@ mod tests {
+                 pending_terminal_ops_tx,
+                 _db_operations_task: Task::ready(()),
+                 deleted_terminal_ids: HashSet::default(),
++                closing_terminal_ids: HashSet::default(),
++                intentionally_closed_terminal_ids: HashSet::default(),
+             })
+         });
+         let _held_operations_receiver = pending_terminal_ops_rx;

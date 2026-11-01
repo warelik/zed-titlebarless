@@ -1,0 +1,1208 @@
+name: Upstream Plus Patches
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      policy_bootstrap:
+        description: Verify a completed private native policy bundle before initializing the trusted pin
+        type: boolean
+        default: false
+      policy_ref:
+        description: Exact reviewed policy commit (must match the dispatched downstream revision)
+        required: false
+      full_pr:
+        description: Completed complete-project review PR for bootstrap
+        required: false
+      delta_pr:
+        description: Completed configuration-delta review PR for bootstrap
+        required: false
+      artifact_recovery:
+        description: Exact validated run/attempt to publish with the current checked controller
+        type: string
+        required: false
+  push:
+    branches: [downstream]
+    paths: ["patches/**", "scripts/**", ".github/workflows/release.yml"]
+  issue_comment:
+    types: [created, edited]
+  pull_request_target:
+    branches: [downstream]
+    types: [opened, synchronize, reopened]
+
+env:
+  FORK_MAINTENANCE_ROOT: ${{ github.workspace }}/maintenance
+  FORK_REPAIR_MODE: ${{ vars.FORK_REPAIR_MODE || 'escalate' }}
+  FORK_REVIEW_MODE: ${{ vars.FORK_REVIEW_MODE || 'bot' }}
+  FORK_REVIEW_TRIGGER: ${{ vars.FORK_REVIEW_TRIGGER || '@codex review' }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-plus-patches
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Select One Snapshot And Request Review
+    needs: [verify-bootstrap-bundle]
+    if: >-
+      always() &&
+      (needs.verify-bootstrap-bundle.result == 'success' ||
+       (needs.verify-bootstrap-bundle.result == 'skipped' &&
+      ((github.event_name != 'issue_comment' &&
+       github.event_name != 'pull_request_target') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+       ((github.event.comment.user.login == 'chatgpt-codex-connector[bot]' &&
+         github.event.comment.user.type == 'Bot') ||
+        (github.event.action == 'created' &&
+         github.event.comment.user.login == github.repository_owner &&
+         github.event.comment.user.type == 'User' &&
+         (contains(github.event.comment.body, '<!-- fork-final-retry:v1 ') ||
+          (vars.FORK_REVIEW_MODE != 'none' &&
+           contains(github.event.comment.body, '<!-- machine-maintenance-owner-acceptance:v1 ')) ||
+          (contains(github.event.comment.body, '<!-- fork-review-disposition:v1 ') &&
+           !startsWith(github.event.comment.body, 'Machine disposition of the complete previously reviewed finding batch.')))))) ||
+      (github.event_name == 'pull_request_target' &&
+       github.event.pull_request.base.ref == 'downstream' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       startsWith(github.event.pull_request.head.ref, 'repair/'))))) && !cancelled()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    outputs:
+      ready: ${{ steps.snapshot.outputs.ready }}
+      sha: ${{ steps.snapshot.outputs.sha }}
+      upstream: ${{ steps.snapshot.outputs.upstream }}
+      patchset: ${{ steps.snapshot.outputs.patchset }}
+      version: ${{ steps.snapshot.outputs.version }}
+      release: ${{ steps.snapshot.outputs.release }}
+      release_id: ${{ steps.snapshot.outputs.release_id }}
+      source_depth: ${{ steps.snapshot.outputs.source_depth }}
+      pr: ${{ steps.snapshot.outputs.pr }}
+      mode: ${{ steps.snapshot.outputs.mode }}
+      repair_pr: ${{ steps.snapshot.outputs.repair_pr }}
+      repair_head: ${{ steps.snapshot.outputs.repair_head }}
+      followup: ${{ steps.snapshot.outputs.followup }}
+      delta_pr: ${{ steps.snapshot.outputs.delta_pr }}
+      delta_base: ${{ steps.snapshot.outputs.delta_base }}
+      delta_sha: ${{ steps.snapshot.outputs.delta_sha }}
+      final_failed: ${{ steps.snapshot.outputs.final_failed }}
+      candidate_config: ${{ steps.snapshot.outputs.candidate_config }}
+      already_published: ${{ steps.snapshot.outputs.already_published }}
+      policy_verified: ${{ steps.snapshot.outputs.policy_verified }}
+      trusted_policy: ${{ steps.control.outputs.policy_ref }}
+      maintenance_candidate: ${{ steps.snapshot.outputs.maintenance_candidate }}
+      maintenance_baseline: ${{ steps.snapshot.outputs.maintenance_baseline }}
+      full_review_sha: ${{ steps.snapshot.outputs.full_review_sha }}
+      final_candidate: ${{ steps.snapshot.outputs.final_candidate }}
+      final_run_id: ${{ steps.snapshot.outputs.final_run_id }}
+      final_attempt: ${{ steps.snapshot.outputs.final_attempt }}
+      final_workflow_sha: ${{ steps.snapshot.outputs.final_workflow_sha }}
+      policy_only: ${{ steps.snapshot.outputs.policy_only }}
+      artifact_reuse: ${{ steps.snapshot.outputs.artifact_reuse }}
+      artifact_run_id: ${{ steps.snapshot.outputs.artifact_run_id }}
+      artifact_run_attempt: ${{ steps.snapshot.outputs.artifact_run_attempt }}
+      artifact_workflow_sha: ${{ steps.snapshot.outputs.artifact_workflow_sha }}
+      artifact_config: ${{ steps.snapshot.outputs.artifact_config }}
+      checked_policy: ${{ steps.snapshot.outputs.checked_policy }}
+      publication_config: ${{ steps.snapshot.outputs.publication_config }}
+    steps:
+      - name: Require The Trusted Default Branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          test "$DEFAULT_BRANCH" = downstream
+      - name: Require An Exact Previously Checked Policy Revision
+        id: control
+        env:
+          TRUSTED_POLICY: ${{ (needs.verify-bootstrap-bundle.result == 'success' && needs.verify-bootstrap-bundle.outputs.policy_ref) || vars.ZED_TRUSTED_POLICY }}
+        run: |
+          [[ "$TRUSTED_POLICY" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::The trusted policy pin is missing; validate the exact candidate with the private native bundle bootstrap."
+            exit 1
+          }
+          echo "policy_ref=$TRUSTED_POLICY" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.control.outputs.policy_ref }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: configuration
+          persist-credentials: false
+      - name: Read The Exact Private Maintenance Lock
+        id: maintenance
+        run: |
+          python3 -B - "trusted/scripts/maintenance.lock.json" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, pathlib, re, sys
+          path = pathlib.Path(sys.argv[1])
+          if path.is_symlink() or not path.is_file():
+              raise SystemExit("The reviewed maintenance lock is missing")
+          lock = json.loads(path.read_text())
+          if lock.get("repository") != "warelik/machine-maintenance" or not re.fullmatch(r"[0-9a-f]{40}", lock.get("revision", "")):
+              raise SystemExit("The reviewed maintenance revision is invalid")
+          print("revision=" + lock["revision"])
+          PY
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: warelik/machine-maintenance
+          ref: ${{ steps.maintenance.outputs.revision }}
+          ssh-key: ${{ secrets.MAINTENANCE_READ_KEY }}
+          path: maintenance
+          persist-credentials: false
+      - name: Record The Acquired Private Source Identity
+        env:
+          MAINTENANCE_REVISION: ${{ steps.maintenance.outputs.revision }}
+        run: |
+          test "$(git -C maintenance rev-parse HEAD)" = "$MAINTENANCE_REVISION"
+          python3 -B - <<'PY'
+          import json, os, pathlib
+          pathlib.Path("maintenance/.maintenance-source.json").write_text(json.dumps({
+              "repository": "warelik/machine-maintenance",
+              "revision": os.environ["MAINTENANCE_REVISION"]}))
+          PY
+      - name: Prepare The Exact Source And Review
+        id: snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+          ZED_TRUSTED_POLICY_SHA: ${{ steps.control.outputs.policy_ref }}
+          DELTA_PR: ${{ needs.verify-bootstrap-bundle.result == 'success' && needs.verify-bootstrap-bundle.outputs.delta_pr || '' }}
+          DELTA_SHA: ${{ needs.verify-bootstrap-bundle.result == 'success' && needs.verify-bootstrap-bundle.outputs.policy_ref || '' }}
+          DELTA_BASE: ${{ needs.verify-bootstrap-bundle.result == 'success' && needs.verify-bootstrap-bundle.outputs.delta_base || '' }}
+          BOOTSTRAP_MAINTENANCE_CANDIDATE: ${{ needs.verify-bootstrap-bundle.outputs.maintenance_candidate }}
+          ARTIFACT_RECOVERY: ${{ github.event_name == 'workflow_dispatch' && inputs.artifact_recovery || '' }}
+        run: |
+          python3 -B - <<'PY'
+          import json, os, pathlib, sys
+          sys.path.insert(0, str(pathlib.Path('trusted/scripts').resolve()))
+          import release
+          if not callable(getattr(release, "check_final_history", None)):
+              release.output(final_failed=True)
+              raise SystemExit("The old policy pin has no heavy-attempt history guard; "
+                  "initialize it through the existing reviewed read-only bootstrap "
+                  "before preparing any candidate reservation.")
+          release.ROOT = pathlib.Path('configuration').resolve()
+          release.prepare(pathlib.Path(os.environ['RUNNER_TEMP']) / 'zed-source', shared=True)
+          PY
+      - name: Record A Successful Read-Only Bootstrap
+        if: needs.verify-bootstrap-bundle.result == 'success' && steps.snapshot.outputs.ready == 'true'
+        env:
+          POLICY_REF: ${{ needs.verify-bootstrap-bundle.outputs.policy_ref }}
+          CANDIDATE_CONFIG: ${{ steps.snapshot.outputs.candidate_config }}
+        run: |
+          test "$CANDIDATE_CONFIG" = "$POLICY_REF"
+          echo "Verified private policy bundle remains bound to $POLICY_REF" >> "$GITHUB_STEP_SUMMARY"
+      - name: Report The Actual State
+        if: always()
+        env:
+          READY: ${{ steps.snapshot.outputs.ready }}
+          REASON: ${{ steps.snapshot.outputs.reason }}
+          SOURCE_SHA: ${{ steps.snapshot.outputs.sha }}
+          VERSION: ${{ steps.snapshot.outputs.version }}
+          PR: ${{ steps.snapshot.outputs.pr }}
+        run: |
+          {
+            echo "### Upstream plus patches"
+            printf '%s\n' "- State: ${REASON:-stopped before a decision}"
+            printf '%s\n' "- Review accepted: ${READY:-false}"
+            if [ -n "$SOURCE_SHA" ]; then printf '%s\n' "- Application: $VERSION at $SOURCE_SHA"; fi
+            if [ -n "$PR" ]; then printf '%s\n' "- Review PR: #$PR"; fi
+            echo "- Publication is not a restart or validation of an existing editor"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  policy-check:
+    name: Final Policy Tests Without Write Credentials
+    needs: [prepare]
+    if: >-
+      always() && needs.prepare.result == 'success' &&
+      needs.prepare.outputs.ready == 'true' &&
+      needs.prepare.outputs.policy_verified != 'true' && !cancelled()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Require The Original Frozen Policy Run Attempt
+        env:
+          FROZEN_RUN_ID: ${{ needs.prepare.outputs.final_run_id }}
+          FROZEN_ATTEMPT: ${{ needs.prepare.outputs.final_attempt }}
+          FROZEN_WORKFLOW_SHA: ${{ needs.prepare.outputs.final_workflow_sha }}
+        run: |
+          test -n "$FROZEN_RUN_ID"
+          test "$FROZEN_RUN_ID" = "$GITHUB_RUN_ID"
+          test "$FROZEN_ATTEMPT" = "$GITHUB_RUN_ATTEMPT"
+          test "$FROZEN_WORKFLOW_SHA" = "$GITHUB_SHA"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.trusted_policy }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.candidate_config }}
+          path: candidate
+          persist-credentials: false
+      - name: Read The Exact Private Maintenance Lock
+        id: maintenance
+        run: |
+          python3 -B - "candidate/scripts/maintenance.lock.json" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, pathlib, re, sys
+          path = pathlib.Path(sys.argv[1])
+          if path.is_symlink() or not path.is_file():
+              raise SystemExit("The reviewed maintenance lock is missing")
+          lock = json.loads(path.read_text())
+          if lock.get("repository") != "warelik/machine-maintenance" or not re.fullmatch(r"[0-9a-f]{40}", lock.get("revision", "")):
+              raise SystemExit("The reviewed maintenance revision is invalid")
+          print("revision=" + lock["revision"])
+          PY
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: warelik/machine-maintenance
+          ref: ${{ steps.maintenance.outputs.revision }}
+          ssh-key: ${{ secrets.MAINTENANCE_READ_KEY }}
+          path: maintenance
+          persist-credentials: false
+      - name: Record The Acquired Private Source Identity
+        env:
+          MAINTENANCE_REVISION: ${{ steps.maintenance.outputs.revision }}
+        run: |
+          test "$(git -C maintenance rev-parse HEAD)" = "$MAINTENANCE_REVISION"
+          python3 -B - <<'PY'
+          import json, os, pathlib
+          pathlib.Path("maintenance/.maintenance-source.json").write_text(json.dumps({
+              "repository": "warelik/machine-maintenance",
+              "revision": os.environ["MAINTENANCE_REVISION"]}))
+          PY
+      - name: Run The Preserved Policy Suite Once And Validate YAML
+        run: python3 trusted/scripts/release.py check-policy "$GITHUB_WORKSPACE/candidate"
+
+  test:
+    name: Test, Build And Inspect One macOS Application
+    needs: [prepare, activate-policy, land]
+    if: >-
+      always() && needs.prepare.result == 'success' &&
+      needs.prepare.outputs.ready == 'true' &&
+      needs.prepare.outputs.already_published != 'true' &&
+      needs.prepare.outputs.artifact_reuse != 'true' &&
+      needs.activate-policy.result == 'success' &&
+      (needs.prepare.outputs.repair_pr == '' || needs.land.result == 'success') && !cancelled()
+    runs-on: macos-15
+    timeout-minutes: 355
+    env:
+      FORK_MAINTENANCE_ROOT: ""
+      UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream }}
+      CANDIDATE_SHA: ${{ needs.prepare.outputs.sha }}
+      PATCHSET_SHA256: ${{ needs.prepare.outputs.patchset }}
+      APP_VERSION: ${{ needs.prepare.outputs.version }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.release }}
+      RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+      CONFIG_SHA: ${{ needs.land.outputs.config || github.sha }}
+      REVIEW_CONFIG_SHA: ${{ needs.prepare.outputs.candidate_config }}
+      MAINTENANCE_CANDIDATE: ${{ needs.prepare.outputs.maintenance_candidate }}
+      FORK_FINAL_CANDIDATE: ${{ needs.prepare.outputs.final_candidate }}
+      FORK_FINAL_RUN_ID: ${{ needs.prepare.outputs.final_run_id }}
+      FORK_FINAL_ATTEMPT: ${{ needs.prepare.outputs.final_attempt }}
+      FORK_FINAL_WORKFLOW_SHA: ${{ needs.prepare.outputs.final_workflow_sha }}
+    steps:
+      - name: Require The Original Frozen Application Run Attempt
+        run: |
+          [[ "$FORK_FINAL_CANDIDATE" =~ ^[0-9a-f]{64}$ ]]
+          test "$FORK_FINAL_RUN_ID" = "$GITHUB_RUN_ID"
+          test "$FORK_FINAL_ATTEMPT" = "$GITHUB_RUN_ATTEMPT"
+          test "$FORK_FINAL_WORKFLOW_SHA" = "$GITHUB_SHA"
+          echo "ARTIFACT_RECEIPT_PATH=$RUNNER_TEMP/zed-artifact-receipt.json" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: ${{ needs.prepare.outputs.source_depth }}
+          path: app
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.land.outputs.config || needs.activate-policy.outputs.policy_ref }}
+          path: trusted
+          persist-credentials: false
+      - name: Require The Exact Shared Candidate And Native Run Attempt Before Setup
+        run: python3 trusted/scripts/release.py check-shared-execution "$GITHUB_WORKSPACE/app"
+      - name: Verify The Selected Upstream Compiler Recipes
+        run: python3 trusted/scripts/release.py check-upstream-recipe "$GITHUB_WORKSPACE/app"
+      - name: Free Space On The Disposable macOS Runner
+        run: |
+          df -h /
+          keep=$(realpath "$(xcode-select -p)/../..")
+          for xcode in /Applications/Xcode*.app; do
+            [ "$(realpath "$xcode")" = "$keep" ] || sudo rm -rf "$xcode"
+          done
+          sudo rm -rf ~/Library/Android /usr/local/share/dotnet ~/.dotnet ~/hostedtoolcache/CodeQL
+          df -h /
+      - name: Install The Pinned Official Shpool Regression Fixture
+        run: |
+          fixture="$RUNNER_TEMP/zed-shpool-fixture"
+          mkdir -p "$fixture"
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 120 \
+            https://github.com/shell-pool/shpool/releases/download/v0.11.5/shpool-aarch64-apple-darwin.tar.gz \
+            --output "$fixture/archive.tar.gz"
+          printf '%s  %s\n' ca8fe3541f6c4d0ebde6941d88d27e0986286728e4a58cc0e23a627d25401dea "$fixture/archive.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$fixture/archive.tar.gz" -C "$fixture" shpool
+          chmod 700 "$fixture/shpool"
+          echo "$fixture" >> "$GITHUB_PATH"
+      - name: Run Every Preserved Rust Regression
+        run: python3 trusted/scripts/release.py test "$GITHUB_WORKSPACE/app"
+      - name: Build And Inspect The Exact Reviewed Application
+        run: python3 trusted/scripts/release.py build "$GITHUB_WORKSPACE/app"
+      - name: Record The Exact Native Artifact Attempt
+        run: python3 trusted/scripts/release.py record-artifact-receipt "$GITHUB_WORKSPACE/release"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reviewed-${{ needs.prepare.outputs.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reviewed-receipt-${{ needs.prepare.outputs.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/zed-artifact-receipt.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Recheck Review And Publish Without Restarting Editors
+    needs: [prepare, test, land, activate-policy]
+    if: >-
+      always() && needs.prepare.result == 'success' &&
+      needs.activate-policy.result == 'success' &&
+      (needs.prepare.outputs.repair_pr == '' || needs.land.result == 'success') &&
+      (needs.test.result == 'success' ||
+       (needs.prepare.outputs.artifact_reuse == 'true' && needs.test.result == 'skipped')) && !cancelled()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.land.outputs.config || needs.activate-policy.outputs.policy_ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: reviewed-${{ needs.prepare.outputs.sha }}-run-${{ needs.prepare.outputs.artifact_run_id || github.run_id }}-attempt-${{ needs.prepare.outputs.artifact_run_attempt || github.run_attempt }}
+          path: release
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.prepare.outputs.artifact_run_id || github.run_id }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: reviewed-receipt-${{ needs.prepare.outputs.sha }}-run-${{ needs.prepare.outputs.artifact_run_id || github.run_id }}-attempt-${{ needs.prepare.outputs.artifact_run_attempt || github.run_attempt }}
+          path: ${{ runner.temp }}/zed-artifact-receipt
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.prepare.outputs.artifact_run_id || github.run_id }}
+      - name: Read The Exact Private Maintenance Lock
+        id: maintenance
+        run: |
+          python3 -B - "scripts/maintenance.lock.json" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, pathlib, re, sys
+          path = pathlib.Path(sys.argv[1])
+          if path.is_symlink() or not path.is_file():
+              raise SystemExit("The reviewed maintenance lock is missing")
+          lock = json.loads(path.read_text())
+          if lock.get("repository") != "warelik/machine-maintenance" or not re.fullmatch(r"[0-9a-f]{40}", lock.get("revision", "")):
+              raise SystemExit("The reviewed maintenance revision is invalid")
+          print("revision=" + lock["revision"])
+          PY
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: warelik/machine-maintenance
+          ref: ${{ steps.maintenance.outputs.revision }}
+          ssh-key: ${{ secrets.MAINTENANCE_READ_KEY }}
+          path: maintenance
+          persist-credentials: false
+      - name: Record The Acquired Private Source Identity
+        env:
+          MAINTENANCE_REVISION: ${{ steps.maintenance.outputs.revision }}
+        run: |
+          test "$(git -C maintenance rev-parse HEAD)" = "$MAINTENANCE_REVISION"
+          python3 -B - <<'PY'
+          import json, os, pathlib
+          pathlib.Path("maintenance/.maintenance-source.json").write_text(json.dumps({
+              "repository": "warelik/machine-maintenance",
+              "revision": os.environ["MAINTENANCE_REVISION"]}))
+          PY
+      - name: Publish Only This Verified Candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+          ARTIFACT_RECEIPT_PATH: ${{ runner.temp }}/zed-artifact-receipt/zed-artifact-receipt.json
+          ARTIFACT_VALIDATED_RUN_ID: ${{ needs.prepare.outputs.artifact_run_id || github.run_id }}
+          ARTIFACT_VALIDATED_RUN_ATTEMPT: ${{ needs.prepare.outputs.artifact_run_attempt || github.run_attempt }}
+          ARTIFACT_VALIDATED_WORKFLOW_SHA: ${{ needs.prepare.outputs.artifact_workflow_sha || github.sha }}
+          CANDIDATE_SHA: ${{ needs.prepare.outputs.sha }}
+          CANDIDATE_PR: ${{ needs.prepare.outputs.pr }}
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream }}
+          PATCHSET_SHA256: ${{ needs.prepare.outputs.patchset }}
+          APP_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}
+          CONFIG_SHA: ${{ needs.prepare.outputs.artifact_config || needs.land.outputs.config || github.sha }}
+          PUBLICATION_CONFIG_SHA: ${{ needs.prepare.outputs.publication_config || needs.land.outputs.config || github.sha }}
+          REVIEW_CONFIG_SHA: ${{ needs.prepare.outputs.candidate_config }}
+          MAINTENANCE_CANDIDATE: ${{ needs.prepare.outputs.maintenance_candidate }}
+          MAINTENANCE_BASELINE: ${{ needs.prepare.outputs.maintenance_baseline }}
+          FULL_REVIEW_SHA: ${{ needs.prepare.outputs.full_review_sha }}
+          REPAIR_PR: ${{ needs.prepare.outputs.repair_pr }}
+          FORK_FINAL_CANDIDATE: ${{ needs.prepare.outputs.final_candidate }}
+          FORK_FINAL_RUN_ID: ${{ needs.prepare.outputs.final_run_id }}
+          FORK_FINAL_ATTEMPT: ${{ needs.prepare.outputs.final_attempt }}
+          FORK_FINAL_WORKFLOW_SHA: ${{ needs.prepare.outputs.final_workflow_sha }}
+          DELTA_PR: ${{ needs.prepare.outputs.delta_pr }}
+          DELTA_BASE: ${{ needs.prepare.outputs.delta_base }}
+          DELTA_SHA: ${{ needs.prepare.outputs.delta_sha }}
+        run: python3 scripts/release.py publish "$GITHUB_WORKSPACE/release"
+
+  land:
+    name: Consolidate The Reviewed Repair Before Final Validation
+    needs: [prepare, activate-policy]
+    if: >-
+      always() && needs.prepare.result == 'success' &&
+      needs.prepare.outputs.ready == 'true' &&
+      needs.prepare.outputs.repair_pr != '' &&
+      needs.activate-policy.result == 'success' && !cancelled()
+    outputs:
+      config: ${{ steps.adopt.outputs.config }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.activate-policy.outputs.policy_ref }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: configuration
+          persist-credentials: false
+      - name: Read The Exact Private Maintenance Lock
+        id: maintenance
+        run: |
+          python3 -B - "trusted/scripts/maintenance.lock.json" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, pathlib, re, sys
+          path = pathlib.Path(sys.argv[1])
+          if path.is_symlink() or not path.is_file():
+              raise SystemExit("The reviewed maintenance lock is missing")
+          lock = json.loads(path.read_text())
+          if lock.get("repository") != "warelik/machine-maintenance" or not re.fullmatch(r"[0-9a-f]{40}", lock.get("revision", "")):
+              raise SystemExit("The reviewed maintenance revision is invalid")
+          print("revision=" + lock["revision"])
+          PY
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: warelik/machine-maintenance
+          ref: ${{ steps.maintenance.outputs.revision }}
+          ssh-key: ${{ secrets.MAINTENANCE_READ_KEY }}
+          path: maintenance
+          persist-credentials: false
+      - name: Record The Acquired Private Source Identity
+        env:
+          MAINTENANCE_REVISION: ${{ steps.maintenance.outputs.revision }}
+        run: |
+          test "$(git -C maintenance rev-parse HEAD)" = "$MAINTENANCE_REVISION"
+          python3 -B - <<'PY'
+          import json, os, pathlib
+          pathlib.Path("maintenance/.maintenance-source.json").write_text(json.dumps({
+              "repository": "warelik/machine-maintenance",
+              "revision": os.environ["MAINTENANCE_REVISION"]}))
+          PY
+      - name: Adopt The Checked Files And Continue The Same Final Run
+        id: adopt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPAIR_PR: ${{ needs.prepare.outputs.repair_pr }}
+          REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}
+          CANDIDATE_PR: ${{ needs.prepare.outputs.pr }}
+          CANDIDATE_SHA: ${{ needs.prepare.outputs.sha }}
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream }}
+          PATCHSET_SHA256: ${{ needs.prepare.outputs.patchset }}
+          DELTA_PR: ${{ needs.prepare.outputs.delta_pr }}
+          DELTA_BASE: ${{ needs.prepare.outputs.delta_base }}
+          DELTA_SHA: ${{ needs.prepare.outputs.delta_sha }}
+          REVIEW_CONFIG_SHA: ${{ needs.prepare.outputs.candidate_config }}
+          MAINTENANCE_CANDIDATE: ${{ needs.prepare.outputs.maintenance_candidate }}
+          MAINTENANCE_BASELINE: ${{ needs.prepare.outputs.maintenance_baseline }}
+          FULL_REVIEW_SHA: ${{ needs.prepare.outputs.full_review_sha }}
+          FINAL_CANDIDATE: ${{ needs.prepare.outputs.final_candidate }}
+          FINAL_RUN_ID: ${{ needs.prepare.outputs.final_run_id }}
+          FINAL_RUN_ATTEMPT: ${{ needs.prepare.outputs.final_attempt }}
+          FINAL_WORKFLOW_SHA: ${{ needs.prepare.outputs.final_workflow_sha }}
+          APP_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          ALREADY_PUBLISHED: ${{ needs.prepare.outputs.already_published }}
+          CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+        run: |
+          python3 -B - <<'PY'
+          import os, pathlib, sys
+          sys.path.insert(0, str(pathlib.Path('trusted/scripts').resolve()))
+          import release
+          release.ROOT = pathlib.Path('configuration').resolve()
+          release.land_repair(pathlib.Path(os.environ['RUNNER_TEMP']) / 'zed-land')
+          PY
+
+  activate-policy:
+    name: Activate Only The Exact Checked Policy
+    needs: [prepare, policy-check, verify-bootstrap-bundle]
+    if: >-
+      always() && needs.prepare.result == 'success' && needs.prepare.outputs.ready == 'true' &&
+      (needs.policy-check.result == 'success' || needs.prepare.outputs.policy_verified == 'true') && !cancelled()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    outputs:
+      policy_ref: ${{ steps.pin.outputs.policy_ref }}
+      final_failed: ${{ steps.history.outputs.final_failed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.checked_policy || needs.prepare.outputs.candidate_config }}
+          path: checked
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: ${{ needs.prepare.outputs.source_depth }}
+          path: app
+          persist-credentials: false
+      - name: Read The Exact Private Maintenance Lock
+        id: maintenance
+        run: |
+          python3 -B - "checked/scripts/maintenance.lock.json" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, pathlib, re, sys
+          path = pathlib.Path(sys.argv[1])
+          if path.is_symlink() or not path.is_file():
+              raise SystemExit("The reviewed maintenance lock is missing")
+          lock = json.loads(path.read_text())
+          if lock.get("repository") != "warelik/machine-maintenance" or not re.fullmatch(r"[0-9a-f]{40}", lock.get("revision", "")):
+              raise SystemExit("The reviewed maintenance revision is invalid")
+          print("revision=" + lock["revision"])
+          PY
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: warelik/machine-maintenance
+          ref: ${{ steps.maintenance.outputs.revision }}
+          ssh-key: ${{ secrets.MAINTENANCE_READ_KEY }}
+          path: maintenance
+          persist-credentials: false
+      - name: Record The Acquired Private Source Identity
+        env:
+          MAINTENANCE_REVISION: ${{ steps.maintenance.outputs.revision }}
+        run: |
+          test "$(git -C maintenance rev-parse HEAD)" = "$MAINTENANCE_REVISION"
+          python3 -B - <<'PY'
+          import json, os, pathlib
+          pathlib.Path("maintenance/.maintenance-source.json").write_text(json.dumps({
+              "repository": "warelik/machine-maintenance",
+              "revision": os.environ["MAINTENANCE_REVISION"]}))
+          PY
+      - name: Verify Recipes With The Exact Sandbox-Checked Controller Before macOS
+        env:
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream }}
+        run: python3 checked/scripts/release.py check-upstream-recipe "$GITHUB_WORKSPACE/app"
+      - name: Recheck The Exact Shared Reviews And Current Attempt Reservation
+        id: history
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+          CANDIDATE_PR: ${{ needs.prepare.outputs.pr }}
+          CANDIDATE_SHA: ${{ needs.prepare.outputs.sha }}
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream }}
+          PATCHSET_SHA256: ${{ needs.prepare.outputs.patchset }}
+          REVIEW_CONFIG_SHA: ${{ needs.prepare.outputs.candidate_config }}
+          MAINTENANCE_CANDIDATE: ${{ needs.prepare.outputs.maintenance_candidate }}
+          MAINTENANCE_BASELINE: ${{ needs.prepare.outputs.maintenance_baseline }}
+          FULL_REVIEW_SHA: ${{ needs.prepare.outputs.full_review_sha }}
+          DELTA_PR: ${{ needs.prepare.outputs.delta_pr }}
+          DELTA_BASE: ${{ needs.prepare.outputs.delta_base }}
+          DELTA_SHA: ${{ needs.prepare.outputs.delta_sha }}
+          REPAIR_PR: ${{ needs.prepare.outputs.repair_pr }}
+          FORK_FINAL_CANDIDATE: ${{ needs.prepare.outputs.final_candidate }}
+          FORK_FINAL_RUN_ID: ${{ needs.prepare.outputs.final_run_id }}
+          FORK_FINAL_ATTEMPT: ${{ needs.prepare.outputs.final_attempt }}
+          FORK_FINAL_WORKFLOW_SHA: ${{ needs.prepare.outputs.final_workflow_sha }}
+        run: |
+          python3 -B - <<'PY'
+          import json, os, pathlib, sys
+          sys.path.insert(0, str(pathlib.Path('checked/scripts').resolve()))
+          import release
+          try:
+              repo = os.environ['GITHUB_REPOSITORY']
+              candidate = release.strict_json(os.environ['MAINTENANCE_CANDIDATE'],
+                  'Frozen maintenance candidate')
+              release.check_shared_publication(repo, os.environ['REVIEW_CONFIG_SHA'],
+                  os.environ['CANDIDATE_SHA'], os.environ['UPSTREAM_SHA'], os.environ['PATCHSET_SHA256'])
+              if os.environ['FORK_FINAL_CANDIDATE']:
+                  release.reauthorize_reserved_final(candidate, json.loads(os.environ['MAINTENANCE_BASELINE']),
+                      candidate_id=os.environ['FORK_FINAL_CANDIDATE'], run_id=os.environ['FORK_FINAL_RUN_ID'],
+                      run_attempt=os.environ['FORK_FINAL_ATTEMPT'], workflow_sha=os.environ['FORK_FINAL_WORKFLOW_SHA'])
+          except Exception:
+              release.output(final_failed=True)
+              raise
+          PY
+      - name: Pin The Checked Controller For Subsequent Runs
+        id: pin
+        env:
+          GH_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+          POLICY_REF: ${{ needs.prepare.outputs.checked_policy || needs.prepare.outputs.candidate_config }}
+          REPAIR_PR: ${{ needs.prepare.outputs.repair_pr }}
+        run: |
+          [[ "$POLICY_REF" =~ ^[0-9a-f]{40}$ ]]
+          if [ -z "$REPAIR_PR" ]; then
+            gh variable set ZED_TRUSTED_POLICY --repo "$GITHUB_REPOSITORY" --body "$POLICY_REF"
+          fi
+          echo "policy_ref=$POLICY_REF" >> "$GITHUB_OUTPUT"
+      - name: Finish Policy-Only Maintenance Without Rebuilding The Published Application
+        if: needs.prepare.outputs.already_published == 'true' && needs.prepare.outputs.repair_pr == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+          CANDIDATE_SHA: ${{ needs.prepare.outputs.sha }}
+          FULL_REVIEW_SHA: ${{ needs.prepare.outputs.full_review_sha }}
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream }}
+          PATCHSET_SHA256: ${{ needs.prepare.outputs.patchset }}
+          DELTA_PR: ${{ needs.prepare.outputs.delta_pr }}
+          DELTA_BASE: ${{ needs.prepare.outputs.delta_base }}
+          DELTA_SHA: ${{ needs.prepare.outputs.delta_sha }}
+        run: |
+          python3 -B - <<'PY'
+          import os, pathlib, sys
+          sys.path.insert(0, str(pathlib.Path('checked/scripts').resolve()))
+          import release
+          upstream, patchset = os.environ['UPSTREAM_SHA'], os.environ['PATCHSET_SHA256']
+          release.close_published_reviews(os.environ['GITHUB_REPOSITORY'],
+              os.environ['FULL_REVIEW_SHA'], upstream,
+              f"review/{os.environ['FULL_REVIEW_SHA']}", shared=True)
+          PY
+
+  repair:
+    name: Request Native Codex Repair Or Escalate Explicitly
+    needs: [prepare, policy-check, test, publish, land, verify-bootstrap-bundle, activate-policy]
+    if: >-
+      always() && github.ref == 'refs/heads/downstream' &&
+      github.event.repository.default_branch == 'downstream' &&
+      (contains(needs.*.result, 'failure') || needs.prepare.outputs.followup == 'true') &&
+      (vars.ZED_TRUSTED_POLICY != '' ||
+       needs.verify-bootstrap-bundle.result == 'success' ||
+       needs.verify-bootstrap-bundle.result == 'failure') && !cancelled()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        if: needs.activate-policy.outputs.policy_ref != '' || needs.verify-bootstrap-bundle.result == 'success' || needs.prepare.outputs.trusted_policy != '' || vars.ZED_TRUSTED_POLICY != ''
+        with:
+          ref: ${{ needs.activate-policy.outputs.policy_ref || (needs.verify-bootstrap-bundle.result == 'success' && needs.verify-bootstrap-bundle.outputs.policy_ref) || needs.prepare.outputs.trusted_policy || vars.ZED_TRUSTED_POLICY }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.land.outputs.config || github.sha }}
+          path: configuration
+          persist-credentials: false
+      - name: Read The Exact Private Maintenance Lock
+        if: needs.verify-bootstrap-bundle.result != 'failure'
+        id: maintenance
+        run: |
+          python3 -B - "trusted/scripts/maintenance.lock.json" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, pathlib, re, sys
+          path = pathlib.Path(sys.argv[1])
+          if path.is_symlink() or not path.is_file():
+              raise SystemExit("The reviewed maintenance lock is missing")
+          lock = json.loads(path.read_text())
+          if lock.get("repository") != "warelik/machine-maintenance" or not re.fullmatch(r"[0-9a-f]{40}", lock.get("revision", "")):
+              raise SystemExit("The reviewed maintenance revision is invalid")
+          print("revision=" + lock["revision"])
+          PY
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.verify-bootstrap-bundle.result != 'failure'
+        with:
+          repository: warelik/machine-maintenance
+          ref: ${{ steps.maintenance.outputs.revision }}
+          ssh-key: ${{ secrets.MAINTENANCE_READ_KEY }}
+          path: maintenance
+          persist-credentials: false
+      - name: Record The Acquired Private Source Identity
+        if: needs.verify-bootstrap-bundle.result != 'failure'
+        env:
+          MAINTENANCE_REVISION: ${{ steps.maintenance.outputs.revision }}
+        run: |
+          test "$(git -C maintenance rev-parse HEAD)" = "$MAINTENANCE_REVISION"
+          python3 -B - <<'PY'
+          import json, os, pathlib
+          pathlib.Path("maintenance/.maintenance-source.json").write_text(json.dumps({
+              "repository": "warelik/machine-maintenance",
+              "revision": os.environ["MAINTENANCE_REVISION"]}))
+          PY
+      - name: Repair The Actual Failure Without Publishing Or Disrupting Editors
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream || needs.verify-bootstrap-bundle.outputs.upstream }}
+          CANDIDATE_PR: ${{ needs.prepare.outputs.pr }}
+          CANDIDATE_SHA: ${{ needs.prepare.outputs.sha }}
+          FULL_REVIEW_SHA: ${{ needs.prepare.outputs.full_review_sha }}
+          MAINTENANCE_CANDIDATE: ${{ needs.prepare.outputs.maintenance_candidate }}
+          REPAIR_HEAD: ${{ needs.prepare.outputs.repair_head }}
+          NONBLOCKING_FOLLOWUP: ${{ !contains(needs.*.result, 'failure') && needs.prepare.outputs.followup == 'true' }}
+          FINAL_VALIDATION_FAILED: ${{ needs.test.result == 'failure' || needs.publish.result == 'failure' || needs.prepare.outputs.final_failed == 'true' || needs.activate-policy.outputs.final_failed == 'true' }}
+          BOOTSTRAP_BUNDLE_FAILED: ${{ needs.verify-bootstrap-bundle.result == 'failure' }}
+          BOOTSTRAP_FULL_PR: ${{ inputs.full_pr }}
+          BOOTSTRAP_DELTA_PR: ${{ inputs.delta_pr }}
+          CONFIG_SHA: ${{ needs.land.outputs.config || github.sha }}
+          DELTA_PR: ${{ needs.prepare.outputs.delta_pr }}
+          DELTA_BASE: ${{ needs.prepare.outputs.delta_base }}
+          DELTA_SHA: ${{ needs.prepare.outputs.delta_sha }}
+        run: |
+          python3 -B - <<'PY'
+          import json, os, pathlib, re, sys, urllib.error, urllib.parse, urllib.request
+          trusted_scripts = pathlib.Path('trusted/scripts')
+          if trusted_scripts.joinpath('release.py').is_file():
+              sys.path.insert(0, str(trusted_scripts.resolve()))
+              import release
+              release.ROOT = pathlib.Path('configuration').resolve()
+              if os.environ['BOOTSTRAP_BUNDLE_FAILED'] == 'true':
+                  repo = os.environ['GITHUB_REPOSITORY']
+                  upstream = os.environ['UPSTREAM_SHA']
+                  full_pr = os.environ['BOOTSTRAP_FULL_PR']
+                  if not release.SHA.fullmatch(upstream or '') and full_pr.isdigit():
+                      pull = release.api(f"repos/{repo}/pulls/{full_pr}")
+                      base, head = pull.get('base') or {}, pull.get('head') or {}
+                      base_sha = base.get('sha', '')
+                      if (pull.get('number') == int(full_pr)
+                              and (base.get('repo') or {}).get('full_name') == repo
+                              and (head.get('repo') or {}).get('full_name') == repo
+                              and base.get('ref') == f"review-base/{base_sha}"
+                              and head.get('ref', '').startswith('review/')
+                              and release.SHA.fullmatch(base_sha)):
+                          upstream = base_sha
+                  if not release.SHA.fullmatch(upstream or ''):
+                      upstream = 'unresolved'
+                  evidence = release.failure_evidence(repo)
+                  links = f"\n\nFull workflow: https://github.com/{repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+                  for label, key in (("Complete review", "BOOTSTRAP_FULL_PR"),
+                                     ("Delta review", "BOOTSTRAP_DELTA_PR")):
+                      number = os.environ.get(key, '')
+                      if number.isdigit():
+                          links += f"\n{label}: https://github.com/{repo}/pull/{number}"
+                  release.escalation(repo, os.environ['CONFIG_SHA'], upstream,
+                                     'The private native policy bundle could not be verified; candidate tests, '
+                                     'activation and macOS never started.\n' + evidence + links)
+              else:
+                  release.request_repair(pathlib.Path(os.environ['RUNNER_TEMP']) / 'zed-repair',
+                                         config=os.environ['CONFIG_SHA'])
+          else:
+              if os.environ['BOOTSTRAP_BUNDLE_FAILED'] != 'true':
+                  raise SystemExit('Trusted controller pin is required for repair outside bootstrap-bundle failure')
+              sha_re = re.compile(r'^[0-9a-f]{40}$')
+              repo = os.environ['GITHUB_REPOSITORY']
+              owner = repo.split('/')[0]
+              config = os.environ['CONFIG_SHA']
+              token = os.environ['GH_TOKEN']
+              class NativeRedirects(urllib.request.HTTPRedirectHandler):
+                  def redirect_request(self, request, fp, code, message, headers, new_url):
+                      target = urllib.parse.urlsplit(new_url)
+                      if target.scheme != 'https' or target.netloc != 'api.github.com':
+                          raise ValueError('Native API redirect leaves the authenticated GitHub host')
+                      return super().redirect_request(request, fp, code, message, headers, new_url)
+              opener = urllib.request.build_opener(NativeRedirects())
+              def gh_req(route, *, method='GET', payload=None, raw_text=False):
+                  headers = {'Accept': 'application/vnd.github+json',
+                             'Authorization': f'Bearer {token}',
+                             'X-GitHub-Api-Version': '2022-11-28',
+                             'User-Agent': 'zed-bootstrap-escalation'}
+                  body = None
+                  if payload is not None:
+                      body = json.dumps(payload).encode('utf-8')
+                      headers['Content-Type'] = 'application/json'
+                  req = urllib.request.Request('https://api.github.com/' + route.lstrip('/'),
+                                               data=body, headers=headers, method=method)
+                  with opener.open(req, timeout=60) as resp:
+                      raw = resp.read().decode('utf-8', errors='replace')
+                  return raw if raw_text else (json.loads(raw) if raw.strip() else None)
+              upstream = os.environ['UPSTREAM_SHA']
+              full_pr = os.environ['BOOTSTRAP_FULL_PR']
+              if not sha_re.fullmatch(upstream or '') and full_pr.isdigit():
+                  pull = gh_req(f'repos/{repo}/pulls/{full_pr}')
+                  base, head = pull.get('base') or {}, pull.get('head') or {}
+                  base_sha = base.get('sha', '')
+                  if (pull.get('number') == int(full_pr)
+                          and (base.get('repo') or {}).get('full_name') == repo
+                          and (head.get('repo') or {}).get('full_name') == repo
+                          and base.get('ref') == f'review-base/{base_sha}'
+                          and head.get('ref', '').startswith('review/')
+                          and sha_re.fullmatch(base_sha)):
+                      upstream = base_sha
+              if not sha_re.fullmatch(upstream or ''):
+                  upstream = 'unresolved'
+              run_id = os.environ['GITHUB_RUN_ID']
+              lines = [f'Workflow evidence: https://github.com/{repo}/actions/runs/{run_id}']
+              jobs = gh_req(f'repos/{repo}/actions/runs/{run_id}/jobs?per_page=100') or {}
+              for job in jobs.get('jobs', []):
+                  if job.get('conclusion') == 'failure':
+                      lines.append(f"\nFailed job: {job.get('name')}\n")
+                      try:
+                          logs = gh_req(f"repos/{repo}/actions/jobs/{job['id']}/logs", raw_text=True)
+                          logs = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', logs)
+                          logs = re.sub(r'[\x00-\x08\x0b-\x1f\x7f]', '', logs)
+                          lines.append(logs[-18000:])
+                      except Exception:
+                          lines.append(f"Log unavailable; inspect {job.get('html_url')}")
+              links = f'\n\nFull workflow: https://github.com/{repo}/actions/runs/{run_id}'
+              for label, key in (('Complete review', 'BOOTSTRAP_FULL_PR'),
+                                 ('Delta review', 'BOOTSTRAP_DELTA_PR')):
+                  number = os.environ.get(key, '')
+                  if number.isdigit():
+                      links += f'\n{label}: https://github.com/{repo}/pull/{number}'
+              reason = ('The private native policy bundle could not be verified; candidate tests, '
+                        'activation and macOS never started.\n' + '\n'.join(lines)[-24000:] + links).replace('<!--', '&lt;!--')
+              marker = f'<!-- zed-escalation:{config}:{upstream} -->'
+              trusted_actors = {('github-actions[bot]', 'Bot'), (owner, 'User')}
+              for page in range(1, 1001):
+                  batch = gh_req(f'repos/{repo}/issues?state=open&per_page=100&page={page}') or []
+                  for issue in batch:
+                      user = issue.get('user') if isinstance(issue.get('user'), dict) else {}
+                      if (not issue.get('pull_request') and marker in (issue.get('body') or '')
+                              and (user.get('login'), user.get('type')) in trusted_actors):
+                          raise SystemExit(f"Machine repair remains blocked: {issue.get('html_url')}")
+                  if len(batch) < 100:
+                      break
+              issue = gh_req(f'repos/{repo}/issues', method='POST', payload={
+                  'title': 'zed: autonomous repair needs a decision',
+                  'assignees': [owner],
+                  'body': (
+                      f'@{owner} The bounded machine repair did not produce a verified fix. '
+                      'Publication is blocked; the last verified release is retained. '
+                      'No server deployment or data change is performed by this workflow.\n\n'
+                      f'Configuration: `{config}`. Upstream: `{upstream}`.\n\n'
+                      f"Evidence:\n```\n{reason[-16000:].replace('```', chr(39) * 3)}\n```\n\n"
+                      'Do not weaken review/tests or introduce a workaround.\n\n' + marker),
+              })
+              raise SystemExit(f"Machine repair escalated: {issue.get('html_url')}")
+          PY
+
+  verify-bootstrap-bundle:
+    name: Verify Private Native Policy Bundle Before Activation
+    if: github.event_name == 'workflow_dispatch' && inputs.policy_bootstrap
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+    outputs:
+      policy_ref: ${{ steps.bundle.outputs.policy_ref }}
+      maintenance_candidate: ${{ steps.bundle.outputs.maintenance_candidate }}
+      delta_pr: ${{ steps.bundle.outputs.delta_pr }}
+      delta_base: ${{ steps.bundle.outputs.delta_base }}
+      upstream: ${{ steps.bundle.outputs.upstream }}
+    steps:
+      - name: Require The Trusted Default Branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          test "$DEFAULT_BRANCH" = downstream
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.policy_ref || github.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow-source
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: warelik/machine-maintenance
+          ref: 0cfc0e6cd5010c423e91db95c35d7a5c1e9473eb
+          ssh-key: ${{ secrets.MAINTENANCE_READ_KEY }}
+          path: maintenance-verifier
+          persist-credentials: false
+      - name: Read The Exact Private Maintenance Lock
+        id: maintenance
+        run: |
+          python3 -B - "candidate/scripts/maintenance.lock.json" \
+            "workflow-source/scripts/maintenance.lock.json" \
+            "candidate/scripts/maintenance.py" "workflow-source/scripts/maintenance.py" \
+            "maintenance-verifier/fork_lifecycle.py" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, pathlib, re, sys
+          candidate_lock, workflow_lock, candidate_loader, workflow_loader, verifier_core = map(pathlib.Path, sys.argv[1:])
+          paths = (candidate_lock, workflow_lock, candidate_loader, workflow_loader, verifier_core)
+          if any(path.is_symlink() or not path.is_file() for path in paths):
+              raise SystemExit("Candidate, native-workflow and private-verifier inputs must be regular files")
+          if candidate_loader.read_bytes() != workflow_loader.read_bytes():
+              raise SystemExit("Candidate public loader differs from the native workflow-source loader")
+          if candidate_lock.read_bytes() != workflow_lock.read_bytes():
+              raise SystemExit("Candidate maintenance lock differs from the native workflow-source lock")
+          lock = json.loads(candidate_lock.read_text(encoding="utf-8"))
+          if (lock.get("repository") != "warelik/machine-maintenance"
+                  or not re.fullmatch(r"[0-9a-f]{40}", lock.get("revision", ""))
+                  or not re.fullmatch(r"[0-9a-f]{64}", lock.get("module_sha256", ""))
+                  or lock.get("api_version") != 1 or lock.get("schema") != 1):
+              raise SystemExit("The reviewed maintenance revision is invalid")
+          print("revision=" + lock["revision"])
+          PY
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: warelik/machine-maintenance
+          ref: ${{ steps.maintenance.outputs.revision }}
+          ssh-key: ${{ secrets.MAINTENANCE_READ_KEY }}
+          path: maintenance
+          persist-credentials: false
+      - name: Record The Acquired Private Source Identity
+        env:
+          MAINTENANCE_REVISION: ${{ steps.maintenance.outputs.revision }}
+        run: |
+          python3 -B - <<'PY'
+          import json, os, pathlib, re, subprocess
+          verifier_root = pathlib.Path("maintenance-verifier")
+          expected_verifier = "0cfc0e6cd5010c423e91db95c35d7a5c1e9473eb"
+          verifier_rev = subprocess.check_output(
+              ["git", "-C", str(verifier_root), "rev-parse", "HEAD"], text=True).strip()
+          if (not re.fullmatch(r"[0-9a-f]{40}", expected_verifier)
+                  or verifier_rev != expected_verifier):
+              raise SystemExit("Accepted private verifier checkout differs from its pinned immutable revision")
+          (verifier_root / ".maintenance-source.json").write_text(json.dumps({
+              "repository": "warelik/machine-maintenance", "revision": verifier_rev}))
+          root = pathlib.Path("maintenance")
+          revision = os.environ["MAINTENANCE_REVISION"]
+          actual = subprocess.check_output(
+              ["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+          if actual != revision:
+              raise SystemExit("Private checkout differs from its exact revision")
+          (root / ".maintenance-source.json").write_text(json.dumps({
+              "repository": "warelik/machine-maintenance", "revision": revision}))
+          PY
+      - name: Verify The Complete Native Pair And Private Policy Receipt
+        id: bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_REQUEST_TOKEN: ${{ secrets.CODEX_REQUEST_TOKEN }}
+          POLICY_REF: ${{ inputs.policy_ref || github.sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          FULL_PR: ${{ inputs.full_pr }}
+          DELTA_PR: ${{ inputs.delta_pr }}
+        run: |
+          python3 -B - <<'PY'
+          import hashlib, importlib.util, json, os, pathlib, re, subprocess, sys, urllib.parse, urllib.request
+          repo = os.environ['GITHUB_REPOSITORY']
+          owner = repo.split('/')[0]
+          public_token = os.environ['GH_TOKEN']
+          private_token = os.environ['CODEX_REQUEST_TOKEN']
+          class NativeRedirects(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, request, fp, code, message, headers, new_url):
+                  target = urllib.parse.urlsplit(new_url)
+                  if target.scheme != 'https' or target.netloc != 'api.github.com':
+                      raise ValueError('Native API redirect leaves the authenticated GitHub host')
+                  return super().redirect_request(request, fp, code, message, headers, new_url)
+          opener = urllib.request.build_opener(NativeRedirects())
+          def native_api(route, *, token=None):
+              auth = token or public_token
+              headers = {'Accept': 'application/vnd.github+json',
+                         'Authorization': f'Bearer {auth}',
+                         'X-GitHub-Api-Version': '2022-11-28',
+                         'User-Agent': 'zed-bootstrap-verifier'}
+              req = urllib.request.Request('https://api.github.com/' + route.lstrip('/'),
+                                           headers=headers, method='GET')
+              with opener.open(req, timeout=60) as resp:
+                  raw = resp.read().decode('utf-8')
+              return json.loads(raw) if raw.strip() else None
+          def native_pages(route):
+              result = []
+              sep = '&' if '?' in route else '?'
+              for page in range(1, 1001):
+                  batch = native_api(f'{route}{sep}per_page=100&page={page}')
+                  if not isinstance(batch, list):
+                      raise ValueError('Expected a paginated GitHub list')
+                  result.extend(batch)
+                  if len(batch) < 100:
+                      return result
+              raise ValueError('GitHub pagination did not terminate')
+          def load_private_core(directory, expected_lock=None):
+              root = pathlib.Path(directory)
+              if root.is_symlink() or not root.is_dir():
+                  raise SystemExit('Private maintenance root must be a regular directory')
+              receipt_path = root / '.maintenance-source.json'
+              module_path = root / 'fork_lifecycle.py'
+              if any(p.is_symlink() or not p.is_file() for p in (receipt_path, module_path)):
+                  raise SystemExit('Private maintenance source receipt or module is missing')
+              source_receipt = json.loads(receipt_path.read_text(encoding='utf-8'))
+              if (source_receipt.get('repository') != 'warelik/machine-maintenance'
+                      or not re.fullmatch(r'[0-9a-f]{40}', source_receipt.get('revision', ''))):
+                  raise SystemExit('Private maintenance source receipt is malformed')
+              raw = module_path.read_bytes()
+              digest = hashlib.sha256(raw).hexdigest()
+              if expected_lock is not None:
+                  if (source_receipt.get('revision') != expected_lock.get('revision')
+                          or digest != expected_lock.get('module_sha256')):
+                      raise SystemExit('Private maintenance checkout differs from the candidate lock')
+              name = '_private_fork_lifecycle_' + digest
+              spec = importlib.util.spec_from_file_location(name, module_path)
+              if spec is None or spec.loader is None:
+                  raise SystemExit('Unable to prepare private lifecycle module spec')
+              mod = importlib.util.module_from_spec(spec)
+              try:
+                  spec.loader.exec_module(mod)
+              except Exception as error:
+                  raise SystemExit('Private checked-bundle verification failed: ' + type(error).__name__ + ': ' + str(error)) from None
+              if getattr(mod, 'API_VERSION', None) != 1:
+                  raise SystemExit('Private lifecycle API version is unsupported')
+              mod._maintenance_lock_identity = {
+                  'repository': 'warelik/machine-maintenance',
+                  'revision': source_receipt['revision'],
+                  'module_sha256': digest,
+                  'api_version': 1,
+              }
+              return mod
+          policy = subprocess.check_output(['git', '-C', 'candidate', 'rev-parse', 'HEAD'], text=True).strip()
+          workflow_sha = os.environ['WORKFLOW_SHA']
+          workflow_source = pathlib.Path('workflow-source').resolve()
+          if (not re.fullmatch(r'[0-9a-f]{40}', workflow_sha)
+                  or policy != os.environ['POLICY_REF'] or policy != os.environ['GITHUB_SHA']
+                  or workflow_sha != os.environ['GITHUB_SHA']
+                  or subprocess.check_output(['git', '-C', str(workflow_source), 'rev-parse', 'HEAD'],
+                                             text=True).strip() != workflow_sha):
+              raise SystemExit('Bootstrap policy must be the exact dispatched default-branch revision')
+          if (pathlib.Path('candidate/scripts/maintenance.py').read_bytes()
+                  != (workflow_source / 'scripts/maintenance.py').read_bytes()):
+              raise SystemExit('Candidate loader changed after its native workflow-source comparison')
+          default_head = (native_api(f'repos/{repo}/commits/downstream') or {}).get('sha')
+          if default_head != policy or default_head != workflow_sha:
+              raise SystemExit('Trusted default branch moved; restart the bundle bootstrap for its exact head')
+          full_pr = os.environ['FULL_PR']
+          if not re.fullmatch(r'[1-9][0-9]*', full_pr):
+              raise SystemExit('The exact complete-project review PR is required')
+          comments = native_pages(f'repos/{repo}/issues/{full_pr}/comments')
+          receipts = []
+          pattern = re.compile(r'<!-- machine-maintenance-bundle:v1 (\{[^\n]*\}) -->')
+          def unique(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError('Duplicate JSON field in native bundle receipt')
+                  result[key] = value
+              return result
+          for comment in comments:
+              user = comment.get('user') or {}
+              if user.get('login') != owner or user.get('type') != 'User':
+                  continue
+              markers = pattern.findall(comment.get('body') or '')
+              if len(markers) > 1:
+                  raise SystemExit('Owner bundle comment has duplicated native marker')
+              if not markers:
+                  continue
+              try:
+                  receipt = json.loads(markers[0], object_pairs_hook=unique)
+                  target = receipt['manifest']['targets'][repo]
+              except (KeyError, TypeError, ValueError) as error:
+                  raise SystemExit('Owner bundle comment has no exact Zed manifest candidate') from error
+              candidate = target.get('candidate') if isinstance(target, dict) else None
+              if (isinstance(candidate, dict)
+                      and candidate.get('configuration_sha') == policy
+                      and target.get('full', {}).get('pr') == int(full_pr)):
+                  receipts.append((candidate, target, comment, receipt))
+          if len(receipts) != 1:
+              raise SystemExit('Exactly one private bundle receipt must bind this exact policy and full-review PR')
+          candidate, target, comment, receipt = receipts[0]
+          delta_pr = str(target['delta']['pr'])
+          if os.environ['DELTA_PR'] and os.environ['DELTA_PR'] != delta_pr:
+              raise SystemExit('Dispatched delta PR differs from the private manifest')
+          private_route = re.compile(
+              r'repos/warelik/machine-maintenance/(?:'
+              r'actions/variables/(?:MAINTENANCE_VALIDATION_MANIFEST|MAINTENANCE_TRUSTED_DISPATCHER)|'
+              r'contents/(?:fork_lifecycle\.py|bootstrap\.py|bundle_runner\.py|'
+              r'\.github/workflows/policy\.yml)\?ref=[0-9a-f]{40}|'
+              r'git/blobs/[0-9a-f]{40}|'
+              r'actions/runs/[1-9][0-9]*/attempts/[1-9][0-9]*(?:/jobs)?'
+              r'(?:\?per_page=100&page=[1-9][0-9]*)?)')
+          def read_native(route):
+              if not isinstance(route, str) or '\n' in route or '\r' in route:
+                  raise ValueError('Malformed native GET route')
+              if route.startswith(f'repos/{repo}/'):
+                  return native_api(route)
+              if private_route.fullmatch(route):
+                  return native_api(route, token=private_token)
+              raise ValueError('The private receipt verifier requested an unexpected native route')
+          try:
+              checked_verifier = load_private_core(pathlib.Path('maintenance-verifier').resolve())
+              manifest = checked_verifier._bundle_manifest(receipt.get('manifest'))
+              manifest_hash = checked_verifier._bundle_manifest_hash(manifest)
+              private_run = receipt.get('private_run')
+              if (set(receipt) != {'schema', 'manifest_sha256', 'manifest', 'private_run'}
+                      or type(receipt.get('schema')) is not int or receipt['schema'] != 1
+                      or receipt.get('manifest_sha256') != manifest_hash
+                      or not isinstance(private_run, dict)
+                      or set(private_run) != {'id', 'run_attempt', 'dispatcher_sha'}
+                      or any(type(private_run.get(key)) is not int or private_run[key] <= 0
+                             for key in ('id', 'run_attempt'))
+                      or private_run.get('dispatcher_sha') != manifest['shared']['dispatcher_sha']
+                      or type(comment.get('id')) is not int or comment['id'] <= 0):
+                  raise SystemExit('Owner receipt does not bind an exact private validation attempt')
+              native_comments = checked_verifier._bundle_native_pages(
+                  read_native, f'repos/{repo}/issues/{full_pr}/comments')
+              if comments != native_comments or comment not in native_comments:
+                  raise SystemExit('Owner receipt differs from the complete native comment evidence')
+              shared = manifest['shared']
+              candidate_lock = json.loads(pathlib.Path('candidate/scripts/maintenance.lock.json').read_text())
+              source_fields = ('repository', 'revision', 'module_sha256', 'api_version')
+              if {key: candidate_lock[key] for key in source_fields} != {
+                      key: shared[key] for key in source_fields}:
+                  raise SystemExit('Candidate lock differs from the privately validated source')
+              # Authenticate the final run with checked private code before loading the candidate lock module.
+              checked_verifier._bundle_source_hash(read_native, shared)
+              _, _, finished = checked_verifier._bundle_private_run(
+                  read_native, receipt, manifest_hash, shared)
+              created = checked_verifier._timestamp(comment.get('created_at'))
+              if (checked_verifier._timestamp(comment.get('updated_at')) != created
+                      or created < finished):
+                  raise SystemExit('Owner receipt was edited or predates final private validation')
+              maintenance = load_private_core(pathlib.Path('maintenance').resolve(), expected_lock=candidate_lock)
+              proof = maintenance.validated_bundle(candidate, comments, read_native)
+              if (not isinstance(proof, dict) or proof.get('decision') != 'reuse-policy-validation'
+                      or proof.get('candidate_id') != maintenance.candidate_identity(candidate)
+                      or proof.get('shared_source') != maintenance._maintenance_lock_identity
+                      or proof.get('heavy_build_allowed') is not False
+                      or proof.get('application_artifact_verified') is not False):
+                  raise SystemExit('Private bundle did not prove exact policy validation without authorizing a build')
+          except Exception as error:
+              raise SystemExit('Private checked-bundle verification failed: ' + type(error).__name__ + ': ' + str(error)) from None
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('verified=true\n')
+              out.write('policy_ref=' + policy + '\n')
+              out.write('maintenance_candidate=' + json.dumps(candidate, sort_keys=True, separators=(',', ':')) + '\n')
+              out.write('delta_pr=' + delta_pr + '\n')
+              out.write('delta_base=' + target['delta']['base_sha'] + '\n')
+              out.write('upstream=' + candidate['upstream_sha'] + '\n')
+          PY

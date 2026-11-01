@@ -1,0 +1,69 @@
+From 7e84c98f41af75f7b99a5b8f00a6180097eeeee2 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 08:03:16 +0000
+Subject: [PATCH 73/90] Require an available project group before fetching
+ replacement toolbar rows
+
+Resolve the complete145/146 review batch: P24311494999 on145, delta146 clean. Apply the existing shows_sidebar_tab_rows predicate in the common fetch used by actual toolbar rendering, so a provider offering empty rows cannot replace the active-entry toolbar in a fresh empty workspace. Preserve the original empty-workspace regression and its assertion, make the existing test sidebar reproduce production Some rows under the opt-in, and assert the actual render data path returns None. No constructor fields, dependency, compiler recipe or selected207 identity changes; no intermediate tests executed.
+
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index c616fff1aa..062febae84 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -6726,6 +6726,9 @@ impl AgentPanel {
+     }
+ 
+     fn sidebar_tab_rows(window: &Window, cx: &mut App) -> Option<workspace::AgentPanelTabRows> {
++        if !Self::shows_sidebar_tab_rows(window, cx) {
++            return None;
++        }
+         window
+             .root::<MultiWorkspace>()
+             .flatten()?
+@@ -10830,13 +10833,19 @@ mod tests {
+         let multi_workspace =
+             cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+         let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
+-        register_test_sidebar(true, &mut cx);
++        let sidebar = register_test_sidebar(true, &mut cx);
+ 
+         cx.update(|window, cx| {
++            assert!(workspace::threads_sidebar_in_agent_panel(cx));
++            assert!(sidebar.update(cx, |sidebar, cx| {
++                workspace::Sidebar::agent_panel_tab_rows(sidebar, cx)
++            }).is_some(), "the provider must offer rows just as the production sidebar does");
+             assert!(
+                 !AgentPanel::shows_sidebar_tab_rows(window, cx),
+                 "empty tab rows must not replace the active entry toolbar"
+             );
++            assert!(AgentPanel::sidebar_tab_rows(window, cx).is_none(),
++                "the rendering path must reject replacement rows without an active project group");
+         });
+     }
+ 
+diff --git a/crates/agent_ui/src/test_support.rs b/crates/agent_ui/src/test_support.rs
+index c0238fca68..3c35f12cfc 100644
+--- a/crates/agent_ui/src/test_support.rs
++++ b/crates/agent_ui/src/test_support.rs
+@@ -200,6 +200,20 @@ impl WorkspaceSidebar for TestWorkspaceSidebar {
+     fn is_threads_list_view_active(&self) -> bool {
+         self.threads_list_active
+     }
++
++    fn agent_panel_tab_rows(
++        &mut self,
++        cx: &mut Context<Self>,
++    ) -> Option<workspace::AgentPanelTabRows> {
++        if !workspace::threads_sidebar_in_agent_panel(cx) {
++            return None;
++        }
++        Some(workspace::AgentPanelTabRows {
++            projects: cx.new(|cx| Self::new(self.threads_list_active, cx)).into(),
++            threads: cx.new(|cx| Self::new(self.threads_list_active, cx)).into(),
++            add_project: cx.new(|cx| Self::new(self.threads_list_active, cx)).into(),
++        })
++    }
+ }
+ 
+ impl Render for TestWorkspaceSidebar {

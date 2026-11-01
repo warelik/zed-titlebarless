@@ -1,0 +1,65 @@
+From 3b583f557b5e11372ad2939c59098525bc695727 Mon Sep 17 00:00:00 2001
+From: "github-actions[bot]"
+ <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 23:51:13 +0000
+Subject: [PATCH 77/90] Keep empty workspaces transient during real sidebar
+ updates
+
+
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index 52506a61a8..76b8b301e9 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -2143,7 +2143,15 @@ impl Sidebar {
+ 
+         if Self::in_agent_panel(cx) {
+             multi_workspace.update(cx, |multi_workspace, cx| {
+-                multi_workspace.retain_active_workspace(cx);
++                if !multi_workspace
++                    .workspace()
++                    .read(cx)
++                    .project_group_key(cx)
++                    .path_list()
++                    .is_empty()
++                {
++                    multi_workspace.retain_active_workspace(cx);
++                }
+             });
+         }
+ 
+diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
+index bea8de76d5..9b36d25548 100644
+--- a/crates/sidebar/src/sidebar_tests.rs
++++ b/crates/sidebar/src/sidebar_tests.rs
+@@ -18027,6 +18027,31 @@ fn set_threads_sidebar_in_agent_panel(in_agent_panel: bool, cx: &mut VisualTestC
+     });
+ }
+ 
++#[gpui::test]
++async fn test_agent_panel_sidebar_keeps_empty_workspace_transient(cx: &mut TestAppContext) {
++    init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
++    let project = project::Project::test(fs, [], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
++    let workspace = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
++
++    for in_agent_panel in [true, false, true] {
++        set_threads_sidebar_in_agent_panel(in_agent_panel, cx);
++        cx.run_until_parked();
++        sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
++        cx.run_until_parked();
++        multi_workspace.read_with(cx, |mw, _cx| {
++            assert_eq!(mw.workspace(), &workspace);
++            assert_eq!(mw.workspaces().count(), 1);
++            assert!(mw.project_group_keys().is_empty());
++            assert!(!mw.active_workspace_is_retained());
++        });
++    }
++}
++
+ #[gpui::test]
+ async fn test_m2_in_agent_panel_does_not_clobber_sidebar_open_state(cx: &mut TestAppContext) {
+     let project = init_test_project_with_agent_panel("/my-project", cx).await;
