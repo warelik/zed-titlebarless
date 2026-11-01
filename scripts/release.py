@@ -152,12 +152,15 @@ def initial_baseline_proof(repo):
 
 def is_initial_baseline_proof(proof, repo):
     return (
-        isinstance(proof, dict)
+        isinstance(repo, str)
+        and bool(repo)
+        and isinstance(proof, dict)
         and set(proof) == {"endpoint", "variable", "publication_endpoint", "publications"}
         and proof.get("endpoint") == f"repos/{repo}/actions/variables/FORK_ACCEPTED_BASELINE"
         and proof.get("variable") is None
         and proof.get("publication_endpoint") == f"repos/{repo}/releases"
-        and proof.get("publications") == []
+        and type(proof.get("publications")) is list
+        and proof["publications"] == []
     )
 
 
@@ -176,13 +179,15 @@ def _non_draft_releases(releases):
 def _baseline_published_at(proof, repo):
     if is_initial_baseline_proof(proof, repo):
         return None
-    if not isinstance(proof, dict) or not isinstance(proof.get("variable"), dict):
+    if (not isinstance(proof, dict) or not isinstance(proof.get("variable"), dict)
+            or not isinstance(proof["variable"].get("value"), str)):
         raise ValueError("Accepted baseline proof is malformed")
     value = strict_json(proof["variable"]["value"], "Accepted baseline")
     publication = value.get("publication") if isinstance(value, dict) else None
-    if not isinstance(publication, dict) or value.get("repository") != repo:
+    published_at = publication.get("published_at") if isinstance(publication, dict) else None
+    if not isinstance(published_at, str) or not published_at:
         raise ValueError("Accepted baseline has no exact publication identity")
-    return publication["published_at"]
+    return published_at
 
 
 def initial_empty_base_commit(repo, config_sha):
@@ -1464,7 +1469,7 @@ def review_dispositions_from_comments(comments, candidate, *, published_at=None)
 
 def maintenance_pair(candidate, full_pr, full_sha, accepted, delta_pr, delta_sha, delta_base,
                      *, known_findings=(), dispositions=(), allow_closed=False):
-    repo = candidate["repository"]
+    repo = candidate.get("repository") if isinstance(candidate, dict) else None
     if is_initial_baseline_proof(accepted, repo):
         published_at = None
     else:

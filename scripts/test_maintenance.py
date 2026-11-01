@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -3308,3 +3309,32 @@ class InitialFirstReleaseTests(unittest.TestCase):
                   self.assertRaisesRegex(ValueError, expected_reason)):
                 run_case(bad_state, run_conclusion=bad_conclusion)
         self.assertEqual(artifact_queries, 1)
+
+    def test_baseline_published_at_and_pair_initial_detection_preserve_cutoff_and_fail_closed(self):
+        initial_proof = release.initial_baseline_proof(self.REPO)
+        self.assertIsNone(release._baseline_published_at(initial_proof, self.REPO))
+        for bad_repo in (None, "", 123):
+            self.assertFalse(release.is_initial_baseline_proof(initial_proof, bad_repo))
+        with self.assertRaisesRegex(ValueError, "Accepted baseline proof is malformed"):
+            release._baseline_published_at(
+                release.initial_baseline_proof("other/zed"), self.REPO)
+        with self.assertRaisesRegex(ValueError, "Accepted baseline proof is malformed"):
+            release._baseline_published_at({"variable": {}}, self.REPO)
+
+        cutoff_only = {"variable": {"value": json.dumps({
+            "publication": {"published_at": self.PUBLISHED_AT}})}}
+        self.assertEqual(release._baseline_published_at(cutoff_only, self.REPO),
+                         self.PUBLISHED_AT)
+        for bad_value in ({}, {"publication": "not-a-dict"},
+                          {"publication": {"published_at": ""}},
+                          {"publication": {"published_at": 123}}):
+            with (self.subTest(bad_value=bad_value),
+                  self.assertRaisesRegex(ValueError, "no exact publication identity")):
+                release._baseline_published_at(
+                    {"variable": {"value": json.dumps(bad_value)}}, self.REPO)
+
+        # Partial candidate without repository never enters initial-baseline mode.
+        with self.assertRaisesRegex(ValueError, "no verified publication cutoff"):
+            release.maintenance_pair(
+                {"upstream_sha": self.UPSTREAM_SHA}, 1, "3" * 40, initial_proof,
+                2, self.CONFIG, self.EMPTY_ROOT)

@@ -894,6 +894,7 @@ class BatchedReviewTests(unittest.TestCase):
 
     def test_missing_pin_bootstrap_failure_uses_verified_escalation_not_a_coding_task(self):
         import ast
+        import pathlib as pathlib_module
         import textwrap
         from types import SimpleNamespace
         from unittest.mock import Mock
@@ -904,7 +905,21 @@ class BatchedReviewTests(unittest.TestCase):
         self.assertIn("needs.verify-bootstrap-bundle.result == 'failure'", repair)
         actual_repair = repair.split("      - name: Repair The Actual Failure Without Publishing Or Disrupting Editors\n", 1)[1]
         script = textwrap.dedent(actual_repair.split("python3 -B - <<'PY'\n", 1)[1].rsplit("\n          PY", 1)[0])
-        guard = next(node for node in ast.parse(script).body if isinstance(node, ast.If))
+        parsed = ast.parse(script)
+        trusted_guards = [
+            node for node in parsed.body
+            if isinstance(node, ast.If)
+            and ast.unparse(node.test) == "trusted_scripts.joinpath('release.py').is_file()"
+        ]
+        self.assertEqual(len(trusted_guards), 1)
+        trusted_guard = trusted_guards[0]
+        bootstrap_guards = [
+            node for node in trusted_guard.body
+            if isinstance(node, ast.If)
+            and ast.unparse(node.test) == "os.environ['BOOTSTRAP_BUNDLE_FAILED'] == 'true'"
+        ]
+        self.assertEqual(len(bootstrap_guards), 1)
+        guard = bootstrap_guards[0]
         controller = SimpleNamespace(
             SHA=release.SHA, failure_evidence=Mock(return_value="actual bootstrap failure"),
             api=Mock(return_value={
@@ -930,6 +945,23 @@ class BatchedReviewTests(unittest.TestCase):
         self.assertIn("/actions/runs/123", controller.escalation.call_args.args[3])
         self.assertIn("private native policy bundle could not be verified", controller.escalation.call_args.args[3])
         self.assertIn("actual bootstrap failure", controller.escalation.call_args.args[3])
+
+        # Allowed path when trusted controller is present and bootstrap did not fail.
+        repair_controller = SimpleNamespace(request_repair=Mock(), escalation=Mock())
+        normal_env = {**environment, "BOOTSTRAP_BUNDLE_FAILED": "false", "RUNNER_TEMP": "/tmp/zed-runner"}
+        with patch.dict(os.environ, normal_env, clear=True):
+            exec(compile(ast.fix_missing_locations(ast.Module(body=[guard], type_ignores=[])),
+                         "release-workflow-normal-repair", "exec"),
+                 {"os": os, "pathlib": pathlib_module, "release": repair_controller})
+        repair_controller.request_repair.assert_called_once_with(
+            pathlib_module.Path("/tmp/zed-runner/zed-repair"), config="a" * 40)
+        repair_controller.escalation.assert_not_called()
+
+        # Refusal path when trusted controller pin is absent outside bootstrap-bundle failure.
+        with (patch.dict(os.environ, normal_env, clear=True),
+              self.assertRaisesRegex(SystemExit, "Trusted controller pin is required for repair")):
+            exec(compile(ast.fix_missing_locations(ast.Module(body=trusted_guard.orelse, type_ignores=[])),
+                         "release-workflow-missing-pin-refusal", "exec"), {"os": os})
 
     def test_inflight_snapshot_is_not_replaced_by_new_upstream_discovery(self):
         sha, patchset = "b" * 40, "d" * 64
