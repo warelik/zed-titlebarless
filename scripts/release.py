@@ -607,7 +607,7 @@ def _owner_acceptance_body(candidate, scope, number, request, sha, base):
         "candidate_id": maintenance.load().candidate_identity(candidate),
     }
     return ("<!-- machine-maintenance-owner-acceptance:v1 "
-            + json.dumps(value, separators=(",", ":")) + " -->")
+            + json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + " -->")
 
 
 def _ensure_owner_acceptance(candidate, scope, number, request, sha, base, comments):

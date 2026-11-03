@@ -281,6 +281,11 @@ class SharedZedReviewTests(unittest.TestCase):
                 candidate, "full", 7, request, "c" * 40, "d" * 40, []))
             self.assertFalse(release.request_text("c" * 40, "b" * 40, "config").startswith("@codex"))
         body = api.call_args.kwargs["data"]["body"]
+        payload = body.removeprefix(
+            "<!-- machine-maintenance-owner-acceptance:v1 ").removesuffix(" -->")
+        self.assertEqual(payload, json.dumps(
+            json.loads(payload), ensure_ascii=False, sort_keys=True,
+            separators=(",", ":")))
         self.assertIn('"candidate_id":"' + "e" * 64 + '"', body)
         self.assertIn('"request_id":7', body)
         with patch.dict(release.os.environ, {"FORK_REVIEW_MODE": "none"}), \
