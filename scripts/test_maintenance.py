@@ -2909,10 +2909,10 @@ class SharedPublicationBoundaryTests(unittest.TestCase):
 
     def test_patch_series_retains_per_group_close_keys_and_drops_duplicate_stock_remote_cases(self):
         patch_0011 = (
-            release.ROOT / "patches/0011-Keep-agent-panel-terminal-threads-alive-in-shpool-se.patch"
+            release.ROOT / "patches/0007-Keep-agent-panel-terminal-threads-in-persistent-shpo.patch"
         ).read_text()
         patch_0043 = (
-            release.ROOT / "patches/0043-preserve-project-groups-until-close-consent.patch"
+            release.ROOT / "patches/0007-Keep-agent-panel-terminal-threads-in-persistent-shpo.patch"
         ).read_text()
         manifest = json.loads((release.ROOT / "patches/source.json").read_text())
         cases = release.manifest_cases(manifest)

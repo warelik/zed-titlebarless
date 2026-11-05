@@ -1,10 +1,12 @@
-From 0fe9e350bce9af7e8bf4471c5e8656cc487be21b Mon Sep 17 00:00:00 2001
-From: "github-actions[bot]"
- <41898282+github-actions[bot]@users.noreply.github.com>
-Date: Sun, 18 Oct 2026 08:18:19 +0000
-Subject: [PATCH 35/90] Forward resolved log directories to crash-handler
- subprocesses
+From a920e7fe18464eaaa272f6a1f3d6c2ceff6889ed Mon Sep 17 00:00:00 2001
+From: warelik <warelik@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 10:36:47 +0300
+Subject: [PATCH 6/9] Keep logs in --user-data-dir and isolate crash-handler
+ log directories
 
+On macOS write logs under the user data directory when one is given,
+and forward the resolved log directory to the crash-handler and remote
+server subprocesses.
 
 diff --git a/crates/crashes/src/crashes.rs b/crates/crashes/src/crashes.rs
 index 87d6f5c640..c2faa71c69 100644
@@ -108,6 +110,70 @@ index 87d6f5c640..c2faa71c69 100644
 +    }
 +
  }
+diff --git a/crates/paths/src/paths.rs b/crates/paths/src/paths.rs
+index 9c16f1db28..a73618d3e4 100644
+--- a/crates/paths/src/paths.rs
++++ b/crates/paths/src/paths.rs
+@@ -65,6 +65,9 @@ static CURRENT_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+ /// On Windows, this is `%APPDATA%\Zed`.
+ static CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
+ 
++/// The resolved logs directory, combining custom override or platform defaults.
++static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
++
+ /// Returns the relative path to the zed_server directory on the ssh host.
+ pub fn remote_server_dir_relative() -> &'static RelPath {
+     static CACHED: LazyLock<&'static RelPath> =
+@@ -101,8 +104,10 @@ pub fn remote_wsl_server_dir_relative() -> &'static RelPath {
+ /// * The directory's path cannot be canonicalized to an absolute path
+ /// * The directory cannot be created
+ pub fn set_custom_data_dir(dir: &str) -> &'static PathBuf {
+-    if CURRENT_DATA_DIR.get().is_some() || CONFIG_DIR.get().is_some() {
+-        panic!("set_custom_data_dir called after data_dir or config_dir was initialized");
++    if CURRENT_DATA_DIR.get().is_some() || CONFIG_DIR.get().is_some() || LOGS_DIR.get().is_some() {
++        panic!(
++            "set_custom_data_dir called after data_dir, config_dir, or logs_dir was initialized"
++        );
+     }
+     CUSTOM_DATA_DIR.get_or_init(|| {
+         let path = PathBuf::from(dir);
+@@ -220,15 +225,16 @@ pub fn temp_dir() -> &'static PathBuf {
+ 
+ /// Returns the path to the hang traces directory.
+ pub fn hang_traces_dir() -> &'static PathBuf {
+-    static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
+-    LOGS_DIR.get_or_init(|| data_dir().join("hang_traces"))
++    static HANG_TRACES_DIR: OnceLock<PathBuf> = OnceLock::new();
++    HANG_TRACES_DIR.get_or_init(|| data_dir().join("hang_traces"))
+ }
+ 
+ /// Returns the path to the logs directory.
+ pub fn logs_dir() -> &'static PathBuf {
+-    static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
+     LOGS_DIR.get_or_init(|| {
+-        if cfg!(target_os = "macos") {
++        // `--user-data-dir` keeps the logs too, so that a second instance does not write into
++        // the logs of the instance using the default location.
++        if cfg!(target_os = "macos") && CUSTOM_DATA_DIR.get().is_none() {
+             home_dir().join("Library/Logs").join(APP_NAME)
+         } else {
+             data_dir().join("logs")
+@@ -635,3 +641,15 @@ pub fn global_gitignore_path() -> Option<PathBuf> {
+         .get_or_init(::ignore::gitignore::gitconfig_excludes_path)
+         .clone()
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    #[should_panic(expected = "set_custom_data_dir called after")]
++    fn test_set_custom_data_dir_panics_if_logs_dir_initialized() {
++        let _ = logs_dir();
++        set_custom_data_dir("/tmp/test-zed-custom-data-dir");
++    }
++}
 diff --git a/crates/remote_server/src/main.rs b/crates/remote_server/src/main.rs
 index 58123ebb95..63bb499f13 100644
 --- a/crates/remote_server/src/main.rs
@@ -152,7 +218,7 @@ index 48004fddd5..9ac95713a3 100644
          .detach();
      };
 diff --git a/crates/zed/src/main.rs b/crates/zed/src/main.rs
-index c3bde91b04..509fe5af02 100644
+index 78dad31e73..9b25ad7e86 100644
 --- a/crates/zed/src/main.rs
 +++ b/crates/zed/src/main.rs
 @@ -221,7 +221,8 @@ fn main() {

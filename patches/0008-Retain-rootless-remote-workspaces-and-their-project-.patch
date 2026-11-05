@@ -1,0 +1,971 @@
+From a49e62de3243a040c6e1c7dad529e6d96333a200 Mon Sep 17 00:00:00 2001
+From: warelik <warelik@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 04:47:22 +0000
+Subject: [PATCH 8/9] Retain rootless remote workspaces and their project
+ groups
+
+Keep remote workspaces without open roots visible, restorable and
+labelled with distinct hosts and history. Distinguish rootless SSH, WSL
+and Docker connections, sanitize persisted group hosts, restore stable
+connection identities, protect overlapping context starts and check
+project metadata only for nonempty group keys.
+
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index 4b0cc3dda7..1653c6264e 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -4459,7 +4459,7 @@ impl AgentPanel {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
+-        if !self.has_open_project(cx) {
++        if !self.has_open_project(cx) && !self.supports_terminal(cx) {
+             return;
+         }
+ 
+@@ -7129,7 +7129,9 @@ impl AgentPanel {
+                             .child(rows.projects)
+                             .end_children(sandbox_status)
+                             .end_child(rows.add_project)
+-                            .when(can_create_entries, |this| this.end_child(new_thread_menu))
++                            .when(can_create_entries || supports_terminal, |this| {
++                                this.end_child(new_thread_menu)
++                            })
+                             .end_child(full_screen_button)
+                             .end_child(self.render_panel_options_menu(window, cx)),
+                     )
+@@ -7167,7 +7169,9 @@ impl AgentPanel {
+                         .flex_none()
+                         .gap_1()
+                         .children(sandbox_status)
+-                        .when(can_create_entries, |this| this.child(new_thread_menu))
++                        .when(can_create_entries || supports_terminal, |this| {
++                            this.child(new_thread_menu)
++                        })
+                         .child(full_screen_button)
+                         .child(self.render_panel_options_menu(window, cx)),
+                 )
+@@ -10955,6 +10959,11 @@ mod tests {
+         let project = Project::test(fs, [], cx).await;
+         let multi_workspace =
+             cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
++        let workspace = multi_workspace
++            .read_with(cx, |multi_workspace, _cx| {
++                multi_workspace.workspace().clone()
++            })
++            .unwrap();
+         let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
+         let sidebar = register_test_sidebar(true, &mut cx);
+ 
+@@ -10970,6 +10979,15 @@ mod tests {
+             assert!(AgentPanel::sidebar_tab_rows(window, cx).is_none(),
+                 "the rendering path must reject replacement rows without an active project group");
+         });
++        let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
++            cx.new(|cx| AgentPanel::new(workspace, window, cx))
++        });
++        panel.update_in(&mut cx, |panel, window, cx| {
++            assert!(!panel.has_open_project(cx));
++            assert!(!panel.supports_terminal(cx));
++            panel.toggle_new_thread_menu(&ToggleNewThreadMenu, window, cx);
++            assert!(!panel.new_thread_menu_handle.is_deployed());
++        });
+     }
+ 
+     async fn setup_panel(cx: &mut TestAppContext) -> (Entity<AgentPanel>, VisualTestContext) {
+@@ -16514,6 +16532,12 @@ mod tests {
+         .await;
+ 
+         let cx = &mut VisualTestContext::from_window(remote_multi_workspace.into(), cx);
++        cx.update(|_, cx| {
++            let mut settings = AgentSettings::get_global(cx).clone();
++            settings.threads_sidebar.in_agent_panel = true;
++            AgentSettings::override_global(settings, cx);
++        });
++        let _sidebar = register_test_sidebar(true, cx);
+         let async_cx = cx.update(|window, cx| window.to_async(cx));
+         let loaded = AgentPanel::load(workspace.downgrade(), async_cx)
+             .await
+@@ -16533,6 +16557,21 @@ mod tests {
+                 "restored active terminal must be active even if remote workspace root_paths is empty"
+             );
+         });
++        workspace.update_in(cx, |workspace, window, cx| {
++            workspace.add_panel(loaded.clone(), window, cx);
++            workspace.focus_panel::<AgentPanel>(window, cx);
++        });
++        cx.run_until_parked();
++        loaded.update_in(cx, |panel, window, cx| {
++            assert!(!panel.has_open_project(cx));
++            assert!(panel.supports_terminal(cx));
++            panel.toggle_new_thread_menu(&ToggleNewThreadMenu, window, cx);
++        });
++        cx.run_until_parked();
++        loaded.read_with(cx, |panel, _cx| {
++            assert!(panel.new_thread_menu_handle.is_deployed());
++        });
++        assert!(cx.debug_bounds("MENU_ITEM-Terminal").is_some());
+         assert_eq!(
+             fake.attach_history().len(),
+             1,
+diff --git a/crates/project/src/project.rs b/crates/project/src/project.rs
+index 13c33510ba..3669914bbd 100644
+--- a/crates/project/src/project.rs
++++ b/crates/project/src/project.rs
+@@ -1473,10 +1473,7 @@ impl Project {
+ 
+                 buffers_needing_diff: Default::default(),
+                 git_diff_debouncer: DebouncedDelay::new(),
+-                terminals: Terminals {
+-                    local_handles: Vec::new(),
+-                    session_contexts: HashMap::default(),
+-                },
++                terminals: Terminals::default(),
+                 #[cfg(any(test, feature = "test-support"))]
+                 fake_shpool: None,
+                 node: Some(node),
+@@ -1720,10 +1717,7 @@ impl Project {
+                 remote_client: Some(remote.clone()),
+                 buffers_needing_diff: Default::default(),
+                 git_diff_debouncer: DebouncedDelay::new(),
+-                terminals: Terminals {
+-                    local_handles: Vec::new(),
+-                    session_contexts: HashMap::default(),
+-                },
++                terminals: Terminals::default(),
+                 #[cfg(any(test, feature = "test-support"))]
+                 fake_shpool: None,
+                 node: Some(node),
+@@ -2018,10 +2012,7 @@ impl Project {
+                 agent_server_store,
+                 buffers_needing_diff: Default::default(),
+                 git_diff_debouncer: DebouncedDelay::new(),
+-                terminals: Terminals {
+-                    local_handles: Vec::new(),
+-                    session_contexts: HashMap::default(),
+-                },
++                terminals: Terminals::default(),
+                 #[cfg(any(test, feature = "test-support"))]
+                 fake_shpool: None,
+                 node: None,
+@@ -6941,6 +6932,10 @@ impl ProjectGroupKey {
+         &self.paths
+     }
+ 
++    pub fn is_empty(&self) -> bool {
++        self.paths.is_empty() && self.host.is_none()
++    }
++
+     pub fn display_name(
+         &self,
+         path_detail_map: &std::collections::HashMap<PathBuf, usize>,
+@@ -6961,7 +6956,18 @@ impl ProjectGroupKey {
+             }
+         }
+         if names.is_empty() {
+-            "Empty Workspace".into()
++            self.host.as_ref()
++                .map(|host| {
++                    let identity = remote::remote_connection_identity(host);
++                    match &identity {
++                        remote::RemoteConnectionIdentity::Ssh { username: None, port: None, .. }
++                        | remote::RemoteConnectionIdentity::Wsl { user: None, .. } => {
++                            host.display_name().into()
++                        }
++                        _ => format!("{} ({})", host.display_name(), identity.persistence_key()).into(),
++                    }
++                })
++                .unwrap_or_else(|| "Empty Workspace".into())
+         } else {
+             names.join(", ").into()
+         }
+diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
+index aaefd1008b..4ed73e9967 100644
+--- a/crates/project/src/terminals.rs
++++ b/crates/project/src/terminals.rs
+@@ -25,9 +25,56 @@ use util::{
+ 
+ use crate::{Project, ProjectPath};
+ 
++#[derive(Default)]
+ pub struct Terminals {
+     pub(crate) local_handles: Vec<WeakEntity<terminal::Terminal>>,
+     pub(crate) session_contexts: HashMap<String, ShpoolSessionContext>,
++    provisional_contexts: HashMap<String, Arc<()>>,
++}
++
++impl Terminals {
++    fn reserve_context_start(
++        &mut self,
++        name: &str,
++        context: &ShpoolSessionContext,
++        retain: bool,
++    ) -> Result<Option<Arc<()>>> {
++        anyhow::ensure!(
++            self.session_contexts.get(name).is_none_or(|known| known == context),
++            "persistent session client changed before attachment",
++        );
++        let retained = self.session_contexts.contains_key(name)
++            && !self.provisional_contexts.contains_key(name);
++        self.session_contexts.entry(name.to_string()).or_insert_with(|| context.clone());
++        if retain || retained {
++            self.provisional_contexts.remove(name);
++            Ok(None)
++        } else {
++            Ok(Some(self.provisional_contexts.entry(name.to_string()).or_default().clone()))
++        }
++    }
++
++    fn finish_context_start(
++        &mut self,
++        name: &str,
++        context: &ShpoolSessionContext,
++        reservation: Arc<()>,
++        succeeded: bool,
++    ) {
++        if !self.provisional_contexts.get(name)
++            .is_some_and(|current| Arc::ptr_eq(current, &reservation))
++        {
++            return;
++        }
++        if succeeded {
++            self.provisional_contexts.remove(name);
++        } else if Arc::strong_count(&reservation) == 2 {
++            self.provisional_contexts.remove(name);
++            if self.session_contexts.get(name) == Some(context) {
++                self.session_contexts.remove(name);
++            }
++        }
++    }
+ }
+ 
+ /// The locator of the daemon that actually owns a persistent session.
+@@ -758,6 +805,7 @@ impl Project {
+         mut reserve_context: Option<ShpoolContextReservation>,
+         cx: &mut Context<Self>,
+     ) -> Task<Result<PersistentTerminal>> {
++        let context_was_supplied = context.is_some();
+         let known = self.terminals.session_contexts.get(&session_name).cloned();
+         if context.as_ref().zip(known.as_ref()).is_some_and(|(left, right)| left != right) {
+             return Task::ready(Err(anyhow::anyhow!("persistent session daemon context changed")));
+@@ -835,19 +883,20 @@ impl Project {
+                     cx.update(|cx| reserve(context, cx))?;
+                 }
+             }
+-            let terminal = project
++            let (terminal, reservation) = project
+                 .update(cx, |project, cx| {
+-                    if let Some(context) = &context {
+-                        if project.terminals.session_contexts.get(&session_name)
+-                            .is_some_and(|known| known != context)
+-                        {
+-                            return Task::ready(Err(anyhow::anyhow!(
+-                                "persistent session client changed before attachment"
+-                            )));
++                    let reservation = if let Some(context) = &context {
++                        match project.terminals.reserve_context_start(
++                            &session_name, context,
++                            restoring_existing || context_was_supplied
++                                || session == PersistentSession::Reattached,
++                        ) {
++                            Ok(reservation) => reservation,
++                            Err(error) => return (Task::ready(Err(error)), None),
+                         }
+-                        project.terminals.session_contexts.entry(session_name.clone())
+-                            .or_insert_with(|| context.clone());
+-                    }
++                    } else {
++                        None
++                    };
+                     #[cfg(any(test, feature = "test-support"))]
+                     if let Some(fake) = &project.fake_shpool {
+                         let location = project.terminal_settings_location(cwd.as_deref(), cx);
+@@ -860,7 +909,7 @@ impl Project {
+                                 &settings.shell,
+                             ) {
+                                 Ok(args) => args,
+-                                Err(error) => return Task::ready(Err(error)),
++                                Err(error) => return (Task::ready(Err(error)), reservation),
+                             };
+                             let mut state = fake.state.lock();
+                             state.attach_history.push(command.session_name.clone());
+@@ -882,27 +931,21 @@ impl Project {
+                         );
+                         let terminal = cx.new(|cx| builder.subscribe(cx));
+                         project.terminals.local_handles.push(terminal.downgrade());
+-                        return Task::ready(Ok(terminal));
++                        return (Task::ready(Ok(terminal)), reservation);
+                     }
+ 
+-                    project.create_terminal_shell_internal(cwd, false, command, pty_startup, cx)
+-                })?
+-                .await;
+-            let terminal = match terminal {
+-                Ok(terminal) => terminal,
+-                Err(error) => {
+-                    if !pinned && !restoring_existing {
+-                        project.update(cx, |project, _| {
+-                            if context.as_ref().is_some_and(|context| {
+-                                project.persistent_terminal_context(&session_name) == Some(context)
+-                            }) {
+-                                project.forget_persistent_terminal_context(&session_name);
+-                            }
+-                        })?;
+-                    }
+-                    return Err(error);
+-                }
+-            };
++                    (project.create_terminal_shell_internal(cwd, false, command, pty_startup, cx),
++                     reservation)
++                })?;
++            let result = terminal.await;
++            if let (Some(reservation), Some(context)) = (reservation, context.as_ref()) {
++                project.update(cx, |project, _| {
++                    project.terminals.finish_context_start(
++                        &session_name, context, reservation, result.is_ok(),
++                    );
++                })?;
++            }
++            let terminal = result?;
+             Ok(PersistentTerminal { terminal, session })
+         })
+     }
+@@ -1019,6 +1062,7 @@ impl Project {
+     /// low-level API retains it so repeated kills remain on the same daemon.
+     pub fn forget_persistent_terminal_context(&mut self, session_name: &str) {
+         self.terminals.session_contexts.remove(session_name);
++        self.terminals.provisional_contexts.remove(session_name);
+     }
+ 
+     fn kill_persistent_terminal_session_unbounded(
+@@ -1827,6 +1871,75 @@ mod tests {
+     use gpui::BorrowAppContext;
+     use pretty_assertions::assert_eq;
+ 
++    #[test]
++    fn test_provisional_context_ownership_survives_overlapping_starts() {
++        for (first_succeeds, second_succeeds) in
++            [(true, false), (false, true), (false, false), (true, true)]
++        {
++            let mut terminals = Terminals::default();
++            let context = ShpoolSessionContext::for_test();
++            let first = terminals.reserve_context_start("overlap", &context, false)
++                .unwrap().expect("fresh context must be provisional");
++            let second = terminals.reserve_context_start("overlap", &context, false)
++                .unwrap().expect("overlapping start must share the reservation");
++            assert!(Arc::ptr_eq(&first, &second));
++            terminals.finish_context_start("overlap", &context, first, first_succeeds);
++            terminals.finish_context_start("overlap", &context, second, second_succeeds);
++            assert_eq!(terminals.session_contexts.get("overlap"),
++                (first_succeeds || second_succeeds).then_some(&context));
++            assert!(terminals.provisional_contexts.is_empty());
++        }
++    }
++
++    #[test]
++    fn test_project_group_key_distinguishes_rootless_remote_from_empty_local() {
++        assert!(crate::ProjectGroupKey::default().is_empty());
++        let remote = crate::ProjectGroupKey::new(
++            Some(remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
++                host: "host".into(), ..Default::default()
++            })),
++            crate::PathList::default(),
++        );
++        assert!(remote.path_list().is_empty());
++        assert!(!remote.is_empty());
++        assert_eq!(remote.display_name(&Default::default()).to_string(), "host");
++        assert_eq!(crate::ProjectGroupKey::default().display_name(&Default::default()).to_string(),
++                   "Empty Workspace");
++    }
++
++    #[test]
++    fn test_rootless_remote_group_labels_distinguish_connection_identities() {
++        let label = |connection| crate::ProjectGroupKey::new(connection, crate::PathList::default())
++            .display_name(&Default::default()).to_string();
++        let ssh = |username: Option<&str>, port| Some(remote::RemoteConnectionOptions::Ssh(
++            remote::SshConnectionOptions {
++                host: "same-host".into(), username: username.map(Into::into), port,
++                nickname: Some("same-label".into()), ..Default::default()
++            },
++        ));
++        let ssh_labels = [label(ssh(None, None)), label(ssh(Some("alice"), None)),
++                          label(ssh(Some("bob"), None)), label(ssh(None, Some(22))),
++                          label(ssh(None, Some(2222)))];
++        for (index, left) in ssh_labels.iter().enumerate() {
++            for right in &ssh_labels[index + 1..] { assert_ne!(left, right); }
++        }
++        let wsl = |user: &str| Some(remote::RemoteConnectionOptions::Wsl(
++            remote::WslConnectionOptions { distro_name: "same-distro".into(), user: Some(user.into()) },
++        ));
++        assert_ne!(label(wsl("alice")), label(wsl("bob")));
++        let docker = |id: &str, user: &str| Some(remote::RemoteConnectionOptions::Docker(
++            remote::DockerConnectionOptions {
++                name: "same-container-label".into(), container_id: id.into(), remote_user: user.into(),
++                upload_binary_over_docker_exec: false, use_podman: false, remote_env: Default::default(),
++            },
++        ));
++        assert_ne!(label(docker("first-container", "alice")),
++                   label(docker("second-container", "alice")));
++        assert_ne!(label(docker("first-container", "alice")),
++                   label(docker("first-container", "bob")));
++    }
++
++
+     fn prepared_cmd_task(command_arg: &str) -> SpawnInTerminal {
+         SpawnInTerminal {
+             command: Some("cmd.exe".to_string()),
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index fdd163c2a7..f35555a924 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -1499,9 +1499,10 @@ impl Sidebar {
+         let mut seen_thread_ids: HashSet<agent_ui::ThreadId> = HashSet::new();
+         let mut seen_terminal_ids: HashSet<TerminalId> = HashSet::new();
+ 
+-        let has_open_projects = workspaces
+-            .iter()
+-            .any(|ws| !workspace_path_list(ws, cx).paths().is_empty());
++        let groups = mw.project_groups(cx);
++        // Saved groups must remain reachable even without a live workspace.
++        let has_open_projects = groups.iter().any(|group| !group.key.is_empty())
++            || workspaces.iter().any(|ws| !ws.read(cx).project_group_key(cx).is_empty());
+ 
+         let resolve_agent_icon = |agent_id: &AgentId| -> (IconName, Option<SharedString>) {
+             let agent = Agent::from(agent_id.clone());
+@@ -1517,7 +1518,6 @@ impl Sidebar {
+             (icon, icon_from_external_svg)
+         };
+ 
+-        let groups = mw.project_groups(cx);
+         let mut live_notified_terminal_ids: HashSet<TerminalId> = HashSet::new();
+         for workspace in &workspaces {
+             if let Some(agent_panel) = workspace.read(cx).panel::<AgentPanel>(cx) {
+@@ -1673,7 +1673,7 @@ impl Sidebar {
+                     .has_notification
+                     .then_some(terminal.metadata.terminal_id)
+             }));
+-            if group_key.path_list().paths().is_empty() {
++            if group_key.is_empty() {
+                 continue;
+             }
+ 
+@@ -2152,12 +2152,7 @@ impl Sidebar {
+ 
+         if Self::in_agent_panel(cx) {
+             multi_workspace.update(cx, |multi_workspace, cx| {
+-                if !multi_workspace
+-                    .workspace()
+-                    .read(cx)
+-                    .project_group_key(cx)
+-                    .path_list()
+-                    .is_empty()
++                if multi_workspace.active_workspace_has_project(cx)
+                 {
+                     multi_workspace.retain_active_workspace(cx);
+                 }
+diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
+index 39a9a64bbf..211f6ea853 100644
+--- a/crates/sidebar/src/sidebar_tests.rs
++++ b/crates/sidebar/src/sidebar_tests.rs
+@@ -10182,14 +10182,26 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window(cx: &m
+     cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+ 
+     let project_a = project::Project::test(fs.clone(), ["/project-a".as_ref()], cx).await;
+-    let project_b = project::Project::test(fs.clone(), ["/project-b".as_ref()], cx).await;
+ 
+     let multi_workspace_a =
+         cx.add_window(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+-    let multi_workspace_b =
+-        cx.add_window(|window, cx| MultiWorkspace::test_new(project_b, window, cx));
+-
+     let multi_workspace_a_entity = multi_workspace_a.root(cx).unwrap();
++    let app_state = multi_workspace_a_entity.read_with(cx, |mw, cx| {
++        mw.workspace().read(cx).app_state().clone()
++    });
++    let project_b = cx.update(|cx| project::Project::local(
++        app_state.client.clone(), app_state.node_runtime.clone(), app_state.user_store.clone(),
++        app_state.languages.clone(), fs.clone(), None, project::LocalProjectFlags::default(), cx,
++    ));
++    let (worktree, _) = project_b.update(cx, |project, cx| {
++        project.find_or_create_worktree("/project-b", true, cx)
++    }).await.unwrap();
++    worktree.read_with(cx, |tree, _| tree.as_local().unwrap().scan_complete()).await;
++    let multi_workspace_b = cx.add_window(|window, cx| {
++        let workspace = cx.new(|cx| Workspace::new(None, project_b, app_state, window, cx));
++        MultiWorkspace::new(workspace, window, cx)
++    });
++
+     let multi_workspace_b_entity = multi_workspace_b.root(cx).unwrap();
+ 
+     let cx_b = &mut gpui::VisualTestContext::from_window(multi_workspace_b.into(), cx);
+@@ -10262,14 +10274,26 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window_with_t
+     cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+ 
+     let project_a = project::Project::test(fs.clone(), ["/project-a".as_ref()], cx).await;
+-    let project_b = project::Project::test(fs.clone(), ["/project-b".as_ref()], cx).await;
+ 
+     let multi_workspace_a =
+         cx.add_window(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+-    let multi_workspace_b =
+-        cx.add_window(|window, cx| MultiWorkspace::test_new(project_b.clone(), window, cx));
+-
+     let multi_workspace_a_entity = multi_workspace_a.root(cx).unwrap();
++    let app_state = multi_workspace_a_entity.read_with(cx, |mw, cx| {
++        mw.workspace().read(cx).app_state().clone()
++    });
++    let project_b = cx.update(|cx| project::Project::local(
++        app_state.client.clone(), app_state.node_runtime.clone(), app_state.user_store.clone(),
++        app_state.languages.clone(), fs.clone(), None, project::LocalProjectFlags::default(), cx,
++    ));
++    let (worktree, _) = project_b.update(cx, |project, cx| {
++        project.find_or_create_worktree("/project-b", true, cx)
++    }).await.unwrap();
++    worktree.read_with(cx, |tree, _| tree.as_local().unwrap().scan_complete()).await;
++    let multi_workspace_b = cx.add_window(|window, cx| {
++        let workspace = cx.new(|cx| Workspace::new(None, project_b, app_state, window, cx));
++        MultiWorkspace::new(workspace, window, cx)
++    });
++
+     let multi_workspace_b_entity = multi_workspace_b.root(cx).unwrap();
+ 
+     let cx_a = &mut gpui::VisualTestContext::from_window(multi_workspace_a.into(), cx);
+@@ -18026,6 +18050,116 @@ fn set_threads_sidebar_in_agent_panel(in_agent_panel: bool, cx: &mut VisualTestC
+     });
+ }
+ 
++#[gpui::test]
++async fn test_agent_panel_retains_rootless_remote_workspace(
++    cx: &mut TestAppContext,
++    server_cx: &mut TestAppContext,
++) {
++    init_test(cx);
++    cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
++    server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
++    let params = cx.update(workspace::AppState::test);
++    cx.update(|cx| cx.update_global::<settings::SettingsStore, _>(|store, cx| {
++        store.set_user_settings(
++            r#"{"agent":{"threads_sidebar":{"in_agent_panel":true}}}"#, cx,
++        ).unwrap();
++    }));
++    let (options, server, guard) = remote::RemoteClient::fake_server(cx, server_cx);
++    let ping = server_cx.new(|_| ());
++    server.add_request_handler::<client::proto::Ping, _, _, _>(
++        ping.downgrade(), |_, _, _| async { Ok(client::proto::Ack {}) },
++    );
++    drop(guard);
++    let client = remote::RemoteClient::connect_mock(options, cx).await;
++    let project = cx.update(|cx| project::Project::remote(
++        client, params.client.clone(), params.node_runtime.clone(), params.user_store.clone(),
++        params.languages.clone(), params.fs.clone(), false, cx,
++    ));
++    let (multi_workspace, cx) = cx.add_window_view({
++        let params = params.clone();
++        move |window, cx| {
++            let workspace = cx.new(|cx| workspace::Workspace::new(None, project, params, window, cx));
++            MultiWorkspace::new(workspace, window, cx)
++        }
++    });
++    let remote_workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
++    assert!(remote_workspace.read_with(cx, |workspace, cx| workspace.root_paths(cx).is_empty()));
++    assert!(multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&remote_workspace)));
++    multi_workspace.read_with(cx, |mw, cx| mw.assert_project_group_key_integrity(cx).unwrap());
++    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
++    for enabled in [false, true, false, true] {
++        set_threads_sidebar_in_agent_panel(enabled, cx);
++        cx.run_until_parked();
++        sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
++        cx.run_until_parked();
++        if enabled {
++            assert!(multi_workspace.read_with(cx, |mw, _| mw.is_workspace_retained(&remote_workspace)));
++            multi_workspace.read_with(cx, |mw, cx| mw.assert_project_group_key_integrity(cx).unwrap());
++        }
++        assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.has_open_projects));
++    }
++    let local = cx.update(|_, cx| project::Project::local(
++        params.client.clone(), params.node_runtime.clone(), params.user_store.clone(),
++        params.languages.clone(), params.fs.clone(), None, project::LocalProjectFlags::default(), cx,
++    ));
++    multi_workspace.update_in(cx, |mw, window, cx| {
++        let workspace = cx.new(|cx| workspace::Workspace::new(None, local, params, window, cx));
++        mw.activate(workspace, None, window, cx)
++    });
++    assert!(multi_workspace.read_with(cx, |mw, _| {
++        mw.is_workspace_retained(&remote_workspace)
++            && mw.workspaces().any(|workspace| workspace == &remote_workspace)
++    }));
++    multi_workspace.read_with(cx, |mw, cx| mw.assert_project_group_key_integrity(cx).unwrap());
++    let remote_key = remote_workspace.read_with(cx, |workspace, cx| workspace.project_group_key(cx));
++    assert!(!remote_key.is_empty(), "rootless remote workspaces keep their host identity");
++    multi_workspace.read_with(cx, |mw, cx| {
++        assert!(mw.project_group_keys().contains(&remote_key),
++            "the retained remote workspace still requires its project-group metadata");
++        assert!(mw.workspace().read(cx).project_group_key(cx).is_empty(),
++            "the local fixture has no project group");
++    });
++    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
++    cx.run_until_parked();
++    assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.entries.iter().any(|entry| {
++        matches!(entry, ListEntry::ProjectHeader { key, .. } if key == &remote_key)
++    })));
++    assert!(sidebar.read_with(cx, |sidebar, _| sidebar.contents.has_open_projects));
++}
++
++#[gpui::test]
++async fn test_rootless_remote_history_is_visible_without_open_project(cx: &mut TestAppContext) {
++    init_test(cx);
++    let project = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
++    let remote_key = |host: &str| ProjectGroupKey::new(
++        Some(remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
++            host: host.into(), ..Default::default()
++        })),
++        PathList::default(),
++    );
++    let first = remote_key("first-host");
++    let second = remote_key("second-host");
++    multi_workspace.update(cx, |mw, cx| mw.restore_project_groups(vec![
++        workspace::SerializedProjectGroupState { key: first.clone(), expanded: true },
++        workspace::SerializedProjectGroupState { key: second.clone(), expanded: true },
++    ], cx));
++    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
++    cx.run_until_parked();
++    sidebar.read_with(cx, |sidebar, _| {
++        assert!(sidebar.contents.has_open_projects);
++        let headers = sidebar.contents.entries.iter().filter_map(|entry| match entry {
++            ListEntry::ProjectHeader { key, label, .. } => Some((key, label.to_string())),
++            _ => None,
++        }).collect::<Vec<_>>();
++        assert!(headers.iter().any(|(key, label)| *key == &first && label == "first-host"));
++        assert!(headers.iter().any(|(key, label)| *key == &second && label == "second-host"));
++        assert_ne!(first.display_name(&Default::default()), second.display_name(&Default::default()));
++    });
++}
++
+ #[gpui::test]
+ async fn test_agent_panel_sidebar_keeps_empty_workspace_transient(cx: &mut TestAppContext) {
+     init_test(cx);
+diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
+index d7b5e05ef2..d81aff3b3c 100644
+--- a/crates/workspace/src/multi_workspace.rs
++++ b/crates/workspace/src/multi_workspace.rs
+@@ -413,12 +413,7 @@ impl MultiWorkspace {
+                 let in_agent_panel = threads_sidebar_in_agent_panel(cx);
+                 if in_agent_panel != previous_in_agent_panel && multi_workspace_enabled {
+                     if in_agent_panel
+-                        && !this
+-                            .workspace()
+-                            .read(cx)
+-                            .project_group_key(cx)
+-                            .path_list()
+-                            .is_empty()
++                        && this.active_workspace_has_project(cx)
+                     {
+                         this.retain_active_workspace(cx);
+                     }
+@@ -462,12 +457,7 @@ impl MultiWorkspace {
+         };
+         if this.multi_workspace_enabled(cx)
+             && threads_sidebar_in_agent_panel(cx)
+-            && !this
+-                .workspace()
+-                .read(cx)
+-                .project_group_key(cx)
+-                .path_list()
+-                .is_empty()
++            && this.active_workspace_has_project(cx)
+         {
+             this.retain_active_workspace(cx);
+         }
+@@ -726,7 +716,7 @@ impl MultiWorkspace {
+         }
+ 
+         let new_key = workspace.read(cx).project_group_key(cx);
+-        if new_key.path_list().paths().is_empty() {
++        if new_key.is_empty() {
+             return;
+         }
+ 
+@@ -749,6 +739,10 @@ impl MultiWorkspace {
+             .any(|held| held.pinned && held.workspace == *workspace)
+     }
+ 
++    pub fn active_workspace_has_project(&self, cx: &App) -> bool {
++        !self.workspace().read(cx).project_group_key(cx).is_empty()
++    }
++
+     pub fn active_workspace_is_retained(&self) -> bool {
+         self.held[self.displayed_index()].pinned
+     }
+@@ -765,7 +759,7 @@ impl MultiWorkspace {
+ 
+     /// Ensures a project group exists for `key`, creating one if needed.
+     fn ensure_project_group_state(&mut self, key: ProjectGroupKey) {
+-        if key.path_list().paths().is_empty() {
++        if key.is_empty() {
+             return;
+         }
+ 
+@@ -801,7 +795,7 @@ impl MultiWorkspace {
+             return;
+         }
+ 
+-        if new_key.path_list().paths().is_empty() {
++        if new_key.is_empty() {
+             return;
+         }
+ 
+@@ -922,20 +916,26 @@ impl MultiWorkspace {
+     pub fn restore_project_groups(
+         &mut self,
+         groups: Vec<SerializedProjectGroupState>,
+-        _cx: &mut Context<Self>,
++        cx: &mut Context<Self>,
+     ) {
+         let mut restored: Vec<ProjectGroupState> = Vec::new();
+         for SerializedProjectGroupState { key, expanded } in groups {
+-            if key.path_list().paths().is_empty() {
++            if key.is_empty() {
+                 continue;
+             }
+-            if restored.iter().any(|group| group.key == key) {
++            if restored.iter().any(|group| group.key.matches(&key)) {
+                 continue;
+             }
++            let key = self.held.iter()
++                .map(|held| held.workspace.read(cx).project_group_key(cx))
++                .find(|live| live.matches(&key))
++                .or_else(|| self.project_groups.iter()
++                    .find(|group| group.key.matches(&key)).map(|group| group.key.clone()))
++                .unwrap_or(key);
+             restored.push(ProjectGroupState { key, expanded });
+         }
+         for existing in std::mem::take(&mut self.project_groups) {
+-            if !restored.iter().any(|group| group.key == existing.key) {
++            if !restored.iter().any(|group| group.key.matches(&existing.key)) {
+                 restored.push(existing);
+             }
+         }
+@@ -1703,6 +1703,11 @@ impl MultiWorkspace {
+             );
+ 
+             let live_key = workspace.read(cx).project_group_key(cx);
++            // pin may retain a rootless local workspace, while
++            // ensure_project_group_state deliberately omits empty keys.
++            if live_key.is_empty() {
++                continue;
++            }
+             anyhow::ensure!(
+                 self.project_groups
+                     .iter()
+diff --git a/crates/workspace/src/persistence/model.rs b/crates/workspace/src/persistence/model.rs
+index b56279a8b0..6cdb212317 100644
+--- a/crates/workspace/src/persistence/model.rs
++++ b/crates/workspace/src/persistence/model.rs
+@@ -65,6 +65,7 @@ pub struct SessionWorkspace {
+ #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+ pub struct SerializedProjectGroup {
+     pub path_list: SerializedPathList,
++    #[serde(serialize_with = "serialize_project_group_location")]
+     pub(crate) location: SerializedWorkspaceLocation,
+     #[serde(default = "default_expanded")]
+     pub expanded: bool,
+@@ -74,12 +75,43 @@ fn default_expanded() -> bool {
+     true
+ }
+ 
++fn project_group_host_for_persistence(host: RemoteConnectionOptions) -> RemoteConnectionOptions {
++    match host {
++        RemoteConnectionOptions::Ssh(options) => {
++            RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
++                host: options.host,
++                username: options.username,
++                port: options.port,
++                nickname: options.nickname,
++                ..Default::default()
++            })
++        }
++        RemoteConnectionOptions::Docker(mut options) => {
++            options.remote_env.clear();
++            RemoteConnectionOptions::Docker(options)
++        }
++        other => other,
++    }
++}
++
++fn serialize_project_group_location<S: serde::Serializer>(
++    location: &SerializedWorkspaceLocation,
++    serializer: S,
++) -> std::result::Result<S::Ok, S::Error> {
++    match location {
++        SerializedWorkspaceLocation::Remote(host) => SerializedWorkspaceLocation::Remote(
++            project_group_host_for_persistence(host.clone()),
++        ).serialize(serializer),
++        SerializedWorkspaceLocation::Local => location.serialize(serializer),
++    }
++}
++
+ impl SerializedProjectGroup {
+     pub fn from_group(key: &ProjectGroupKey, expanded: bool) -> Self {
+         Self {
+             path_list: key.path_list().serialize(),
+             location: match key.host() {
+-                Some(host) => SerializedWorkspaceLocation::Remote(host),
++                Some(host) => SerializedWorkspaceLocation::Remote(project_group_host_for_persistence(host)),
+                 None => SerializedWorkspaceLocation::Local,
+             },
+             expanded,
+@@ -90,7 +122,7 @@ impl SerializedProjectGroup {
+         let path_list = PathList::deserialize(&self.path_list);
+         let host = match self.location {
+             SerializedWorkspaceLocation::Local => None,
+-            SerializedWorkspaceLocation::Remote(opts) => Some(opts),
++            SerializedWorkspaceLocation::Remote(opts) => Some(project_group_host_for_persistence(opts)),
+         };
+         SerializedProjectGroupState {
+             key: ProjectGroupKey::new(host, path_list),
+diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
+index ebc78aa929..bfba717e7e 100644
+--- a/crates/workspace/src/workspace.rs
++++ b/crates/workspace/src/workspace.rs
+@@ -10785,7 +10785,7 @@ pub async fn apply_restored_multiworkspace_state(
+         let mut resolved_groups: Vec<SerializedProjectGroupState> = Vec::new();
+         for serialized in project_groups.iter().cloned() {
+             let SerializedProjectGroupState { key, expanded } = serialized.into_restored_state();
+-            if key.path_list().paths().is_empty() {
++            if key.is_empty() {
+                 continue;
+             }
+             let mut resolved_paths = Vec::new();
+@@ -10802,7 +10802,7 @@ pub async fn apply_restored_multiworkspace_state(
+                 }
+             }
+             let resolved = ProjectGroupKey::new(key.host(), PathList::new(&resolved_paths));
+-            if !resolved_groups.iter().any(|g| g.key == resolved) {
++            if !resolved_groups.iter().any(|g| g.key.matches(&resolved)) {
+                 resolved_groups.push(SerializedProjectGroupState {
+                     key: resolved,
+                     expanded,
+@@ -12940,6 +12940,121 @@ mod tests {
+     use util::path;
+     use util::rel_path::rel_path;
+ 
++    #[gpui::test]
++    async fn test_restore_preserves_rootless_remote_project_groups(cx: &mut TestAppContext) {
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs.clone(), [], cx).await;
++        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
++        let remote_key = |host: &str| ProjectGroupKey::new(
++            Some(remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
++                host: host.into(), ..Default::default()
++            })),
++            PathList::default(),
++        );
++        let first = remote_key("first-host");
++        let second = remote_key("second-host");
++        let state = MultiWorkspaceState {
++            project_groups: vec![
++                SerializedProjectGroup::from_group(&first, false),
++                SerializedProjectGroup::from_group(&ProjectGroupKey::default(), true),
++                SerializedProjectGroup::from_group(&second, true),
++                SerializedProjectGroup::from_group(&first, true),
++            ],
++            ..MultiWorkspaceState::default()
++        };
++        apply_restored_multiworkspace_state(window, &state, fs, &mut cx.to_async()).await;
++        window.read_with(cx, |multi_workspace, cx| {
++            let groups = multi_workspace.project_groups(cx);
++            assert_eq!(groups.iter().map(|group| &group.key).collect::<Vec<_>>(),
++                       vec![&first, &second]);
++            assert!(!groups[0].expanded);
++            assert!(groups[1].expanded);
++        }).unwrap();
++    }
++
++    #[test]
++    fn test_project_group_serialization_excludes_connection_secrets() {
++        let ssh = remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
++            host: "host".into(), username: Some("user".into()), port: Some(2222),
++            password: Some("fixture_ssh_credential".into()),
++            args: Some(vec!["fixture_proxy_credential".into()]),
++            nickname: Some("label".into()), ..Default::default()
++        });
++        let docker = remote::RemoteConnectionOptions::Docker(remote::DockerConnectionOptions {
++            name: "container".into(), container_id: "container-id".into(), remote_user: "user".into(),
++            use_podman: true, upload_binary_over_docker_exec: true,
++            remote_env: std::collections::BTreeMap::from([
++                ("ACCESS_TOKEN".into(), "fixture_docker_credential".into()),
++            ]),
++        });
++        for host in [ssh, docker] {
++            let key = ProjectGroupKey::new(Some(host.clone()), PathList::default());
++            let regular = SerializedProjectGroup::from_group(&key, false);
++            let legacy = SerializedProjectGroup {
++                path_list: PathList::default().serialize(),
++                location: SerializedWorkspaceLocation::Remote(host), expanded: false,
++            };
++            for group in [regular, legacy] {
++                let encoded = serde_json::to_string(&group).unwrap();
++                for value in ["fixture_ssh_credential", "fixture_proxy_credential", "fixture_docker_credential"] {
++                    assert!(!encoded.contains(value));
++                }
++                let restored = group.into_restored_state();
++                assert!(!restored.expanded);
++                assert!(restored.key.matches(&key));
++                match restored.key.host().unwrap() {
++                    remote::RemoteConnectionOptions::Ssh(options) => {
++                        assert!(options.password.is_none());
++                        assert!(options.args.is_none());
++                        assert_eq!(options.username.as_deref(), Some("user"));
++                        assert_eq!(options.port, Some(2222));
++                    }
++                    remote::RemoteConnectionOptions::Docker(options) => {
++                        assert!(options.remote_env.is_empty());
++                        assert!(options.use_podman);
++                        assert_eq!(options.container_id, "container-id");
++                    }
++                    _ => panic!("fixture must remain the same connection kind"),
++                }
++            }
++            assert_eq!(key.host().is_some(), true);
++        }
++    }
++
++    #[gpui::test]
++    async fn test_restored_remote_groups_keep_live_identity_options(cx: &mut TestAppContext) {
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs.clone(), [], cx).await;
++        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
++        let key = |nickname: &str, argument: &str, upload| ProjectGroupKey::new(
++            Some(remote::RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
++                host: "host".into(), username: Some("user".into()), port: Some(22),
++                nickname: Some(nickname.into()), args: Some(vec![argument.into()]),
++                upload_binary_over_ssh: upload, ..Default::default()
++            })),
++            PathList::default(),
++        );
++        let previous = key("old-label", "old-routing", false);
++        let current = key("current-label", "current-routing", true);
++        assert!(previous.matches(&current));
++        window.update(cx, |multi_workspace, _, cx| multi_workspace.restore_project_groups(vec![
++            SerializedProjectGroupState { key: current.clone(), expanded: true },
++        ], cx)).unwrap();
++        let state = MultiWorkspaceState {
++            project_groups: vec![SerializedProjectGroup::from_group(&previous, false)],
++            ..MultiWorkspaceState::default()
++        };
++        apply_restored_multiworkspace_state(window, &state, fs, &mut cx.to_async()).await;
++        window.read_with(cx, |multi_workspace, cx| {
++            let groups = multi_workspace.project_groups(cx);
++            assert_eq!(groups.len(), 1);
++            assert_eq!(groups[0].key, current);
++            assert!(!groups[0].expanded);
++        }).unwrap();
++    }
++
+     #[test]
+     fn test_render_window_title_format_omits_empty_segments() {
+         let context = WindowTitleContext {

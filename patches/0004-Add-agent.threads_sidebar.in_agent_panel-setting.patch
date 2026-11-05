@@ -1,50 +1,20 @@
-From b803c695505f92cfd7b9e951de08b6396774b321 Mon Sep 17 00:00:00 2001
+From 9765e85f5a77f038f3fba5e4c5e1f63ee0d8bdcd Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 11:03:26 +0300
-Subject: [PATCH 09/90] Add agent.threads_sidebar.in_agent_panel setting
+Subject: [PATCH 4/9] Add agent.threads_sidebar.in_agent_panel setting
 
-Few people juggle as many threads as the threads sidebar holds, yet
-keeping them in view costs a whole column, and toggling the sidebar
-costs an action every time. With agent.threads_sidebar.in_agent_panel
-the sidebar is not shown; its contents become two tab rows at the top
-of the agent panel instead of the active thread's title: the window's
-projects, then the threads and terminals of the active project. The
-rows use the editor's tab component and follow the same tab settings
-(pinned/unpinned chips, width bounds, close button position and
-visibility), so they look and behave like the editor's two tab rows:
-click activates, double-click renames, middle-click and the close
-button archive a thread or close a terminal, right-click opens the
-sidebar's menu for the project or thread. Thread tabs keep the order
-they were opened in rather than the sidebar's most-recent-first order.
-
-The sidebar entity stays the single model; the agent panel only gets
-views of it through the SidebarHandle, since agent_ui cannot depend
-on the sidebar crate. Thread history opens from the agent panel's menu
-and replaces the thread until a tab is clicked or the history is
-closed. Add Project sits at the end of the projects row. Toggling the
-threads sidebar toggles the agent panel in this mode.
-
-The setting defaults to false, which keeps the sidebar.
-
-Drafts are preserved during pending activation when in_agent_panel is true
-and strictly follow stock behavior when false. Tab order is deterministic
-and preserved across thread updates using stable created_at timestamps.
-Traffic light layout in the panel header is gated for macOS, allowing
-compilation on Linux and Windows. Stale sidebar_open checks are replaced
-with active render state checks. Settings deserialization safely defaults
-in_agent_panel to false with regression unit tests.
-
-Keep platform-specific inputs explicit without discarding the context on
-non-macOS builds; preserve the macOS traffic-light layout unchanged.
-
-Make workspace state and weak-entity lifecycle handling explicit while
-preserving the expected harmless behavior when a view has been released.
+Show the threads sidebar as two tab rows inside the agent panel.
+Keep the agent toolbar when sidebar rows are empty or when a project
+group is unavailable, retain the initial workspace when threads start
+in the panel, keep empty workspaces transient across layout changes and
+real sidebar updates, and preserve the documented global sidebar
+minimum width across layouts.
 
 diff --git a/assets/settings/default.json b/assets/settings/default.json
-index bf3c847ab6..d0b3aeb6c3 100644
+index 24a00f350c..bffdb9f989 100644
 --- a/assets/settings/default.json
 +++ b/assets/settings/default.json
-@@ -1209,6 +1209,9 @@
+@@ -1212,6 +1212,9 @@
        "auto_open": true,
        // Show each thread on a single line at the height of the tab bar, with its details on hover.
        "compact": false,
@@ -67,10 +37,19 @@ index 750154a1fe..7ad17cd055 100644
              thinking_display: Default::default(),
          }
 diff --git a/crates/agent_settings/src/agent_settings.rs b/crates/agent_settings/src/agent_settings.rs
-index 0cecde9362..5ac5d29343 100644
+index 0cecde9362..f34a2d74d3 100644
 --- a/crates/agent_settings/src/agent_settings.rs
 +++ b/crates/agent_settings/src/agent_settings.rs
-@@ -258,6 +258,7 @@ pub struct ThreadsSidebarSettings {
+@@ -34,6 +34,8 @@ pub const COMPACTION_PROMPT: &str = include_str!("prompts/compaction_prompt.txt"
+ /// Bounds on the width of the threads list. They constrain the configured
+ /// default as well as the width the user drags to, so that no width the sidebar
+ /// can hold is able to crowd out the editor or collapse the list.
++// The downstream 100px minimum is intentional even with compact/in-panel
++// layout disabled; it is separately documented under "Without any setting".
+ pub const THREADS_LIST_MIN_WIDTH: Pixels = px(100.0);
+ pub const THREADS_LIST_MAX_WIDTH: Pixels = px(800.0);
+ 
+@@ -258,6 +260,7 @@ pub struct ThreadsSidebarSettings {
      pub position: SidebarDockPosition,
      pub default_width: Pixels,
      pub compact: bool,
@@ -78,7 +57,7 @@ index 0cecde9362..5ac5d29343 100644
  }
  
  impl AgentSettings {
-@@ -787,6 +788,7 @@ impl Settings for AgentSettings {
+@@ -787,6 +790,7 @@ impl Settings for AgentSettings {
                      .into_gpui()
                      .clamp(THREADS_LIST_MIN_WIDTH, THREADS_LIST_MAX_WIDTH),
                  compact: threads_sidebar.compact.unwrap_or(false),
@@ -86,7 +65,31 @@ index 0cecde9362..5ac5d29343 100644
              },
              default_width: agent.default_width.unwrap().into_gpui(),
              default_height: agent.default_height.unwrap().into_gpui(),
-@@ -1205,6 +1207,22 @@ mod tests {
+@@ -1118,6 +1122,23 @@ mod tests {
+         }
+     }
+ 
++    #[gpui::test]
++    fn test_threads_sidebar_minimum_is_independent_of_layout_opt_ins(cx: &mut gpui::App) {
++        let store = SettingsStore::test(cx);
++        cx.set_global(store);
++        project::DisableAiSettings::register(cx);
++        AgentSettings::register(cx);
++        for (compact, in_agent_panel) in [(false, false), (false, true), (true, false), (true, true)] {
++            let content = serde_json::json!({"agent": {"threads_sidebar": {
++                "compact": compact, "in_agent_panel": in_agent_panel, "default_width": 5
++            }}}).to_string();
++            SettingsStore::update_global(cx, |store, cx| {
++                store.set_user_settings(&content, cx).expect("valid sidebar settings");
++            });
++            assert_eq!(AgentSettings::get_global(cx).threads_sidebar.default_width, px(100.0));
++        }
++    }
++
+     #[gpui::test]
+     fn test_threads_sidebar_settings(cx: &mut gpui::App) {
+         let store = SettingsStore::test(cx);
+@@ -1205,6 +1226,22 @@ mod tests {
          }
      }
  
@@ -110,7 +113,7 @@ index 0cecde9362..5ac5d29343 100644
      fn test_threads_sidebar_compact_defaults_to_false_when_none(cx: &mut gpui::App) {
          let store = SettingsStore::test(cx);
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index ed33ad6de4..8d2527fe1b 100644
+index 2224d0fec3..19f4af6da3 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
 @@ -94,7 +94,7 @@ use text::OffsetRangeExt;
@@ -179,7 +182,7 @@ index ed33ad6de4..8d2527fe1b 100644
  
                          if has_auth_methods || supports_logout {
                              menu = menu.separator()
-@@ -5879,8 +5898,39 @@ impl AgentPanel {
+@@ -5879,8 +5898,49 @@ impl AgentPanel {
          })
      }
  
@@ -191,10 +194,20 @@ index ed33ad6de4..8d2527fe1b 100644
 +            && window
 +                .root::<MultiWorkspace>()
 +                .flatten()
-+                .is_some_and(|multi_workspace| multi_workspace.read(cx).sidebar().is_some())
++                .is_some_and(|multi_workspace| {
++                    let multi_workspace = multi_workspace.read(cx);
++                    multi_workspace.sidebar().is_some()
++                        && multi_workspace.project_group_keys().contains(
++                            &multi_workspace
++                                .project_group_key_for_workspace(multi_workspace.workspace(), cx),
++                        )
++                })
 +    }
 +
 +    fn sidebar_tab_rows(window: &Window, cx: &mut App) -> Option<workspace::AgentPanelTabRows> {
++        if !Self::shows_sidebar_tab_rows(window, cx) {
++            return None;
++        }
 +        window
 +            .root::<MultiWorkspace>()
 +            .flatten()?
@@ -220,7 +233,7 @@ index ed33ad6de4..8d2527fe1b 100644
  
          let focus_handle = self.focus_handle(cx);
  
-@@ -6213,6 +6263,49 @@ impl AgentPanel {
+@@ -6213,6 +6273,49 @@ impl AgentPanel {
                      thread_view.update(cx, |thread_view, cx| thread_view.render_sandbox_status(cx))
                  });
  
@@ -270,7 +283,7 @@ index ed33ad6de4..8d2527fe1b 100644
              base_container
                  .child(
                      h_flex()
-@@ -6252,6 +6345,7 @@ impl AgentPanel {
+@@ -6252,6 +6355,7 @@ impl AgentPanel {
              .border_b_1()
              .border_color(cx.theme().colors().border)
              .child(toolbar_content)
@@ -278,7 +291,7 @@ index ed33ad6de4..8d2527fe1b 100644
      }
  
      fn should_render_trial_end_upsell(&self, cx: &mut Context<Self>) -> bool {
-@@ -6602,6 +6696,7 @@ impl AgentPanel {
+@@ -6602,6 +6706,7 @@ impl AgentPanel {
  
  impl Render for AgentPanel {
      fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -286,7 +299,7 @@ index ed33ad6de4..8d2527fe1b 100644
          // WARNING: Changes to this element hierarchy can have
          // non-obvious implications to the layout of children.
          //
-@@ -6658,7 +6753,11 @@ impl Render for AgentPanel {
+@@ -6658,7 +6763,11 @@ impl Render for AgentPanel {
              }))
              .child(self.render_toolbar(window, cx))
              .children(self.render_new_user_onboarding(window, cx))
@@ -298,6 +311,48 @@ index ed33ad6de4..8d2527fe1b 100644
                  VisibleSurface::Uninitialized if !self.has_open_project(cx) => {
                      parent.child(self.render_no_project_state(cx))
                  }
+@@ -9807,6 +9916,41 @@ mod tests {
+         assert_eq!(pasted, "file.rs:2-3 ");
+     }
+ 
++    #[gpui::test]
++    async fn test_empty_workspace_keeps_agent_toolbar_with_threads_in_panel(
++        cx: &mut TestAppContext,
++    ) {
++        init_test(cx);
++        cx.update(|cx| {
++            agent::ThreadStore::init_global(cx);
++            language_model::LanguageModelRegistry::test(cx);
++            let mut settings = AgentSettings::get_global(cx).clone();
++            settings.threads_sidebar.in_agent_panel = true;
++            AgentSettings::override_global(settings, cx);
++        });
++
++        let fs = FakeFs::new(cx.executor());
++        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
++        let project = Project::test(fs, [], cx).await;
++        let multi_workspace =
++            cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
++        let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
++        let sidebar = register_test_sidebar(true, &mut cx);
++
++        cx.update(|window, cx| {
++            assert!(workspace::threads_sidebar_in_agent_panel(cx));
++            assert!(sidebar.update(cx, |sidebar, cx| {
++                workspace::Sidebar::agent_panel_tab_rows(sidebar, cx)
++            }).is_some(), "the provider must offer rows just as the production sidebar does");
++            assert!(
++                !AgentPanel::shows_sidebar_tab_rows(window, cx),
++                "empty tab rows must not replace the active entry toolbar"
++            );
++            assert!(AgentPanel::sidebar_tab_rows(window, cx).is_none(),
++                "the rendering path must reject replacement rows without an active project group");
++        });
++    }
++
+     async fn setup_panel(cx: &mut TestAppContext) -> (Entity<AgentPanel>, VisualTestContext) {
+         init_test(cx);
+         cx.update(|cx| {
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
 index 684cbb549b..95b294fd33 100644
 --- a/crates/agent_ui/src/agent_ui.rs
@@ -311,10 +366,10 @@ index 684cbb549b..95b294fd33 100644
              thinking_display: Default::default(),
          };
 diff --git a/crates/agent_ui/src/conversation_view.rs b/crates/agent_ui/src/conversation_view.rs
-index 396f569453..cc08fef2fa 100644
+index 80c42449d6..0fe633d365 100644
 --- a/crates/agent_ui/src/conversation_view.rs
 +++ b/crates/agent_ui/src/conversation_view.rs
-@@ -3389,7 +3389,8 @@ impl ConversationView {
+@@ -3416,7 +3416,8 @@ impl ConversationView {
          };
  
          let multi_workspace = multi_workspace.read(cx);
@@ -324,6 +379,31 @@ index 396f569453..cc08fef2fa 100644
              || multi_workspace.workspace() == &workspace
                  && self.is_visible_in_agent_panel(&workspace, cx)
      }
+diff --git a/crates/agent_ui/src/test_support.rs b/crates/agent_ui/src/test_support.rs
+index c0238fca68..3c35f12cfc 100644
+--- a/crates/agent_ui/src/test_support.rs
++++ b/crates/agent_ui/src/test_support.rs
+@@ -200,6 +200,20 @@ impl WorkspaceSidebar for TestWorkspaceSidebar {
+     fn is_threads_list_view_active(&self) -> bool {
+         self.threads_list_active
+     }
++
++    fn agent_panel_tab_rows(
++        &mut self,
++        cx: &mut Context<Self>,
++    ) -> Option<workspace::AgentPanelTabRows> {
++        if !workspace::threads_sidebar_in_agent_panel(cx) {
++            return None;
++        }
++        Some(workspace::AgentPanelTabRows {
++            projects: cx.new(|cx| Self::new(self.threads_list_active, cx)).into(),
++            threads: cx.new(|cx| Self::new(self.threads_list_active, cx)).into(),
++            add_project: cx.new(|cx| Self::new(self.threads_list_active, cx)).into(),
++        })
++    }
+ }
+ 
+ impl Render for TestWorkspaceSidebar {
 diff --git a/crates/settings_content/src/agent.rs b/crates/settings_content/src/agent.rs
 index 5ecf3e4c2e..aa26f2d52e 100644
 --- a/crates/settings_content/src/agent.rs
@@ -342,7 +422,7 @@ index 5ecf3e4c2e..aa26f2d52e 100644
  
  #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 4ca6430d81..4cd953484c 100644
+index bd0688f7f7..8896b98db3 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -1,4 +1,5 @@
@@ -482,13 +562,21 @@ index 4ca6430d81..4cd953484c 100644
                  });
  
                  // Build a lookup from live_infos and compute running/waiting
-@@ -2060,6 +2097,16 @@ impl Sidebar {
+@@ -2060,6 +2097,24 @@ impl Sidebar {
          let previous_shapes: Vec<EntryShape> =
              self.entry_shapes(multi_workspace.read(cx)).collect();
  
 +        if Self::in_agent_panel(cx) {
 +            multi_workspace.update(cx, |multi_workspace, cx| {
-+                multi_workspace.retain_active_workspace(cx);
++                if !multi_workspace
++                    .workspace()
++                    .read(cx)
++                    .project_group_key(cx)
++                    .path_list()
++                    .is_empty()
++                {
++                    multi_workspace.retain_active_workspace(cx);
++                }
 +            });
 +        }
 +
@@ -499,7 +587,7 @@ index 4ca6430d81..4cd953484c 100644
          self.rebuild_contents(cx);
          self.refresh_refilled_draft_times(cx);
          self.refresh_draft_editor_observations(cx);
-@@ -2501,6 +2548,7 @@ impl Sidebar {
+@@ -2501,6 +2556,7 @@ impl Sidebar {
                                  is_active,
                                  has_threads,
                                  &group_name,
@@ -507,7 +595,7 @@ index 4ca6430d81..4cd953484c 100644
                                  cx,
                              ))
                              .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-@@ -2862,6 +2910,7 @@ impl Sidebar {
+@@ -2862,6 +2918,7 @@ impl Sidebar {
          is_active: bool,
          has_threads: bool,
          group_name: &SharedString,
@@ -515,7 +603,7 @@ index 4ca6430d81..4cd953484c 100644
          cx: &mut Context<Self>,
      ) -> AnyElement {
          let multi_workspace = self.multi_workspace.clone();
-@@ -2895,6 +2944,13 @@ impl Sidebar {
+@@ -2895,6 +2952,13 @@ impl Sidebar {
                      })
                      .selected_style(ButtonStyle::Tinted(TintColor::Accent))
                      .icon_size(IconSize::Small)
@@ -529,7 +617,7 @@ index 4ca6430d81..4cd953484c 100644
                      .when(!is_menu_open, |el| el.visible_on_hover(group_name)),
              )
              .on_open(Rc::new({
-@@ -3569,7 +3625,18 @@ impl Sidebar {
+@@ -3569,7 +3633,18 @@ impl Sidebar {
          if self.rename_target.take().is_none() {
              return false;
          }
@@ -549,7 +637,7 @@ index 4ca6430d81..4cd953484c 100644
          self.update_entries(cx);
          true
      }
-@@ -6497,7 +6564,6 @@ impl Sidebar {
+@@ -6497,7 +6572,6 @@ impl Sidebar {
                  )
              })
              .on_click({
@@ -557,7 +645,7 @@ index 4ca6430d81..4cd953484c 100644
                  cx.listener(move |this, _, window, cx| {
                      this.selection = None;
                      match &thread_workspace {
-@@ -6520,15 +6586,28 @@ impl Sidebar {
+@@ -6520,15 +6594,28 @@ impl Sidebar {
                  })
              });
  
@@ -592,7 +680,7 @@ index 4ca6430d81..4cd953484c 100644
          let sidebar = cx.weak_entity();
  
          let active_workspace = self.active_workspace(cx);
-@@ -6541,113 +6620,108 @@ impl Sidebar {
+@@ -6541,113 +6628,108 @@ impl Sidebar {
          let can_open_as_markdown = thread.is_live || is_zed_thread;
          let folder_paths = thread.metadata.folder_paths().clone();
  
@@ -791,7 +879,7 @@ index 4ca6430d81..4cd953484c 100644
      }
  
      fn render_terminal(
-@@ -6746,33 +6820,41 @@ impl Sidebar {
+@@ -6746,33 +6828,41 @@ impl Sidebar {
                  }
              }));
  
@@ -854,7 +942,7 @@ index 4ca6430d81..4cd953484c 100644
      }
  
      fn render_filter_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
-@@ -6787,7 +6869,11 @@ impl Sidebar {
+@@ -6787,7 +6877,11 @@ impl Sidebar {
              .child(self.filter_editor.clone())
      }
  
@@ -867,7 +955,7 @@ index 4ca6430d81..4cd953484c 100644
          let multi_workspace = self.multi_workspace.upgrade();
  
          let workspace = multi_workspace
-@@ -6826,11 +6912,18 @@ impl Sidebar {
+@@ -6826,11 +6920,18 @@ impl Sidebar {
                      .selected_style(ButtonStyle::Tinted(TintColor::Accent)),
                  |_window, cx| Tooltip::for_action("Add Project", &OpenRecent::default(), cx),
              )
@@ -890,7 +978,7 @@ index 4ca6430d81..4cd953484c 100644
      }
  
      fn new_thread_in_group(
-@@ -7611,7 +7704,7 @@ impl Sidebar {
+@@ -7611,7 +7712,7 @@ impl Sidebar {
                      })),
              )
              .child(div().flex_1())
@@ -899,7 +987,7 @@ index 4ca6430d81..4cd953484c 100644
      }
  
      fn active_workspace(&self, cx: &App) -> Option<Entity<Workspace>> {
-@@ -7845,8 +7938,11 @@ impl Sidebar {
+@@ -7845,8 +7946,11 @@ impl Sidebar {
      fn show_thread_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
          self.view = SidebarView::ThreadList;
          self._subscriptions.clear();
@@ -913,7 +1001,7 @@ index 4ca6430d81..4cd953484c 100644
          self.serialize(cx);
          cx.notify();
      }
-@@ -7965,6 +8061,45 @@ impl WorkspaceSidebar for Sidebar {
+@@ -7965,6 +8069,45 @@ impl WorkspaceSidebar for Sidebar {
          self.cycle_thread_impl(forward, window, cx);
      }
  
@@ -960,10 +1048,42 @@ index 4ca6430d81..4cd953484c 100644
          let serialized = SerializedSidebar {
              width: self.width_set_by_user.then(|| f32::from(self.width)),
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 97bdd6050f..4574cf49b8 100644
+index c3d444c03a..5a3a809ab5 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -16027,3 +16027,275 @@ fn sidebar_painted_background_at(position: Point<Pixels>, cx: &mut VisualTestCon
+@@ -1128,6 +1128,31 @@ async fn test_restored_width_preserves_legacy_resizes(cx: &mut TestAppContext) {
+     }
+ }
+ 
++#[gpui::test]
++async fn test_sidebar_width_minimum_is_independent_of_layout_opt_ins(cx: &mut TestAppContext) {
++    let project = init_test_project("/my-project", cx).await;
++    let (multi_workspace, cx) = cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    let sidebar = setup_sidebar(&multi_workspace, cx);
++    for (compact, in_agent_panel) in [(false, false), (false, true), (true, false), (true, true)] {
++        cx.update(|_window, cx| {
++            let content = serde_json::json!({"agent": {"threads_sidebar": {
++                "compact": compact, "in_agent_panel": in_agent_panel, "default_width": 300
++            }}}).to_string();
++            SettingsStore::update_global(cx, |store, cx| {
++                store.set_user_settings(&content, cx).expect("valid layout settings");
++            });
++        });
++        cx.run_until_parked();
++        sidebar.update_in(cx, |sidebar, _, cx| sidebar.set_width(Some(px(5.0)), cx));
++        assert_eq!(sidebar.read_with(cx, |sidebar, _| sidebar.width), px(100.0));
++        sidebar.update_in(cx, |sidebar, window, cx| {
++            sidebar.restore_serialized_state(r#"{"width":5,"width_set_by_user":true}"#, window, cx);
++        });
++        assert_eq!(sidebar.read_with(cx, |sidebar, _| sidebar.width), px(100.0));
++        assert!(sidebar.read_with(cx, |sidebar, _| sidebar.width_set_by_user));
++    }
++}
++
+ #[gpui::test]
+ async fn test_configured_width_is_clamped_into_range(cx: &mut TestAppContext) {
+     let project = init_test_project("/my-project", cx).await;
+@@ -16026,3 +16051,300 @@ fn sidebar_painted_background_at(position: Point<Pixels>, cx: &mut VisualTestCon
          u32::from(Rgba::from(color))
      })
  }
@@ -979,6 +1099,31 @@ index 97bdd6050f..4574cf49b8 100644
 +                .unwrap();
 +        });
 +    });
++}
++
++#[gpui::test]
++async fn test_agent_panel_sidebar_keeps_empty_workspace_transient(cx: &mut TestAppContext) {
++    init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
++    let project = project::Project::test(fs, [], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    let sidebar = setup_sidebar_closed(&multi_workspace, cx);
++    let workspace = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
++
++    for in_agent_panel in [true, false, true] {
++        set_threads_sidebar_in_agent_panel(in_agent_panel, cx);
++        cx.run_until_parked();
++        sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
++        cx.run_until_parked();
++        multi_workspace.read_with(cx, |mw, _cx| {
++            assert_eq!(mw.workspace(), &workspace);
++            assert_eq!(mw.workspaces().count(), 1);
++            assert!(mw.project_group_keys().is_empty());
++            assert!(!mw.active_workspace_is_retained());
++        });
++    }
 +}
 +
 +#[gpui::test]
@@ -1984,10 +2129,10 @@ index 0000000000..a4179e8acb
 +    }
 +}
 diff --git a/crates/title_bar/src/title_bar.rs b/crates/title_bar/src/title_bar.rs
-index c7e01b220d..ecee27f545 100644
+index 32b616b10b..6f17a9a0b1 100644
 --- a/crates/title_bar/src/title_bar.rs
 +++ b/crates/title_bar/src/title_bar.rs
-@@ -837,7 +837,7 @@ impl TitleBar {
+@@ -850,7 +850,7 @@ impl TitleBar {
              .multi_workspace
              .as_ref()
              .and_then(|mw| mw.upgrade())
@@ -1997,7 +2142,7 @@ index c7e01b220d..ecee27f545 100644
              && PlatformTitleBar::is_multi_workspace_enabled(cx);
  
 diff --git a/crates/workspace/src/dock.rs b/crates/workspace/src/dock.rs
-index 1a6059cbf4..e87fa0cab0 100644
+index 6ef5275270..4391491257 100644
 --- a/crates/workspace/src/dock.rs
 +++ b/crates/workspace/src/dock.rs
 @@ -98,6 +98,11 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
@@ -2031,7 +2176,7 @@ index 1a6059cbf4..e87fa0cab0 100644
      fn hide_button_setting(&self, cx: &App) -> Option<HideStatusItem> {
          self.read(cx).hide_button_setting(cx)
      }
-@@ -1276,7 +1286,8 @@ impl Render for Dock {
+@@ -1282,7 +1292,8 @@ impl Render for Dock {
          if let Some(entry) = self.visible_entry() {
              let position = self.position;
              let top_spacer = (position == DockPosition::Left
@@ -2042,7 +2187,7 @@ index 1a6059cbf4..e87fa0cab0 100644
              let has_top_spacer = top_spacer.is_some();
              let create_resize_handle = || {
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 93c0e9abe9..aa169c09aa 100644
+index 0f47414f4b..4fbb29060c 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -157,6 +157,29 @@ pub trait Sidebar: Focusable + Render + EventEmitter<SidebarEvent> + Sized {
@@ -2126,7 +2271,7 @@ index 93c0e9abe9..aa169c09aa 100644
              side: self.sidebar_side(cx),
          }
      }
-@@ -351,12 +402,32 @@ impl MultiWorkspace {
+@@ -351,12 +402,39 @@ impl MultiWorkspace {
              let mut previous_multi_workspace_enabled = !DisableAiSettings::get_global(cx)
                  .disable_ai
                  && AgentSettings::get_global(cx).enabled;
@@ -2140,7 +2285,14 @@ index 93c0e9abe9..aa169c09aa 100644
 +
 +                let in_agent_panel = threads_sidebar_in_agent_panel(cx);
 +                if in_agent_panel != previous_in_agent_panel && multi_workspace_enabled {
-+                    if in_agent_panel {
++                    if in_agent_panel
++                        && !this
++                            .workspace()
++                            .read(cx)
++                            .project_group_key(cx)
++                            .path_list()
++                            .is_empty()
++                    {
 +                        this.retain_active_workspace(cx);
 +                    }
 +                    let sidebar_focus_handle = this
@@ -2159,7 +2311,36 @@ index 93c0e9abe9..aa169c09aa 100644
              }
          });
          Self::subscribe_to_workspace(&workspace, window, cx);
-@@ -431,6 +502,10 @@ impl MultiWorkspace {
+@@ -365,7 +443,7 @@ impl MultiWorkspace {
+         workspace.update(cx, |workspace, cx| {
+             workspace.set_multi_workspace(weak_self, active_workspace_id.clone(), cx);
+         });
+-        Self {
++        let mut this = Self {
+             window_id: window.window_handle().window_id(),
+             held: vec![HeldWorkspace {
+                 workspace,
+@@ -381,7 +459,19 @@ impl MultiWorkspace {
+             _serialize_task: None,
+             _subscriptions: vec![release_subscription, settings_subscription],
+             previous_focus_handle: None,
++        };
++        if this.multi_workspace_enabled(cx)
++            && threads_sidebar_in_agent_panel(cx)
++            && !this
++                .workspace()
++                .read(cx)
++                .project_group_key(cx)
++                .path_list()
++                .is_empty()
++        {
++            this.retain_active_workspace(cx);
+         }
++        this
+     }
+ 
+     pub fn register_sidebar<T: Sidebar>(&mut self, sidebar: Entity<T>, cx: &mut Context<Self>) {
+@@ -431,6 +521,10 @@ impl MultiWorkspace {
          if !self.multi_workspace_enabled(cx) {
              return;
          }
@@ -2170,7 +2351,7 @@ index 93c0e9abe9..aa169c09aa 100644
  
          if self.sidebar_open() {
              self.close_sidebar(window, cx);
-@@ -445,7 +520,7 @@ impl MultiWorkspace {
+@@ -445,7 +539,7 @@ impl MultiWorkspace {
      }
  
      pub fn close_sidebar_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2179,7 +2360,7 @@ index 93c0e9abe9..aa169c09aa 100644
              return;
          }
  
-@@ -458,6 +533,10 @@ impl MultiWorkspace {
+@@ -458,6 +552,10 @@ impl MultiWorkspace {
          if !self.multi_workspace_enabled(cx) {
              return;
          }
@@ -2190,7 +2371,7 @@ index 93c0e9abe9..aa169c09aa 100644
  
          if self.sidebar_open() {
              let sidebar_is_focused = self
-@@ -502,7 +581,12 @@ impl MultiWorkspace {
+@@ -502,7 +600,12 @@ impl MultiWorkspace {
      fn apply_open_sidebar(&mut self, cx: &mut Context<Self>) {
          self.sidebar_open = true;
          self.retain_active_workspace(cx);
@@ -2204,7 +2385,7 @@ index 93c0e9abe9..aa169c09aa 100644
          for workspace in self.workspaces().cloned().collect::<Vec<_>>() {
              workspace.update(cx, |workspace, _cx| {
                  workspace.set_sidebar_focus_handle(sidebar_focus_handle.clone());
-@@ -1429,7 +1513,7 @@ impl MultiWorkspace {
+@@ -1438,7 +1541,7 @@ impl MultiWorkspace {
      }
  
      fn sync_sidebar_to_workspace(&self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
@@ -2213,7 +2394,7 @@ index 93c0e9abe9..aa169c09aa 100644
              let sidebar_focus_handle = self.sidebar.as_ref().map(|s| s.focus_handle(cx));
              workspace.update(cx, |workspace, _| {
                  workspace.set_sidebar_focus_handle(sidebar_focus_handle);
-@@ -2008,7 +2092,10 @@ impl Render for MultiWorkspace {
+@@ -2017,7 +2120,10 @@ impl Render for MultiWorkspace {
          let sidebar_side = self.sidebar_side(cx);
          let sidebar_on_right = sidebar_side == SidebarSide::Right;
  
@@ -2225,6 +2406,101 @@ index 93c0e9abe9..aa169c09aa 100644
              self.sidebar.as_ref().map(|sidebar_handle| {
                  let weak = cx.weak_entity();
  
+diff --git a/crates/workspace/src/multi_workspace_tests.rs b/crates/workspace/src/multi_workspace_tests.rs
+index 8d77cdd492..661072f80d 100644
+--- a/crates/workspace/src/multi_workspace_tests.rs
++++ b/crates/workspace/src/multi_workspace_tests.rs
+@@ -117,6 +117,90 @@ async fn test_sidebar_disabled_when_disable_ai_is_enabled(cx: &mut TestAppContex
+     });
+ }
+ 
++#[gpui::test]
++async fn test_initial_agent_panel_retains_nonempty_active_workspace(cx: &mut TestAppContext) {
++    init_test(cx);
++    cx.update(|cx| {
++        let mut settings = AgentSettings::get_global(cx).clone();
++        settings.threads_sidebar.in_agent_panel = true;
++        AgentSettings::override_global(settings, cx);
++    });
++
++    let fs = FakeFs::new(cx.executor());
++    fs.insert_tree("/root_a", json!({ "file.txt": "" })).await;
++    let project = Project::test(fs, ["/root_a".as_ref()], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++
++    multi_workspace.read_with(cx, |multi_workspace, cx| {
++        assert!(multi_workspace.multi_workspace_enabled(cx));
++        assert!(
++            multi_workspace.active_workspace_is_retained(),
++            "the initial nonempty project must be retained when the threads sidebar starts in the agent panel"
++        );
++    });
++}
++
++#[gpui::test]
++async fn test_agent_panel_layout_changes_keep_empty_workspace_transient(cx: &mut TestAppContext) {
++    init_test(cx);
++    cx.update(|cx| {
++        let mut settings = AgentSettings::get_global(cx).clone();
++        settings.threads_sidebar.in_agent_panel = false;
++        AgentSettings::override_global(settings, cx);
++    });
++    let fs = FakeFs::new(cx.executor());
++    let project = Project::test(fs, [], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    let workspace = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
++
++    for in_agent_panel in [true, false, true] {
++        cx.update(|_window, cx| {
++            let mut settings = AgentSettings::get_global(cx).clone();
++            settings.threads_sidebar.in_agent_panel = in_agent_panel;
++            AgentSettings::override_global(settings, cx);
++        });
++        cx.run_until_parked();
++        multi_workspace.read_with(cx, |mw, cx| {
++            assert!(mw.multi_workspace_enabled(cx));
++            assert_eq!(mw.workspace(), &workspace);
++            assert_eq!(mw.workspaces().count(), 1);
++            assert!(mw.project_group_keys().is_empty());
++            assert!(!mw.active_workspace_is_retained());
++        });
++    }
++}
++
++#[gpui::test]
++async fn test_agent_panel_layout_changes_retain_nonempty_workspace(cx: &mut TestAppContext) {
++    init_test(cx);
++    cx.update(|cx| {
++        let mut settings = AgentSettings::get_global(cx).clone();
++        settings.threads_sidebar.in_agent_panel = false;
++        AgentSettings::override_global(settings, cx);
++    });
++    let fs = FakeFs::new(cx.executor());
++    fs.insert_tree("/root_a", json!({ "file.txt": "" })).await;
++    let project = Project::test(fs, ["/root_a".as_ref()], cx).await;
++    let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    multi_workspace.read_with(cx, |mw, _cx| assert!(!mw.active_workspace_is_retained()));
++
++    cx.update(|_window, cx| {
++        let mut settings = AgentSettings::get_global(cx).clone();
++        settings.threads_sidebar.in_agent_panel = true;
++        AgentSettings::override_global(settings, cx);
++    });
++    cx.run_until_parked();
++    multi_workspace.read_with(cx, |mw, cx| {
++        assert!(mw.multi_workspace_enabled(cx));
++        assert!(mw.active_workspace_is_retained());
++        assert_eq!(mw.project_group_keys(), vec![key.clone()]);
++    });
++}
++
+ #[gpui::test]
+ async fn test_multi_workspace_collapses_when_agent_is_disabled(cx: &mut TestAppContext) {
+     init_test(cx);
 diff --git a/crates/workspace/src/status_bar.rs b/crates/workspace/src/status_bar.rs
 index a3966a06a3..b8075ca416 100644
 --- a/crates/workspace/src/status_bar.rs
@@ -2243,7 +2519,7 @@ index a3966a06a3..b8075ca416 100644
              })
              .unwrap_or_default()
 diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
-index 399b7820f0..da9b34974e 100644
+index 0161979321..c58a541537 100644
 --- a/crates/workspace/src/workspace.rs
 +++ b/crates/workspace/src/workspace.rs
 @@ -31,11 +31,12 @@ mod workspace_settings;
@@ -2264,7 +2540,7 @@ index 399b7820f0..da9b34974e 100644
  };
  pub use path_list::{PathList, SerializedPathList};
  pub use remote::{
-@@ -346,15 +347,26 @@ pub fn panel_row_height(cx: &App) -> Option<Pixels> {
+@@ -348,15 +349,26 @@ pub fn panel_row_height(cx: &App) -> Option<Pixels> {
  /// then (and with the title bar in place) they keep the stock inset. The headers' reserved width
  /// (`TRAFFIC_LIGHT_PADDING`) assumes that stock inset, so the centred lights leave up to ~2.5px
  /// more room before the first tab (compact density): not worth reading the live size every frame.
@@ -2298,7 +2574,7 @@ index 399b7820f0..da9b34974e 100644
      window.set_traffic_light_position(point(inset, inset));
  }
  
-@@ -10196,7 +10208,15 @@ impl Render for Workspace {
+@@ -10409,7 +10421,15 @@ impl Render for Workspace {
                                          })
                                          .into_any_element(),
                                  };

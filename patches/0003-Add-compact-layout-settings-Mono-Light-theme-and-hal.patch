@@ -1,0 +1,1399 @@
+From dd0cadc1df2a6649f36e74ded0875b8d3683ea2c Mon Sep 17 00:00:00 2001
+From: warelik <warelik@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 11:28:27 +0300
+Subject: [PATCH 3/9] Add compact layout settings, Mono Light theme and halved
+ threads sidebar width
+
+Opt-in density settings, all defaulting to stock Zed:
+agent.threads_sidebar.compact, shadows.project_panel, shadows.minimap,
+toolbar.compact and panel_rows_tab_height. A compact toolbar hides the
+dismissed Python banner before any later mode change.
+
+Without any setting this also halves the threads sidebar minimum width
+(200 to 100 px), reserves one em instead of two after the text in
+single-line editors and bundles the Mono Light theme (not selected by
+default).
+
+diff --git a/assets/settings/default.json b/assets/settings/default.json
+index a62be025da..24a00f350c 100644
+--- a/assets/settings/default.json
++++ b/assets/settings/default.json
+@@ -12,6 +12,9 @@
+     "dark": "One Dark",
+   },
+   "icon_theme": "Zed (Default)",
++  // Whether rows in the project, git and outline panels take the tab bar height,
++  // so they line up with the tab bar and the sticky rows of the project panel.
++  "panel_rows_tab_height": false,
+   // The name of a base set of key bindings to use.
+   // This setting can take the following values:
+   //
+@@ -69,6 +72,13 @@
+   "ui_font_weight": 400,
+   // The default font size for text in the UI
+   "ui_font_size": 16,
++  // Toggles for individual UI shadows.
++  "shadows": {
++    // Whether to paint the shadow under the sticky folder rows of the project panel.
++    "project_panel": true,
++    // Whether to paint the shadow around the minimap.
++    "minimap": true,
++  },
+   // The font family for agent responses in the agent panel. Falls back to the UI font family if unset.
+   "agent_ui_font_family": null,
+   // The default font size for agent responses in the agent panel. Falls back to the UI font size if unset.
+@@ -605,6 +615,8 @@
+     "agent_review": true,
+     // Whether to show code action buttons in the editor toolbar.
+     "code_actions": false,
++    // Whether to shrink the pane toolbar to the height of the tab bar.
++    "compact": false,
+   },
+   // Whether to allow windows to tab together based on the user's tabbing preference (macOS only).
+   "use_system_window_tabs": false,
+@@ -1198,6 +1210,8 @@
+       "default_width": 300,
+       // Automatically open the Threads Sidebar when opening a folder in an existing window.
+       "auto_open": true,
++      // Show each thread on a single line at the height of the tab bar, with its details on hover.
++      "compact": false,
+     },
+     // Default fixed width when the agent panel is docked to the left or right and
+     // `flexible` is false.
+diff --git a/assets/themes/mono/mono.json b/assets/themes/mono/mono.json
+new file mode 100644
+index 0000000000..bd2223f2f9
+--- /dev/null
++++ b/assets/themes/mono/mono.json
+@@ -0,0 +1,99 @@
++{
++  "$schema": "https://zed.dev/schema/themes/v0.2.0.json",
++  "name": "Mono",
++  "author": "warelik",
++  "themes": [
++    {
++      "name": "Mono Light",
++      "appearance": "light",
++      "style": {
++        "text": "#000000",
++        "text.muted": "#82827C",
++
++        "border": "#00000000",
++        "border.variant": "#00000000",
++        "border.focused": "#00000000",
++        "border.selected": "#00000000",
++        "panel.focused_border": "#00000000",
++        "pane.focused_border": "#00000000",
++        "scrollbar.track.border": "#00000000",
++
++        "background": "#F1F0EF",
++        "surface.background": "#F1F0EF",
++        "elevated_surface.background": "#F1F0EF",
++        "status_bar.background": "#F1F0EF",
++        "tab_bar.background": "#F1F0EF",
++        "tab.inactive_background": "#F1F0EF",
++        "tab.active_background": "#F1F0EF",
++        "toolbar.background": "#F1F0EF",
++        "panel.background": "#F1F0EF",
++        "editor.background": "#F1F0EF",
++        "editor.gutter.background": "#F1F0EF",
++        "editor.subheader.background": "#F1F0EF",
++        "terminal.background": "#F1F0EF",
++        "terminal.ansi.background": "#F1F0EF",
++
++        "element.selected": "#E2E1DE",
++        "element.hover": "#E2E1DE",
++        "scrollbar.thumb.background": "#00000000",
++        "scrollbar.thumb.hover_background": "#00000000",
++        "scrollbar.thumb.active_background": "#00000000",
++        "minimap.thumb.background": "#DCDBD7B3",
++        "minimap.thumb.hover_background": "#D7D5D1B3",
++        "minimap.thumb.active_background": "#DCDBD7B3",
++        "players": [{ "selection": "#E2E1DE" }],
++
++        "conflict": "#CE2C31", "conflict.background": "#FEEBEC", "conflict.border": "#CE2C31",
++        "created": "#2A7E3B", "created.background": "#E9F6E9", "created.border": "#2A7E3B",
++        "deleted": "#CE2C31", "deleted.background": "#FEEBEC", "deleted.border": "#CE2C31",
++        "error": "#CE2C31", "error.background": "#FEEBEC", "error.border": "#CE2C31",
++        "hidden": "#63635E", "hidden.background": "#F1F0EF", "hidden.border": "#63635E",
++        "hint": "#0D74CE", "hint.background": "#E6F4FE", "hint.border": "#0D74CE",
++        "ignored": "#63635E", "ignored.background": "#F1F0EF", "ignored.border": "#63635E",
++        "info": "#0D74CE", "info.background": "#E6F4FE", "info.border": "#0D74CE",
++        "modified": "#9E6C00", "modified.background": "#FFFAB8", "modified.border": "#9E6C00",
++        "predictive": "#080800A1", "predictive.background": "#20100010", "predictive.border": "#080800A1",
++        "renamed": "#0D74CE", "renamed.background": "#E6F4FE", "renamed.border": "#0D74CE",
++        "success": "#2A7E3B", "success.background": "#E9F6E9", "success.border": "#2A7E3B",
++        "unreachable": "#63635E", "unreachable.background": "#F1F0EF", "unreachable.border": "#63635E",
++        "warning": "#9E6C00", "warning.background": "#FFFAB8", "warning.border": "#9E6C00",
++
++        "syntax": {
++          "attribute": { "color": "#481B9C" },
++          "boolean": { "color": "#005293" },
++          "comment": { "color": "#82827C", "font_style": "italic" },
++          "constant": { "color": "#005293" },
++          "constructor": { "color": "#005293" },
++          "emphasis": { "font_style": "italic" },
++          "emphasis.strong": { "font_weight": 700 },
++          "enum": { "color": "#005293" },
++          "function": { "color": "#CD4500" },
++          "hint": { "color": "#82827C" },
++          "keyword": { "color": "#A30034" },
++          "label": { "color": "#CD4500" },
++          "link_uri": { "color": "#005293" },
++          "namespace": { "color": "#005293" },
++          "number": { "color": "#92156A" },
++          "predictive": { "color": "#82827C", "font_style": "italic" },
++          "preproc": { "color": "#A30034" },
++          "property": { "color": "#005293" },
++          "selector": { "color": "#3B7E84" },
++          "string": { "color": "#7565CC" },
++          "string.regex": { "color": "#0064B0" },
++          "string.special": { "color": "#A30034" },
++          "string.special.symbol": { "color": "#005293" },
++          "tag": { "color": "#007041" },
++          "text.literal": { "color": "#007041" },
++          "title": { "color": "#005293" },
++          "type": { "color": "#005293" },
++          "type.builtin": { "color": "#A30034" },
++          "variable.parameter": { "font_style": "italic" },
++          "variable.special": { "color": "#BE1744" },
++          "variant": { "color": "#005293" },
++          "diff.plus": { "color": "#007041" },
++          "diff.minus": { "color": "#A30034" }
++        }
++      }
++    }
++  ]
++}
+diff --git a/crates/agent/src/tool_permissions.rs b/crates/agent/src/tool_permissions.rs
+index fa38a0b0bb..750154a1fe 100644
+--- a/crates/agent/src/tool_permissions.rs
++++ b/crates/agent/src/tool_permissions.rs
+@@ -613,6 +613,7 @@ mod tests {
+                 auto_open: true,
+                 default_width: px(300.),
+                 position: settings::SidebarDockPosition::Left,
++                compact: false,
+             },
+             thinking_display: Default::default(),
+         }
+diff --git a/crates/agent_settings/src/agent_settings.rs b/crates/agent_settings/src/agent_settings.rs
+index 331480c2e6..0cecde9362 100644
+--- a/crates/agent_settings/src/agent_settings.rs
++++ b/crates/agent_settings/src/agent_settings.rs
+@@ -34,7 +34,7 @@ pub const COMPACTION_PROMPT: &str = include_str!("prompts/compaction_prompt.txt"
+ /// Bounds on the width of the threads list. They constrain the configured
+ /// default as well as the width the user drags to, so that no width the sidebar
+ /// can hold is able to crowd out the editor or collapse the list.
+-pub const THREADS_LIST_MIN_WIDTH: Pixels = px(200.0);
++pub const THREADS_LIST_MIN_WIDTH: Pixels = px(100.0);
+ pub const THREADS_LIST_MAX_WIDTH: Pixels = px(800.0);
+ 
+ #[derive(Debug, Clone, Default, PartialEq, Eq)]
+@@ -257,6 +257,7 @@ pub struct ThreadsSidebarSettings {
+     pub auto_open: bool,
+     pub position: SidebarDockPosition,
+     pub default_width: Pixels,
++    pub compact: bool,
+ }
+ 
+ impl AgentSettings {
+@@ -785,6 +786,7 @@ impl Settings for AgentSettings {
+                     .unwrap()
+                     .into_gpui()
+                     .clamp(THREADS_LIST_MIN_WIDTH, THREADS_LIST_MAX_WIDTH),
++                compact: threads_sidebar.compact.unwrap_or(false),
+             },
+             default_width: agent.default_width.unwrap().into_gpui(),
+             default_height: agent.default_height.unwrap().into_gpui(),
+@@ -1203,6 +1205,22 @@ mod tests {
+         }
+     }
+ 
++    #[gpui::test]
++    fn test_threads_sidebar_compact_defaults_to_false_when_none(cx: &mut gpui::App) {
++        let store = SettingsStore::test(cx);
++        let mut content = store.raw_default_settings().clone();
++        content
++            .agent
++            .as_mut()
++            .unwrap()
++            .threads_sidebar
++            .as_mut()
++            .unwrap()
++            .compact = None;
++        let agent_settings = AgentSettings::from_settings(&content);
++        assert!(!agent_settings.threads_sidebar.compact);
++    }
++
+     #[gpui::test]
+     fn test_threads_sidebar_settings_edit_and_reset_clears_legacy_keys(cx: &mut gpui::App) {
+         let store = SettingsStore::test(cx);
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index c5a19bccc8..2224d0fec3 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -99,7 +99,7 @@ use ui::{
+ use util::ResultExt as _;
+ use workspace::{
+     CollaboratorId, DraggedSelection, DraggedTab, MultiWorkspace, PathList, SerializedPathList,
+-    ToggleWorkspaceSidebar, ToggleZoom, ToolbarItemView, Workspace, WorkspaceId,
++    ToggleWorkspaceSidebar, ToggleZoom, Toolbar, ToolbarItemView, Workspace, WorkspaceId,
+     dock::{DockPosition, Panel, PanelEvent},
+     item::{ItemEvent, ItemHandle},
+ };
+@@ -6679,7 +6679,9 @@ impl Render for AgentPanel {
+                                     v_flex()
+                                         .group("toolbar")
+                                         .relative()
+-                                        .py(DynamicSpacing::Base06.rems(cx))
++                                        .when(Toolbar::compact_row_height(cx).is_none(), |this| {
++                                            this.py(DynamicSpacing::Base06.rems(cx))
++                                        })
+                                         .px(DynamicSpacing::Base08.rems(cx))
+                                         .border_b_1()
+                                         .border_color(cx.theme().colors().border_variant)
+diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
+index 058c8c2e67..684cbb549b 100644
+--- a/crates/agent_ui/src/agent_ui.rs
++++ b/crates/agent_ui/src/agent_ui.rs
+@@ -1111,6 +1111,7 @@ mod tests {
+                 auto_open: true,
+                 default_width: px(300.),
+                 position: settings::SidebarDockPosition::Left,
++                compact: false,
+             },
+             thinking_display: Default::default(),
+         };
+diff --git a/crates/breadcrumbs/src/breadcrumbs.rs b/crates/breadcrumbs/src/breadcrumbs.rs
+index b981e17c33..68b331fcc7 100644
+--- a/crates/breadcrumbs/src/breadcrumbs.rs
++++ b/crates/breadcrumbs/src/breadcrumbs.rs
+@@ -3,7 +3,7 @@ use gpui::{
+ };
+ use ui::prelude::*;
+ use workspace::{
+-    ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
++    Toolbar, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
+     item::{HighlightedText, ItemEvent, ItemHandle},
+ };
+ 
+@@ -50,7 +50,7 @@ impl Render for Breadcrumbs {
+         let element = h_flex()
+             .id("breadcrumb-container")
+             .flex_grow_1()
+-            .h_8()
++            .h(Toolbar::row_height(cx))
+             .overflow_x_scroll()
+             .text_ui(cx);
+ 
+diff --git a/crates/editor/src/element.rs b/crates/editor/src/element.rs
+index 262ec45637..e7fb66609c 100644
+--- a/crates/editor/src/element.rs
++++ b/crates/editor/src/element.rs
+@@ -87,7 +87,7 @@ use std::{
+ use sum_tree::Bias;
+ use text::{BufferId, ToPoint as _};
+ use theme::{ActiveTheme, Appearance, PlayerColor};
+-use theme_settings::BufferLineHeight;
++use theme_settings::{BufferLineHeight, ThemeSettings};
+ use ui::utils::ensure_minimum_contrast;
+ use ui::{ButtonLike, POPOVER_Y_PADDING, Tooltip, prelude::*, scrollbars::ShowScrollbar};
+ use unicode_segmentation::UnicodeSegmentation;
+@@ -1694,7 +1694,9 @@ impl EditorElement {
+ 
+         let mut minimap = div()
+             .size_full()
+-            .shadow_xs()
++            .when(ThemeSettings::get_global(cx).shadows.minimap, |this| {
++                this.shadow_xs()
++            })
+             .px(PADDING_OFFSET)
+             .child(minimap_editor)
+             .into_any_element();
+@@ -8635,7 +8637,14 @@ impl Element for EditorElement {
+ 
+                     let right_margin = minimap_width + vertical_scrollbar_width;
+ 
+-                    let extended_right = 2 * em_width + right_margin;
++                    // A single-line editor has no content to scroll past its end, so it only
++                    // needs room for the cursor; the extra em hides text in narrow inputs.
++                    let overscroll_ems = if self.editor.read(cx).mode.is_single_line() {
++                        1.
++                    } else {
++                        2.
++                    };
++                    let extended_right = em_width * overscroll_ems + right_margin;
+                     let editor_width = text_width - gutter_dimensions.margin - extended_right;
+                     let editor_margins = EditorMargins {
+                         gutter: gutter_dimensions,
+diff --git a/crates/git_ui/src/git_panel.rs b/crates/git_ui/src/git_panel.rs
+index 33ca210eb8..1936203845 100644
+--- a/crates/git_ui/src/git_panel.rs
++++ b/crates/git_ui/src/git_panel.rs
+@@ -8362,7 +8362,7 @@ impl GitPanel {
+                                             ));
+                                         }
+                                         Some(GitListEntry::EmptySection(section)) => {
+-                                            items.push(this.render_empty_section(*section));
++                                            items.push(this.render_empty_section(*section, cx));
+                                         }
+                                         None => {}
+                                     }
+@@ -8412,8 +8412,11 @@ impl GitPanel {
+         Label::new(label.into()).single_line().color(color)
+     }
+ 
+-    fn list_item_height(&self) -> Rems {
+-        rems(1.75)
++    fn list_item_height(&self, cx: &App) -> gpui::DefiniteLength {
++        match workspace::panel_row_height(cx) {
++            Some(height) => height.into(),
++            None => rems(1.75).into(),
++        }
+     }
+ 
+     fn render_list_header(
+@@ -8451,7 +8454,7 @@ impl GitPanel {
+         h_flex()
+             .id(id)
+             .group(group_name)
+-            .h(self.list_item_height())
++            .h(self.list_item_height(cx))
+             .w_full()
+             .pl_2p5()
+             .pr_1()
+@@ -8533,14 +8536,14 @@ impl GitPanel {
+             .into_any_element()
+     }
+ 
+-    fn render_empty_section(&self, section: Section) -> AnyElement {
++    fn render_empty_section(&self, section: Section, cx: &App) -> AnyElement {
+         let message = match section {
+             Section::Staged => "No staged changes yet",
+             Section::Unstaged => "No unstaged changes",
+             _ => "No changes",
+         };
+         h_flex()
+-            .h(self.list_item_height())
++            .h(self.list_item_height(cx))
+             .w_full()
+             .pl_2p5()
+             .pr_1()
+@@ -8957,7 +8960,7 @@ impl GitPanel {
+ 
+         h_flex()
+             .id(id)
+-            .h(self.list_item_height())
++            .h(self.list_item_height(cx))
+             .w_full()
+             .pl_2p5()
+             .pr_1()
+@@ -9180,7 +9183,7 @@ impl GitPanel {
+             .child(self.entry_label(entry.name.clone(), label_color).truncate());
+         h_flex()
+             .id(id)
+-            .h(self.list_item_height())
++            .h(self.list_item_height(cx))
+             .min_w_0()
+             .w_full()
+             .pl_2p5()
+diff --git a/crates/language_onboarding/src/python.rs b/crates/language_onboarding/src/python.rs
+index 64b6502327..d477b47e40 100644
+--- a/crates/language_onboarding/src/python.rs
++++ b/crates/language_onboarding/src/python.rs
+@@ -66,6 +66,11 @@ impl Render for BasedPyrightBanner {
+                                     cx.listener(|this, _, _, cx| {
+                                         this.dismissed = true;
+                                         Self::set_dismissed(true, cx);
++                                        // Keep the cached location hidden if compact mode
++                                        // is enabled after this banner has been dismissed.
++                                        cx.emit(ToolbarItemEvent::ChangeLocation(
++                                            ToolbarItemLocation::Hidden,
++                                        ));
+                                         cx.notify();
+                                     }),
+                                 ))
+diff --git a/crates/onboarding/src/multibuffer_hint.rs b/crates/onboarding/src/multibuffer_hint.rs
+index 56092863c8..a0bc7c6ab8 100644
+--- a/crates/onboarding/src/multibuffer_hint.rs
++++ b/crates/onboarding/src/multibuffer_hint.rs
+@@ -6,7 +6,7 @@ use db::kvp::KeyValueStore;
+ use gpui::{App, EntityId, EventEmitter, Subscription};
+ use ui::{IconButtonShape, Tooltip, prelude::*};
+ use workspace::item::{ItemBufferKind, ItemEvent, ItemHandle};
+-use workspace::{ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView};
++use workspace::{Toolbar, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView};
+ 
+ pub struct MultibufferHint {
+     shown_on: HashSet<EntityId>,
+@@ -136,7 +136,9 @@ impl Render for MultibufferHint {
+     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+         h_flex()
+             .px_2()
+-            .py_0p5()
++            .when(Toolbar::compact_row_height(cx).is_none(), |this| {
++                this.py_0p5()
++            })
+             .justify_between()
+             .bg(cx.theme().status().info_background.opacity(0.5))
+             .border_1()
+diff --git a/crates/outline_panel/src/outline_panel.rs b/crates/outline_panel/src/outline_panel.rs
+index f35d5d6876..844baa33be 100644
+--- a/crates/outline_panel/src/outline_panel.rs
++++ b/crates/outline_panel/src/outline_panel.rs
+@@ -3032,9 +3032,11 @@ impl OutlinePanel {
+             PanelEntry::Fs(FsEntry::File(file)) => file.is_deleted,
+             _ => false,
+         };
++        let row_height = workspace::panel_row_height(cx);
+         div()
+             .text_ui(cx)
+             .id(item_id.clone())
++            .when_some(row_height, |this, height| this.h(height))
+             .on_click({
+                 let clicked_entry = rendered_entry.clone();
+                 cx.listener(move |outline_panel, event: &gpui::ClickEvent, window, cx| {
+@@ -3056,6 +3058,7 @@ impl OutlinePanel {
+             .cursor_pointer()
+             .child(
+                 ListItem::new(item_id)
++                    .when(row_height.is_some(), |this| this.height(relative(1.)))
+                     .indent_level(depth)
+                     .indent_step_size(px(settings.indent_size))
+                     .toggle_state(is_active)
+diff --git a/crates/project_panel/src/project_panel.rs b/crates/project_panel/src/project_panel.rs
+index cc8b23d2a0..00d2125ad0 100644
+--- a/crates/project_panel/src/project_panel.rs
++++ b/crates/project_panel/src/project_panel.rs
+@@ -6248,8 +6248,11 @@ impl ProjectPanel {
+                     .into_owned()
+             });
+ 
++        let row_height = workspace::panel_row_height(cx);
++
+         div()
+             .id(id.clone())
++            .when_some(row_height, |this, height| this.h(height))
+             .relative()
+             .group(GROUP_NAME)
+             .when_some(
+@@ -6626,6 +6629,7 @@ impl ProjectPanel {
+             )
+             .child(
+                 ListItem::new(id)
++                    .when(row_height.is_some(), |this| this.height(relative(1.)))
+                     .indent_level(depth)
+                     .indent_step_size(px(settings.indent_size))
+                     .spacing(match settings.entry_spacing {
+@@ -7446,6 +7450,7 @@ impl ProjectPanel {
+         // already checked if non empty above
+         let last_item_index = sticky_parents.len() - 1;
+         let marked_selections: Arc<[SelectedEntry]> = Arc::from(self.marked_entries.clone());
++        let shadow_enabled = ThemeSettings::get_global(cx).shadows.project_panel;
+         sticky_parents
+             .iter()
+             .enumerate()
+@@ -7474,7 +7479,7 @@ impl ProjectPanel {
+                     window,
+                     cx,
+                 )
+-                .when(index == last_item_index, |this| {
++                .when(index == last_item_index && shadow_enabled, |this| {
+                     let shadow_color_top = hsla(0.0, 0.0, 0.0, 0.1);
+                     let shadow_color_bottom = hsla(0.0, 0.0, 0.0, 0.);
+                     let sticky_shadow = div()
+diff --git a/crates/search/src/buffer_search.rs b/crates/search/src/buffer_search.rs
+index d9de17ac83..6d6f0aa1aa 100644
+--- a/crates/search/src/buffer_search.rs
++++ b/crates/search/src/buffer_search.rs
+@@ -6,9 +6,9 @@ use crate::{
+     ToggleCaseSensitive, ToggleRegex, ToggleReplace, ToggleSelection, ToggleWholeWord,
+     buffer_search::registrar::WithResultsOrExternalQuery,
+     search_bar::{
+-        ActionButtonState, HistoryNavigationDirection, alignment_element,
++        ActionButtonState, HistoryNavigationDirection, alignment_element, error_line,
+         filter_search_results_input, input_base_styles, render_action_button, render_text_input,
+-        should_navigate_history,
++        should_navigate_history, text_input_cell,
+     },
+ };
+ use any_vec::AnyVec;
+@@ -37,7 +37,7 @@ use zed_actions::{outline::ToggleOutline, workspace::CopyPath, workspace::CopyRe
+ use ui::{BASE_REM_SIZE_IN_PX, IconButtonShape, Tooltip, prelude::*, utils::SearchInputWidth};
+ use util::{ResultExt, paths::PathMatcher};
+ use workspace::{
+-    ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace,
++    Toolbar, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace,
+     item::{ItemBufferKind, ItemHandle},
+     searchable::{
+         Direction, FilteredSearchRange, SearchEvent, SearchToken, SearchableItemHandle,
+@@ -221,7 +221,7 @@ impl Render for BufferSearchBar {
+         let input_width = SearchInputWidth::calc_width(container_width);
+ 
+         let input_base_styles =
+-            |border_color| input_base_styles(border_color, |div| div.w(input_width));
++            |border_color| input_base_styles(border_color, |div| div.w(input_width), cx);
+ 
+         let input_style = if find_in_results {
+             filter_search_results_input(query_border, |div| div.w(input_width), cx)
+@@ -230,7 +230,7 @@ impl Render for BufferSearchBar {
+         };
+ 
+         let query_column = input_style
+-            .child(div().flex_1().min_w_0().py_1().child(render_text_input(
++            .child(text_input_cell(cx).min_w_0().child(render_text_input(
+                 &self.query_editor,
+                 color_override,
+                 cx,
+@@ -379,10 +379,7 @@ impl Render for BufferSearchBar {
+ 
+         let replace_line = should_show_replace_input.then(|| {
+             let replace_column = input_base_styles(replacement_border).child(
+-                div()
+-                    .flex_1()
+-                    .py_1()
+-                    .child(render_text_input(&self.replacement_editor, None, cx)),
++                text_input_cell(cx).child(render_text_input(&self.replacement_editor, None, cx)),
+             );
+             let focus_handle = self.replacement_editor.read(cx).focus_handle(cx);
+ 
+@@ -420,13 +417,7 @@ impl Render for BufferSearchBar {
+             key_context.add("in_replace");
+         }
+ 
+-        let query_error_line = self.query_error.as_ref().map(|error| {
+-            Label::new(error)
+-                .size(LabelSize::Small)
+-                .color(Color::Error)
+-                .mt_neg_1()
+-                .ml_2()
+-        });
++        let query_error_line = self.query_error.as_ref().map(|error| error_line(error, cx));
+ 
+         let search_line =
+             h_flex()
+@@ -455,7 +446,9 @@ impl Render for BufferSearchBar {
+ 
+         v_flex()
+             .id("buffer_search")
+-            .gap_2()
++            .when(Toolbar::compact_row_height(cx).is_none(), |this| {
++                this.gap_2()
++            })
+             .w_full()
+             .track_scroll(&self.scroll_handle)
+             .key_context(key_context)
+diff --git a/crates/search/src/project_search.rs b/crates/search/src/project_search.rs
+index 904516f074..e72d0f3820 100644
+--- a/crates/search/src/project_search.rs
++++ b/crates/search/src/project_search.rs
+@@ -5,8 +5,9 @@ use crate::{
+     ToggleCaseSensitive, ToggleIncludeIgnored, ToggleRegex, ToggleReplace, ToggleWholeWord,
+     buffer_search::Deploy,
+     search_bar::{
+-        ActionButtonState, HistoryNavigationDirection, alignment_element, input_base_styles,
+-        render_action_button, render_text_input, should_navigate_history,
++        ActionButtonState, HistoryNavigationDirection, alignment_element, error_line,
++        input_base_styles, render_action_button, render_text_input, should_navigate_history,
++        text_input_cell,
+     },
+     text_finder::TextFinder,
+ };
+@@ -56,7 +57,7 @@ use ui::{
+ };
+ use util::{ResultExt as _, paths::PathMatcher};
+ use workspace::{
+-    DeploySearch, ItemNavHistory, NewSearch, ToolbarItemEvent, ToolbarItemLocation,
++    DeploySearch, ItemNavHistory, NewSearch, Toolbar, ToolbarItemEvent, ToolbarItemLocation,
+     ToolbarItemView, Workspace, WorkspaceId,
+     item::{Item, ItemBufferKind, ItemEvent, ItemHandle, SaveOptions},
+     searchable::{Direction, SearchEvent, SearchToken, SearchableItem, SearchableItemHandle},
+@@ -2998,10 +2999,14 @@ impl Render for ProjectSearchBar {
+         let input_width = SearchInputWidth::calc_width(container_width);
+ 
+         let input_base_styles = |panel: InputPanel| {
+-            input_base_styles(search.border_color_for(panel, cx), |div| match panel {
+-                InputPanel::Query | InputPanel::Replacement => div.w(input_width),
+-                InputPanel::Include | InputPanel::Exclude => div.flex_grow_1(),
+-            })
++            input_base_styles(
++                search.border_color_for(panel, cx),
++                |div| match panel {
++                    InputPanel::Query | InputPanel::Replacement => div.w(input_width),
++                    InputPanel::Include | InputPanel::Exclude => div.flex_grow_1(),
++                },
++                cx,
++            )
+         };
+         let theme_colors = cx.theme().colors();
+         let project_search = search.entity.read(cx);
+@@ -3050,7 +3055,7 @@ impl Render for ProjectSearchBar {
+             .on_action(
+                 cx.listener(|this, action, window, cx| this.next_history_query(action, window, cx)),
+             )
+-            .child(div().flex_1().py_1().child(render_text_input(
++            .child(text_input_cell(cx).child(render_text_input(
+                 &search.query_editor,
+                 color_override,
+                 cx,
+@@ -3213,11 +3218,7 @@ impl Render for ProjectSearchBar {
+ 
+         let replace_line = search.replace_enabled.then(|| {
+             let replace_column = input_base_styles(InputPanel::Replacement).child(
+-                div().flex_1().py_1().child(render_text_input(
+-                    &search.replacement_editor,
+-                    None,
+-                    cx,
+-                )),
++                text_input_cell(cx).child(render_text_input(&search.replacement_editor, None, cx)),
+             );
+ 
+             let focus_handle = search.replacement_editor.read(cx).focus_handle(cx);
+@@ -3311,28 +3312,18 @@ impl Render for ProjectSearchBar {
+         let query_error_line = search
+             .panels_with_errors
+             .get(&InputPanel::Query)
+-            .map(|error| {
+-                Label::new(error)
+-                    .size(LabelSize::Small)
+-                    .color(Color::Error)
+-                    .mt_neg_1()
+-                    .ml_2()
+-            });
++            .map(|error| error_line(error, cx));
+ 
+         let filter_error_line = search
+             .panels_with_errors
+             .get(&InputPanel::Include)
+             .or_else(|| search.panels_with_errors.get(&InputPanel::Exclude))
+-            .map(|error| {
+-                Label::new(error)
+-                    .size(LabelSize::Small)
+-                    .color(Color::Error)
+-                    .mt_neg_1()
+-                    .ml_2()
+-            });
++            .map(|error| error_line(error, cx));
+ 
+         v_flex()
+-            .gap_2()
++            .when(Toolbar::compact_row_height(cx).is_none(), |this| {
++                this.gap_2()
++            })
+             .w_full()
+             .key_context(key_context)
+             .on_action(cx.listener(|this, _: &ToggleFocus, window, cx| {
+diff --git a/crates/search/src/search_bar.rs b/crates/search/src/search_bar.rs
+index a4757631a1..51eecceafe 100644
+--- a/crates/search/src/search_bar.rs
++++ b/crates/search/src/search_bar.rs
+@@ -4,6 +4,7 @@ use settings::Settings;
+ use theme_settings::ThemeSettings;
+ use ui::{IconButton, IconButtonShape};
+ use ui::{Tooltip, prelude::*};
++use workspace::Toolbar;
+ 
+ pub(super) enum HistoryNavigationDirection {
+     Previous,
+@@ -66,11 +67,39 @@ pub(super) fn render_action_button(
+     })
+ }
+ 
+-pub(crate) fn input_base_styles(border_color: Hsla, map: impl FnOnce(Div) -> Div) -> Div {
++/// Wraps a search editor. The vertical padding of stock rows does not fit a compact row, and
++/// the editor is centred in the row either way.
++pub(crate) fn text_input_cell(cx: &App) -> Div {
++    div()
++        .flex_1()
++        .when(Toolbar::compact_row_height(cx).is_none(), |this| {
++            this.py_1()
++        })
++}
++
++/// A search error shown under its input row. Stock tucks it 4px under the row (`mt_neg_1`
++/// against the stack's `gap_2`). A compact stack has no gap, so there the message gets a row of
++/// its own, as tall as the input rows, with the text centred in it.
++pub(crate) fn error_line(message: impl Into<SharedString>, cx: &App) -> AnyElement {
++    let label = Label::new(message)
++        .size(LabelSize::Small)
++        .color(Color::Error)
++        .ml_2();
++    match Toolbar::compact_row_height(cx) {
++        Some(_) => v_flex()
++            .min_h(Toolbar::row_height(cx))
++            .justify_center()
++            .child(label)
++            .into_any_element(),
++        None => label.mt_neg_1().into_any_element(),
++    }
++}
++
++pub(crate) fn input_base_styles(border_color: Hsla, map: impl FnOnce(Div) -> Div, cx: &App) -> Div {
+     h_flex()
+         .map(map)
+         .min_w_32()
+-        .min_h_8()
++        .min_h(Toolbar::row_height(cx))
+         .pl_2()
+         .pr_1()
+         .border_1()
+@@ -82,7 +111,7 @@ pub(crate) fn filter_search_results_input(
+     map: impl FnOnce(Div) -> Div,
+     cx: &App,
+ ) -> Div {
+-    input_base_styles(border_color, map).pl_0().child(
++    input_base_styles(border_color, map, cx).pl_0().child(
+         h_flex()
+             .mr_2()
+             .px_2()
+diff --git a/crates/settings/src/vscode_import.rs b/crates/settings/src/vscode_import.rs
+index 0966e1338c..588a0ba478 100644
+--- a/crates/settings/src/vscode_import.rs
++++ b/crates/settings/src/vscode_import.rs
+@@ -1045,7 +1045,9 @@ impl VsCodeSettings {
+             mermaid_font_family: None,
+             theme: None,
+             icon_theme: None,
++            panel_rows_tab_height: None,
+             ui_density: None,
++            shadows: None,
+             unnecessary_code_fade: None,
+             experimental_theme_overrides: None,
+             theme_overrides: Default::default(),
+diff --git a/crates/settings_content/src/agent.rs b/crates/settings_content/src/agent.rs
+index 4078f7aebb..5ecf3e4c2e 100644
+--- a/crates/settings_content/src/agent.rs
++++ b/crates/settings_content/src/agent.rs
+@@ -51,12 +51,17 @@ pub struct ThreadsSidebarSettingsContent {
+     pub position: Option<SidebarDockPosition>,
+     /// Default width of the threads sidebar in pixels.
+     ///
+-    /// Values range from 200 to 800, matching the widths the sidebar can be
++    /// Values range from 100 to 800, matching the widths the sidebar can be
+     /// dragged to. Values outside that range are clamped into it.
+     ///
+     /// Default: 300
+-    #[schemars(range(min = 200, max = 800))]
++    #[schemars(range(min = 100, max = 800))]
+     pub default_width: Option<crate::PixelSetting>,
++    /// Whether to show each thread on a single line at the height of the tab bar, with its
++    /// details on hover.
++    ///
++    /// Default: false
++    pub compact: Option<bool>,
+ }
+ 
+ #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+diff --git a/crates/settings_content/src/editor.rs b/crates/settings_content/src/editor.rs
+index 23ff824a88..e2a4c64601 100644
+--- a/crates/settings_content/src/editor.rs
++++ b/crates/settings_content/src/editor.rs
+@@ -400,6 +400,10 @@ pub struct ToolbarContent {
+     ///
+     /// Default: false
+     pub code_actions: Option<bool>,
++    /// Whether to shrink the pane toolbar to the height of the tab bar.
++    ///
++    /// Default: false
++    pub compact: Option<bool>,
+ }
+ 
+ /// Scrollbar related settings
+diff --git a/crates/settings_content/src/theme.rs b/crates/settings_content/src/theme.rs
+index 0b2b710609..1ae62495c0 100644
+--- a/crates/settings_content/src/theme.rs
++++ b/crates/settings_content/src/theme.rs
+@@ -221,6 +221,10 @@ pub struct ThemeSettingsContent {
+     pub theme: Option<ThemeSelection>,
+     /// The name of the icon theme to use.
+     pub icon_theme: Option<IconThemeSelection>,
++    /// Whether rows in the project, git and outline panels take the tab bar height.
++    ///
++    /// Default: false
++    pub panel_rows_tab_height: Option<bool>,
+ 
+     /// UNSTABLE: Expect many elements to be broken.
+     ///
+@@ -228,6 +232,9 @@ pub struct ThemeSettingsContent {
+     #[serde(rename = "unstable.ui_density")]
+     pub ui_density: Option<UiDensity>,
+ 
++    /// Which UI shadows to paint.
++    pub shadows: Option<ShadowsContent>,
++
+     /// How much to fade out unused code.
+     #[schemars(range(min = 0.0, max = 0.9))]
+     pub unnecessary_code_fade: Option<CodeFade>,
+@@ -245,6 +252,20 @@ pub struct ThemeSettingsContent {
+     pub theme_overrides: HashMap<String, ThemeStyleContent>,
+ }
+ 
++/// Toggles for individual UI shadows.
++#[with_fallible_options]
++#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
++pub struct ShadowsContent {
++    /// Whether to paint the shadow under the sticky folder rows of the project panel.
++    ///
++    /// Default: true
++    pub project_panel: Option<bool>,
++    /// Whether to paint the shadow around the minimap.
++    ///
++    /// Default: true
++    pub minimap: Option<bool>,
++}
++
+ /// A font size value in pixels, wrapping around `f32` for custom settings UI rendering.
+ #[derive(
+     Clone,
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index 16cfbc431b..bd0688f7f7 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -2393,7 +2393,13 @@ impl Sidebar {
+             .group(&group_name)
+             .when(!has_filter, |this| this.cursor_pointer())
+             .relative()
+-            .h(Tab::content_height(cx))
++            // Every header but the first also gets 1px from its separator wrapper (or the sticky
++            // copy's bottom border), so only the first one has to supply the full tab height.
++            .h(if Self::is_compact(cx) && !is_sticky && ix == 0 {
++                Tab::container_height(cx)
++            } else {
++                Tab::content_height(cx)
++            })
+             .w_full()
+             .pl_2()
+             .pr_1p5()
+@@ -2525,15 +2531,16 @@ impl Sidebar {
+             .block_mouse_except_scroll();
+ 
+         if !is_collapsed && !has_threads {
++            let compact = Self::is_compact(cx);
+             v_flex()
+                 .w_full()
+                 .child(header)
+                 .child(
+                     h_flex()
+                         .px_2()
+-                        .pt_1()
+-                        .pb_2()
+                         .gap(px(7.))
++                        .when(compact, |this| this.h(Tab::container_height(cx)))
++                        .when(!compact, |this| this.pt_1().pb_2())
+                         .child(Icon::new(IconName::Circle).size(IconSize::Small).color(
+                             Color::Custom(cx.theme().colors().icon_placeholder.opacity(0.1)),
+                         ))
+@@ -3423,6 +3430,10 @@ impl Sidebar {
+         !self.filter_editor.read(cx).text(cx).is_empty()
+     }
+ 
++    fn is_compact(cx: &App) -> bool {
++        AgentSettings::get_global(cx).threads_sidebar.compact
++    }
++
+     fn start_renaming_entry(
+         &mut self,
+         ix: usize,
+@@ -6345,6 +6356,7 @@ impl Sidebar {
+ 
+         let thread_item = ThreadItem::new(id, title.clone())
+             .base_bg(sidebar_bg)
++            .compact(Self::is_compact(cx))
+             .icon(icon)
+             .when(is_draft, |this| {
+                 this.icon_color(Color::Custom(cx.theme().colors().icon_muted.opacity(0.2)))
+@@ -6674,6 +6686,7 @@ impl Sidebar {
+ 
+         let terminal_item = ThreadItem::new(id, title)
+             .base_bg(sidebar_bg)
++            .compact(Self::is_compact(cx))
+             .icon(IconName::Terminal)
+             .when_some(icon_char, |this, icon_char| this.icon_char(icon_char))
+             .is_remote(is_remote)
+@@ -7413,6 +7426,7 @@ impl Sidebar {
+         cx: &mut Context<Self>,
+     ) -> impl IntoElement {
+         let has_query = self.has_filter_query(cx);
++        let compact = Self::is_compact(cx);
+         let sidebar_on_left = self.side(cx) == SidebarSide::Left;
+         let sidebar_on_right = self.side(cx) == SidebarSide::Right;
+         let not_fullscreen = !window.is_fullscreen() && !window.is_simple_fullscreen();
+@@ -7456,16 +7470,18 @@ impl Sidebar {
+             .when(!no_open_projects, |this| {
+                 this.border_b_1()
+                     .border_color(cx.theme().colors().border)
+-                    .when(traffic_lights, |this| {
++                    .when(traffic_lights && !compact, |this| {
+                         this.child(Divider::vertical().color(ui::DividerColor::Border))
+                     })
+-                    .child(
+-                        div().ml_1().child(
+-                            Icon::new(IconName::MagnifyingGlass)
+-                                .size(IconSize::Small)
+-                                .color(Color::Muted),
+-                        ),
+-                    )
++                    .when(!compact, |this| {
++                        this.child(
++                            div().ml_1().child(
++                                Icon::new(IconName::MagnifyingGlass)
++                                    .size(IconSize::Small)
++                                    .color(Color::Muted),
++                            ),
++                        )
++                    })
+                     .child(self.render_filter_input(cx))
+                     .child(
+                         h_flex()
+@@ -7475,7 +7491,7 @@ impl Sidebar {
+                                     && !self.filter_editor.focus_handle(cx).is_focused(window),
+                                 |this| this.child(KeyBinding::for_action(&FocusSidebarFilter, cx)),
+                             )
+-                            .when(has_query, |this| {
++                            .when(has_query && !compact, |this| {
+                                 this.child(
+                                     IconButton::new("clear_filter", IconName::Close)
+                                         .icon_size(IconSize::Small)
+diff --git a/crates/theme_settings/src/settings.rs b/crates/theme_settings/src/settings.rs
+index 0a587340f5..43a4414794 100644
+--- a/crates/theme_settings/src/settings.rs
++++ b/crates/theme_settings/src/settings.rs
+@@ -96,13 +96,26 @@ pub struct ThemeSettings {
+     pub theme_overrides: HashMap<String, settings::ThemeStyleContent>,
+     /// The current icon theme selection.
+     pub icon_theme: IconThemeSelection,
++    /// Whether rows in the project, git and outline panels take the tab bar height.
++    pub panel_rows_tab_height: bool,
+     /// The density of the UI.
+     /// Note: This setting is still experimental. See [this tracking issue](
+     pub ui_density: UiDensity,
++    /// Which UI shadows to paint.
++    pub shadows: ShadowSettings,
+     /// The amount of fading applied to unnecessary code.
+     pub unnecessary_code_fade: f32,
+ }
+ 
++/// Toggles for individual UI shadows.
++#[derive(Debug, Clone, Copy, PartialEq)]
++pub struct ShadowSettings {
++    /// Whether to paint the shadow under the sticky folder rows of the project panel.
++    pub project_panel: bool,
++    /// Whether to paint the shadow around the minimap.
++    pub minimap: bool,
++}
++
+ /// Returns the name of the default theme for the given [`Appearance`].
+ pub fn default_theme(appearance: Appearance) -> &'static str {
+     match appearance {
+@@ -725,6 +738,7 @@ impl settings::Settings for ThemeSettings {
+         let markdown_preview = settings_content.markdown_preview.as_ref();
+         let theme_selection: ThemeSelection = content.theme.clone().unwrap().into();
+         let icon_theme_selection: IconThemeSelection = content.icon_theme.clone().unwrap().into();
++        let shadows = content.shadows.as_ref();
+         Self {
+             ui_font_size: clamp_font_size(content.ui_font_size.unwrap().into_gpui()),
+             ui_font: Font {
+@@ -786,7 +800,14 @@ impl settings::Settings for ThemeSettings {
+             experimental_theme_overrides: content.experimental_theme_overrides.clone(),
+             theme_overrides: content.theme_overrides.clone(),
+             icon_theme: icon_theme_selection,
++            panel_rows_tab_height: content.panel_rows_tab_height.unwrap_or(false),
+             ui_density: ui_density_from_settings(content.ui_density.unwrap_or_default()),
++            shadows: ShadowSettings {
++                project_panel: shadows
++                    .and_then(|shadows| shadows.project_panel)
++                    .unwrap_or(true),
++                minimap: shadows.and_then(|shadows| shadows.minimap).unwrap_or(true),
++            },
+             unnecessary_code_fade: content.unnecessary_code_fade.unwrap().0.clamp(0.0, 0.9),
+         }
+     }
+@@ -796,6 +817,19 @@ impl settings::Settings for ThemeSettings {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn test_theme_settings_defaults_when_fields_none() {
++        let mut raw: ::settings::SettingsContent =
++            ::settings::parse_json_with_comments(&::settings::default_settings()).unwrap();
++        raw.theme.shadows = None;
++        raw.theme.panel_rows_tab_height = None;
++
++        let settings = ThemeSettings::from_settings(&raw);
++        assert!(!settings.panel_rows_tab_height);
++        assert!(settings.shadows.project_panel);
++        assert!(settings.shadows.minimap);
++    }
++
+     fn theme_with_colors(colors: ::settings::ThemeColorsContent) -> Theme {
+         crate::refine_theme(&crate::ThemeContent {
+             name: "Test".into(),
+diff --git a/crates/theme_settings/src/theme_settings.rs b/crates/theme_settings/src/theme_settings.rs
+index f56a46b405..e5296d656a 100644
+--- a/crates/theme_settings/src/theme_settings.rs
++++ b/crates/theme_settings/src/theme_settings.rs
+@@ -30,8 +30,8 @@ use crate::settings::adjust_buffer_font_size;
+ pub use crate::settings::{
+     AgentBufferFontSize, AgentUiFontSize, BufferLineHeight, FontFamilyName,
+     GitCommitBufferFontSize, IconThemeName, IconThemeSelection, MarkdownPreviewFontSize,
+-    ThemeAppearanceMode, ThemeName, ThemeSelection, ThemeSettings, adjust_agent_buffer_font_size,
+-    adjust_agent_ui_font_size, adjust_git_commit_buffer_font_size,
++    ShadowSettings, ThemeAppearanceMode, ThemeName, ThemeSelection, ThemeSettings,
++    adjust_agent_buffer_font_size, adjust_agent_ui_font_size, adjust_git_commit_buffer_font_size,
+     adjust_markdown_preview_font_size, adjust_ui_font_size, adjusted_font_size, appearance_to_mode,
+     buffer_line_height_from_settings, clamp_font_size, default_theme,
+     observe_buffer_font_size_adjustment, reset_agent_buffer_font_size, reset_agent_ui_font_size,
+diff --git a/crates/ui/src/components/ai/thread_item.rs b/crates/ui/src/components/ai/thread_item.rs
+index 3df79d9fbf..8a9dcbcf0d 100644
+--- a/crates/ui/src/components/ai/thread_item.rs
++++ b/crates/ui/src/components/ai/thread_item.rs
+@@ -65,6 +65,7 @@ pub struct ThreadItem {
+     on_hover: Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>,
+     action_slot: Option<AnyElement>,
+     base_bg: Option<Hsla>,
++    compact: bool,
+ }
+ 
+ impl ThreadItem {
+@@ -100,6 +101,7 @@ impl ThreadItem {
+             on_hover: Box::new(|_, _, _| {}),
+             action_slot: None,
+             base_bg: None,
++            compact: false,
+         }
+     }
+ 
+@@ -247,10 +249,18 @@ impl ThreadItem {
+         self.base_bg = Some(color);
+         self
+     }
++
++    /// Renders a single line at the height of the tab bar; the metadata appears on hover.
++    pub fn compact(mut self, compact: bool) -> Self {
++        self.compact = compact;
++        self
++    }
+ }
+ 
+ impl RenderOnce for ThreadItem {
+     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
++        let compact = self.compact;
++        let hovered = self.hovered;
+         let color = cx.theme().colors();
+         let raw_bg = self.base_bg.unwrap_or(color.surface_background);
+         // The fade gradient paints a solid color over the title to blend it into
+@@ -426,6 +436,35 @@ impl RenderOnce for ThreadItem {
+             || has_worktree
+             || has_diff_stats
+             || has_timestamp;
++        // A compact row has room for one line: on hover it trades the always visible title
++        // for the metadata a regular row shows on its second line.
++        let show_title = !(compact && hovered && has_metadata);
++
++        let action_slot = self.action_slot.filter(|_| hovered).map(|slot| {
++            h_flex()
++                .relative()
++                // In compact mode the metadata sits right before the actions; the fade would hide it.
++                .when(opaque_window && !compact, |this| {
++                    this.child(
++                        GradientFade::new(base_bg, hover_bg, active_bg)
++                            .width(px(120.0))
++                            .right(px(8.))
++                            .gradient_stop(0.90)
++                            .group_name("thread-item"),
++                    )
++                })
++                .child(
++                    h_flex()
++                        .pr_1p5()
++                        .child(slot)
++                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
++                )
++        });
++        let (title_row_action_slot, trailing_action_slot) = if compact {
++            (None, action_slot.map(|slot| slot.flex_none()))
++        } else {
++            (action_slot, None)
++        };
+ 
+         v_flex()
+             .id(self.id.clone())
+@@ -435,8 +474,17 @@ impl RenderOnce for ThreadItem {
+             .flex_shrink_0()
+             .overflow_hidden()
+             .w_full()
+-            .py_1()
+             .px_1p5()
++            .map(|this| {
++                if compact {
++                    this.flex_row()
++                        .items_center()
++                        .gap_2()
++                        .h(crate::Tab::container_height(cx))
++                } else {
++                    this.py_1()
++                }
++            })
+             .when(self.selected, |s| s.bg(color.ghost_element_selected))
+             .border_1()
+             .border_r_2()
+@@ -450,6 +498,13 @@ impl RenderOnce for ThreadItem {
+                 h_flex()
+                     .min_w_0()
+                     .w_full()
++                    .when(compact, |this| {
++                        if show_title {
++                            this.w_auto().flex_auto().relative()
++                        } else {
++                            this.w_auto().flex_none()
++                        }
++                    })
+                     .h_6()
+                     .gap_2()
+                     .justify_between()
+@@ -458,44 +513,22 @@ impl RenderOnce for ThreadItem {
+                             .id("content")
+                             .min_w_0()
+                             .flex_1()
++                            .when(compact, |this| this.overflow_hidden())
+                             .gap_1p5()
+                             .child(icon)
+-                            .child(title_label),
++                            .when(show_title, |this| this.child(title_label)),
+                     )
+-                    .when(self.is_truncated && opaque_window, |this| {
++                    .when(self.is_truncated && opaque_window && show_title, |this| {
+                         this.child(gradient_overlay)
+                     })
+-                    .when(self.hovered, |this| {
+-                        this.when_some(self.action_slot, |this, slot| {
+-                            this.child(
+-                                h_flex()
+-                                    .relative()
+-                                    .when(opaque_window, |this| {
+-                                        this.child(
+-                                            GradientFade::new(base_bg, hover_bg, active_bg)
+-                                                .width(px(120.0))
+-                                                .right(px(8.))
+-                                                .gradient_stop(0.90)
+-                                                .group_name("thread-item"),
+-                                        )
+-                                    })
+-                                    .child(
+-                                        h_flex()
+-                                            .pr_1p5()
+-                                            .child(slot)
+-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+-                                                cx.stop_propagation()
+-                                            }),
+-                                    ),
+-                            )
+-                        })
+-                    }),
++                    .children(title_row_action_slot),
+             )
+-            .when(has_metadata, |this| {
++            .when(has_metadata && (!compact || hovered), |this| {
+                 this.child(
+                     h_flex()
+                         .gap_1p5()
+-                        .child(icon_container()) // Icon Spacing
++                        .when(compact, |this| this.flex_1().min_w_0().overflow_hidden())
++                        .when(!compact, |this| this.child(icon_container())) // Icon Spacing
+                         .when(self.archived, |this| {
+                             this.child(
+                                 Icon::new(IconName::Archive).size(IconSize::XSmall).color(
+@@ -614,6 +647,7 @@ impl RenderOnce for ThreadItem {
+                         }),
+                 )
+             })
++            .children(trailing_action_slot)
+             .when(show_tooltip, |this| {
+                 let status = self.status;
+                 this.tooltip(Tooltip::element(move |_, _| match status {
+diff --git a/crates/workspace/src/toolbar.rs b/crates/workspace/src/toolbar.rs
+index b14775f289..c7213d0275 100644
+--- a/crates/workspace/src/toolbar.rs
++++ b/crates/workspace/src/toolbar.rs
+@@ -1,9 +1,10 @@
+-use crate::ItemHandle;
++use crate::{ItemHandle, WorkspaceSettings};
+ use gpui::{
+     AnyView, App, Context, Div, Entity, EntityId, EventEmitter, Global, KeyContext,
+     ParentElement as _, Render, Styled, Window,
+ };
+ use language::LanguageRegistry;
++use settings::Settings as _;
+ use std::sync::Arc;
+ use ui::prelude::*;
+ use ui::{h_flex, v_flex};
+@@ -69,6 +70,23 @@ pub struct Toolbar {
+ }
+ 
+ impl Toolbar {
++    /// Height of one toolbar row under `toolbar.compact`, `None` when the setting is off. A tab's
++    /// content height plus the toolbar's 1px bottom border equals the tab bar height, so a
++    /// single-row toolbar is exactly as tall as the tab bar; every row nested in the toolbar
++    /// (search inputs, breadcrumbs) derives its height from here.
++    pub fn compact_row_height(cx: &App) -> Option<Pixels> {
++        WorkspaceSettings::get_global(cx)
++            .compact_toolbar
++            .then(|| ui::Tab::content_height(cx))
++    }
++
++    pub fn row_height(cx: &App) -> gpui::DefiniteLength {
++        match Self::compact_row_height(cx) {
++            Some(height) => height.into(),
++            None => rems(2.0).into(),
++        }
++    }
++
+     fn has_any_visible_items(&self) -> bool {
+         self.items
+             .iter()
+@@ -116,15 +134,19 @@ impl Render for Toolbar {
+ 
+         let has_left_items = self.left_items().count() > 0;
+         let has_right_items = self.right_items().count() > 0;
++        let compact_height = Self::compact_row_height(cx);
+ 
+         v_flex()
+             .group("toolbar")
+             .relative()
+-            .py(DynamicSpacing::Base06.rems(cx))
+-            .px(DynamicSpacing::Base08.rems(cx))
+-            .when(has_left_items || has_right_items, |this| {
+-                this.gap(DynamicSpacing::Base06.rems(cx))
++            .when(compact_height.is_none(), |this| {
++                this.py(DynamicSpacing::Base06.rems(cx))
+             })
++            .px(DynamicSpacing::Base08.rems(cx))
++            .when(
++                (has_left_items || has_right_items) && compact_height.is_none(),
++                |this| this.gap(DynamicSpacing::Base06.rems(cx)),
++            )
+             .border_b_1()
+             .border_color(cx.theme().colors().border_variant)
+             .bg(cx.theme().colors().toolbar_background)
+@@ -137,7 +159,7 @@ impl Render for Toolbar {
+                         .when(has_left_items, |this| {
+                             this.child(
+                                 h_flex()
+-                                    .min_h_8()
++                                    .min_h(Self::row_height(cx))
+                                     .flex_auto()
+                                     .justify_start()
+                                     .overflow_x_hidden()
+@@ -147,7 +169,7 @@ impl Render for Toolbar {
+                         .when(has_right_items, |this| {
+                             this.child(
+                                 h_flex()
+-                                    .h_8()
++                                    .h(Self::row_height(cx))
+                                     .flex_row_reverse()
+                                     .when(has_left_items, |this| this.flex_none())
+                                     .justify_end()
+@@ -156,7 +178,18 @@ impl Render for Toolbar {
+                         }),
+                 )
+             })
+-            .children(secondary_items)
++            // Without the wrapper a content-sized notice would be taller or shorter than the
++            // search rows, which are whole compact rows.
++            .children(secondary_items.map(|item| {
++                match compact_height {
++                    Some(height) => v_flex()
++                        .min_h(height)
++                        .justify_center()
++                        .child(item)
++                        .into_any_element(),
++                    None => item.into_any_element(),
++                }
++            }))
+     }
+ }
+ 
+diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
+index acafc70ee8..0161979321 100644
+--- a/crates/workspace/src/workspace.rs
++++ b/crates/workspace/src/workspace.rs
+@@ -336,6 +336,12 @@ pub fn title_bar_in_status_bar(cx: &App) -> bool {
+ /// Where stock Zed puts the traffic lights; the title bar is centred on them.
+ pub const TRAFFIC_LIGHT_INSET: Pixels = px(9.);
+ 
++pub fn panel_row_height(cx: &App) -> Option<Pixels> {
++    ThemeSettings::get_global(cx)
++        .panel_rows_tab_height
++        .then(|| ui::Tab::container_height(cx))
++}
++
+ /// Without the title bar the traffic lights are centred between the window's top edge and the
+ /// bottom border of the tab-height header beside them, as far from the left edge as from the top.
+ /// The button size depends on the macOS SDK, so it is only known once the window exists; until
+diff --git a/crates/workspace/src/workspace_settings.rs b/crates/workspace/src/workspace_settings.rs
+index 8f39a1bdb2..76e8de2a7b 100644
+--- a/crates/workspace/src/workspace_settings.rs
++++ b/crates/workspace/src/workspace_settings.rs
+@@ -48,6 +48,7 @@ pub struct WorkspaceSettings {
+     pub window_decorations: settings::WindowDecorations,
+     pub title_bar_to_status_bar: bool,
+     pub focus_follows_mouse: FocusFollowsMouse,
++    pub compact_toolbar: bool,
+ }
+ 
+ #[cfg(target_os = "macos")]
+@@ -170,6 +171,12 @@ impl Settings for WorkspaceSettings {
+                         .unwrap_or(250),
+                 ),
+             },
++            compact_toolbar: content
++                .editor
++                .toolbar
++                .as_ref()
++                .and_then(|toolbar| toolbar.compact)
++                .unwrap_or(false),
+         }
+     }
+ }
+@@ -246,3 +253,27 @@ impl Settings for StatusBarSettings {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn test_workspace_settings_defaults_when_fields_none() {
++        let mut raw: settings::SettingsContent =
++            settings::parse_json_with_comments(&settings::default_settings()).unwrap();
++        raw.workspace.title_bar_to_status_bar = None;
++        raw.editor.toolbar = None;
++        if let Some(tab_bar) = raw.tab_bar.as_mut() {
++            tab_bar.pinned_tab_chips = None;
++            tab_bar.unpinned_tab_chips = None;
++        }
++
++        let settings = WorkspaceSettings::from_settings(&raw);
++        assert!(!settings.title_bar_to_status_bar);
++        assert!(!settings.compact_toolbar);
++        let tab_settings = TabBarSettings::from_settings(&raw);
++        assert!(!tab_settings.pinned_tab_chips);
++        assert!(!tab_settings.unpinned_tab_chips);
++    }
++}
+diff --git a/docs/src/reference/all-settings.md b/docs/src/reference/all-settings.md
+index b42b0e853d..86857c4e2e 100644
+--- a/docs/src/reference/all-settings.md
++++ b/docs/src/reference/all-settings.md
+@@ -151,7 +151,7 @@ Open the Settings Editor and search for “Threads Sidebar Position”. Or add t
+ 
+ **Options**
+ 
+-Numbers from `200` to `800` pixels (inclusive). Values outside this range are clamped to the nearest limit.
++Numbers from `100` to `800` pixels (inclusive). Values outside this range are clamped to the nearest limit.
+ 
+ Open the Settings Editor and search for “Threads Sidebar Default Width”. Or add this to your `settings.json`:
+ 

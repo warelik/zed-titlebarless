@@ -1,30 +1,20 @@
-From a4ad2686700fcd03b7266d7f205c5c9e4a3a468f Mon Sep 17 00:00:00 2001
+From 25d31cc48b41d0a6793d9505ad425a97e3d5ffc7 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 16:05:02 +0300
-Subject: [PATCH 02/90] Add tab width bounds and tab chip settings
+Subject: [PATCH 2/9] Add tab width bounds and tab chip settings
 
-Tabs size to their title by default, which makes the tab bar uneven.
 tabs.min_width and tabs.max_width clamp the tab width; editor and
 terminal titles truncate in the middle when a maximum is set.
-
 tab_bar.pinned_tab_chips and tab_bar.unpinned_tab_chips render the
-tabs of the pinned or unpinned row as compact borderless chips that hug
-their content. Chips are as tall as the toolbar's default buttons and
-use the theme's element state colours.
+tabs of the pinned or unpinned row as compact borderless chips.
 
-The width bounds default to null and the chips to false, which keeps
-the stock tab layout, including terminal titles in the tab switcher.
-
-TabBarSettings::from_settings deserializes pinned_tab_chips and
-unpinned_tab_chips with unwrap_or(false), preventing panics when tab
-chip configuration keys are omitted. Unit test coverage for default
-fallback is introduced in commit 5.
+The tab width regression renders an actual tab before asserting.
 
 diff --git a/assets/settings/default.json b/assets/settings/default.json
-index 270f5f96ca..2a2b74dde4 100644
+index 84735f9b29..a62be025da 100644
 --- a/assets/settings/default.json
 +++ b/assets/settings/default.json
-@@ -1483,6 +1483,10 @@
+@@ -1486,6 +1486,10 @@
      // When enabled, pinned tabs appear in a top row and unpinned tabs in a bottom row.
      // When disabled, all tabs appear in a single row (default behavior).
      "show_pinned_tabs_in_separate_row": false,
@@ -35,7 +25,7 @@ index 270f5f96ca..2a2b74dde4 100644
    },
    // Settings related to the tab switcher (Ctrl-Tab).
    "tab_switcher": {
-@@ -1529,6 +1533,10 @@
+@@ -1532,6 +1536,10 @@
      // 3. Mark files with errors and warnings:
      //    "all"
      "show_diagnostics": "off",
@@ -69,7 +59,7 @@ index 0703edb17b..0966e1338c 100644
      }
  
 diff --git a/crates/settings_content/src/workspace.rs b/crates/settings_content/src/workspace.rs
-index 4523b22530..e0f1acd791 100644
+index a4ecbea1a5..6bb4f7f78f 100644
 --- a/crates/settings_content/src/workspace.rs
 +++ b/crates/settings_content/src/workspace.rs
 @@ -211,6 +211,15 @@ pub struct ItemSettingsContent {
@@ -104,7 +94,7 @@ index 4523b22530..e0f1acd791 100644
  
  #[with_fallible_options]
 diff --git a/crates/terminal_view/src/terminal_view.rs b/crates/terminal_view/src/terminal_view.rs
-index c1e5105e10..49a319d8d8 100644
+index 0eb62438a5..c994bda37c 100644
 --- a/crates/terminal_view/src/terminal_view.rs
 +++ b/crates/terminal_view/src/terminal_view.rs
 @@ -53,7 +53,8 @@ use workspace::{
@@ -117,7 +107,7 @@ index c1e5105e10..49a319d8d8 100644
      },
      register_serializable_item,
      searchable::{
-@@ -1634,10 +1635,17 @@ impl Item for TerminalView {
+@@ -1635,10 +1636,17 @@ impl Item for TerminalView {
              None => (IconName::Terminal, Color::Muted, None),
          };
  
@@ -135,7 +125,7 @@ index c1e5105e10..49a319d8d8 100644
              .when(!params.selected, |this| {
                  this.track_focus(&self.focus_handle)
              })
-@@ -1668,10 +1676,12 @@ impl Item for TerminalView {
+@@ -1669,10 +1677,12 @@ impl Item for TerminalView {
              .child(
                  div()
                      .relative()
@@ -290,10 +280,10 @@ index ab4195f6a4..15cd5e1723 100644
      }
  }
 diff --git a/crates/workspace/src/pane.rs b/crates/workspace/src/pane.rs
-index 0e73fb90a8..0bbf7896d5 100644
+index e19ec68347..5eb9f79087 100644
 --- a/crates/workspace/src/pane.rs
 +++ b/crates/workspace/src/pane.rs
-@@ -2842,6 +2842,7 @@ impl Pane {
+@@ -2876,6 +2876,7 @@ impl Pane {
          ix: usize,
          item: &dyn ItemHandle,
          detail: usize,
@@ -301,7 +291,7 @@ index 0e73fb90a8..0bbf7896d5 100644
          focus_handle: &FocusHandle,
          window: &mut Window,
          cx: &mut Context<Pane>,
-@@ -2852,6 +2853,7 @@ impl Pane {
+@@ -2886,6 +2887,7 @@ impl Pane {
              .map(|id| id == item.item_id())
              .unwrap_or(false);
  
@@ -309,7 +299,7 @@ index 0e73fb90a8..0bbf7896d5 100644
          let label = item.tab_content(
              TabContentParams {
                  detail: Some(detail),
-@@ -2859,7 +2861,7 @@ impl Pane {
+@@ -2893,7 +2895,7 @@ impl Pane {
                  preview: is_preview,
                  deemphasized: !self.has_focus(window, cx),
                  max_title_len: None,
@@ -318,7 +308,7 @@ index 0e73fb90a8..0bbf7896d5 100644
              },
              window,
              cx,
-@@ -2867,7 +2869,6 @@ impl Pane {
+@@ -2901,7 +2903,6 @@ impl Pane {
  
          let icon = self.tab_icon_element(item, is_active, window, cx);
  
@@ -326,7 +316,7 @@ index 0e73fb90a8..0bbf7896d5 100644
          let close_side = &settings.close_position;
          let show_close_button = &settings.show_close_button;
          let indicator = render_item_indicator(item.boxed_clone(), cx);
-@@ -2920,6 +2921,9 @@ impl Pane {
+@@ -2954,6 +2955,9 @@ impl Pane {
                  ClosePosition::Right => ui::TabCloseSide::End,
              })
              .toggle_state(is_active)
@@ -336,7 +326,7 @@ index 0e73fb90a8..0bbf7896d5 100644
              .on_click(cx.listener({
                  let item_handle = item.boxed_clone();
                  move |pane: &mut Self, event: &ClickEvent, window, cx| {
-@@ -3056,6 +3060,13 @@ impl Pane {
+@@ -3090,6 +3094,13 @@ impl Pane {
                  h_flex()
                      .id(("pane-tab-content", ix))
                      .gap_1()
@@ -350,7 +340,7 @@ index 0e73fb90a8..0bbf7896d5 100644
                      .children(if let Some(icon) = icon {
                          Some(icon)
                      } else if !capability.editable() {
-@@ -3519,13 +3530,23 @@ impl Pane {
+@@ -3553,13 +3564,23 @@ impl Pane {
                  }
              });
  
@@ -375,7 +365,7 @@ index 0e73fb90a8..0bbf7896d5 100644
                      .into_any_element()
              })
              .collect::<Vec<_>>();
-@@ -3543,9 +3564,6 @@ impl Pane {
+@@ -3577,9 +3598,6 @@ impl Pane {
          let unpinned_tabs = tab_items.split_off(self.pinned_tab_count);
          let pinned_tabs = tab_items;
  
@@ -386,10 +376,10 @@ index 0e73fb90a8..0bbf7896d5 100644
              self.render_two_row_tab_bar(
                  pinned_tabs,
 diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
-index 6bd106430d..a668dd808c 100644
+index 23d14864de..acafc70ee8 100644
 --- a/crates/workspace/src/workspace.rs
 +++ b/crates/workspace/src/workspace.rs
-@@ -13253,6 +13253,44 @@ mod tests {
+@@ -13520,6 +13520,45 @@ mod tests {
          assert!(first_tab_left(true, cx) >= without_spacer + px(ui::utils::TRAFFIC_LIGHT_PADDING));
      }
  
@@ -401,6 +391,7 @@ index 6bd106430d..a668dd808c 100644
 +        let (workspace, cx) =
 +            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
 +        add_an_item_to_active_pane(cx, &workspace, 1);
++        add_an_item_to_active_pane(cx, &workspace, 2);
 +
 +        let tab_width =
 +            |min_width: Option<f32>, max_width: Option<f32>, cx: &mut VisualTestContext| {
