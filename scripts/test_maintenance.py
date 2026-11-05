@@ -2908,12 +2908,17 @@ class SharedPublicationBoundaryTests(unittest.TestCase):
         api.assert_not_called()
 
     def test_patch_series_retains_per_group_close_keys_and_drops_duplicate_stock_remote_cases(self):
-        patch_0011 = (
-            release.ROOT / "patches/0007-Keep-agent-panel-terminal-threads-in-persistent-shpo.patch"
-        ).read_text()
-        patch_0043 = (
-            release.ROOT / "patches/0007-Keep-agent-panel-terminal-threads-in-persistent-shpo.patch"
-        ).read_text()
+        # Find the patches by content, not by file number, so regrouping the series
+        # never breaks this test. The names keep the original patch labels.
+        series = [path.read_text() for path in sorted((release.ROOT / "patches").glob("*.patch"))]
+
+        def patch_containing(marker):
+            found = [text for text in series if marker in text]
+            self.assertEqual(len(found), 1, marker)
+            return found[0]
+
+        patch_0011 = patch_containing("struct TestDummyConnection")
+        patch_0043 = patch_containing("retained_group_keys.contains(&group.key)")
         manifest = json.loads((release.ROOT / "patches/source.json").read_text())
         cases = release.manifest_cases(manifest)
 
