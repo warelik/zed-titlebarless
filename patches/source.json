@@ -440,6 +440,10 @@
       "test_terminal_remote_identity_normalizes_empty_arguments"
     ],
     [
+      "agent_ui",
+      "test_terminal_restore_working_directory_does_not_read_leased_workspace"
+    ],
+    [
       "auto_update",
       "test_fetch_release_json_rejects_oversized_response"
     ],
@@ -690,6 +694,10 @@
     [
       "sidebar",
       "test_project_tab_opens_panel_only_after_closed_target_workspace_loads"
+    ],
+    [
+      "sidebar",
+      "test_remote_project_integration_does_not_briefly_render_as_separate_project"
     ],
     [
       "sidebar",
