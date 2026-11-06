@@ -1,4 +1,4 @@
-From 25d31cc48b41d0a6793d9505ad425a97e3d5ffc7 Mon Sep 17 00:00:00 2001
+From 521704f7925034892fe31fe568e69ec301eefa6a Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 16:05:02 +0300
 Subject: [PATCH 2/9] Add tab width bounds and tab chip settings
@@ -7,14 +7,18 @@ tabs.min_width and tabs.max_width clamp the tab width; editor and
 terminal titles truncate in the middle when a maximum is set.
 tab_bar.pinned_tab_chips and tab_bar.unpinned_tab_chips render the
 tabs of the pinned or unpinned row as compact borderless chips.
+tab_bar.max_tab_rows (default 1, 0 behaves as 1) wraps overflowing
+unpinned tabs onto up to N rows when both width bounds are set; tabs
+shrink within a row down to min_width, only the last allowed row
+scrolls, and tabs can be dropped into a row's empty space.
 
 The tab width regression renders an actual tab before asserting.
 
 diff --git a/assets/settings/default.json b/assets/settings/default.json
-index 84735f9b29..a62be025da 100644
+index 84735f9b29..fb155baaef 100644
 --- a/assets/settings/default.json
 +++ b/assets/settings/default.json
-@@ -1486,6 +1486,10 @@
+@@ -1486,6 +1486,12 @@
      // When enabled, pinned tabs appear in a top row and unpinned tabs in a bottom row.
      // When disabled, all tabs appear in a single row (default behavior).
      "show_pinned_tabs_in_separate_row": false,
@@ -22,10 +26,12 @@ index 84735f9b29..a62be025da 100644
 +    "pinned_tab_chips": false,
 +    // Whether to render unpinned tabs as compact borderless chips.
 +    "unpinned_tab_chips": false,
++    // Maximum number of rows for unpinned tabs when both `tabs.min_width` and `tabs.max_width` are set.
++    "max_tab_rows": 1,
    },
    // Settings related to the tab switcher (Ctrl-Tab).
    "tab_switcher": {
-@@ -1532,6 +1536,10 @@
+@@ -1532,6 +1538,10 @@
      // 3. Mark files with errors and warnings:
      //    "all"
      "show_diagnostics": "off",
@@ -37,7 +43,7 @@ index 84735f9b29..a62be025da 100644
    // Settings related to preview tabs.
    "preview_tabs": {
 diff --git a/crates/settings/src/vscode_import.rs b/crates/settings/src/vscode_import.rs
-index 0703edb17b..0966e1338c 100644
+index 0703edb17b..54b6abdf6e 100644
 --- a/crates/settings/src/vscode_import.rs
 +++ b/crates/settings/src/vscode_import.rs
 @@ -803,6 +803,8 @@ impl VsCodeSettings {
@@ -49,17 +55,18 @@ index 0703edb17b..0966e1338c 100644
          })
      }
  
-@@ -832,6 +834,8 @@ impl VsCodeSettings {
+@@ -832,6 +834,9 @@ impl VsCodeSettings {
                  .read_str("workbench.editor.editorActionsLocation")
                  .and_then(|str| if str == "hidden" { Some(false) } else { None }),
              show_pinned_tabs_in_separate_row: None,
 +            pinned_tab_chips: None,
 +            unpinned_tab_chips: None,
++            max_tab_rows: None,
          })
      }
  
 diff --git a/crates/settings_content/src/workspace.rs b/crates/settings_content/src/workspace.rs
-index a4ecbea1a5..6bb4f7f78f 100644
+index a4ecbea1a5..5333cbcb44 100644
 --- a/crates/settings_content/src/workspace.rs
 +++ b/crates/settings_content/src/workspace.rs
 @@ -211,6 +211,15 @@ pub struct ItemSettingsContent {
@@ -78,7 +85,7 @@ index a4ecbea1a5..6bb4f7f78f 100644
  }
  
  #[with_fallible_options]
-@@ -560,6 +569,14 @@ pub struct TabBarSettingsContent {
+@@ -560,6 +569,18 @@ pub struct TabBarSettingsContent {
      ///
      /// Default: false
      pub show_pinned_tabs_in_separate_row: Option<bool>,
@@ -90,6 +97,10 @@ index a4ecbea1a5..6bb4f7f78f 100644
 +    ///
 +    /// Default: false
 +    pub unpinned_tab_chips: Option<bool>,
++    /// Maximum number of rows for unpinned tabs when both `tabs.min_width` and `tabs.max_width` are set.
++    ///
++    /// Default: 1
++    pub max_tab_rows: Option<u32>,
  }
  
  #[with_fallible_options]
@@ -257,6 +268,234 @@ index 6a25ad4345..8b197a91d1 100644
          self.div
              .h(Tab::container_height(cx))
              .bg(tab_bg)
+diff --git a/crates/ui/src/components/tab_bar.rs b/crates/ui/src/components/tab_bar.rs
+index 524f880398..fbb232818d 100644
+--- a/crates/ui/src/components/tab_bar.rs
++++ b/crates/ui/src/components/tab_bar.rs
+@@ -1,9 +1,132 @@
++use std::ops::Range;
++
+ use gpui::{AnyElement, ScrollHandle};
+ use smallvec::SmallVec;
+ 
+ use crate::Tab;
+ use crate::prelude::*;
+ 
++/// Minimum width reserved at the end of each tab row for the empty tab bar filler (`.min_w_6()`).
++pub const TAB_BAR_FILLER_MIN_WIDTH: Pixels = px(24.);
++
++/// Returns how many tabs of `min_width` fit into `row_width` alongside `filler_width`.
++/// Always returns at least `1`.
++pub fn tab_row_capacity(row_width: Pixels, min_width: Pixels, filler_width: Pixels) -> usize {
++    if min_width <= px(0.) {
++        return usize::MAX;
++    }
++    let available = (row_width - filler_width).max(px(0.));
++    ((available / min_width).floor() as usize).max(1)
++}
++
++/// Partitions `0..count` tab indices across up to `max_rows` rows.
++/// - Row 0 takes up to `first_row_capacity.max(1)` tabs.
++/// - Rows `1..max_rows - 1` take up to `row_capacity.max(1)` tabs each.
++/// - The last allowed row (`max_rows - 1`) takes all remaining tabs (`start..count`).
++/// - Never returns empty trailing rows; when `count == 0`, returns `vec![0..0]`.
++pub fn tab_row_ranges(
++    count: usize,
++    first_row_capacity: usize,
++    row_capacity: usize,
++    max_rows: usize,
++) -> Vec<Range<usize>> {
++    let max_rows = max_rows.max(1);
++    if count == 0 || max_rows == 1 {
++        return vec![0..count];
++    }
++    let first_cap = first_row_capacity.max(1);
++    let full_cap = row_capacity.max(1);
++    let mut ranges = Vec::with_capacity(max_rows);
++    let mut start = 0;
++    for row_ix in 0..max_rows {
++        if start >= count {
++            break;
++        }
++        if row_ix + 1 == max_rows {
++            ranges.push(start..count);
++            break;
++        }
++        let cap = if row_ix == 0 { first_cap } else { full_cap };
++        let end = (start + cap).min(count);
++        ranges.push(start..end);
++        start = end;
++    }
++    ranges
++}
++
++/// Tracks measured widths for wrapped tab rows and notifies only when width changes by > 1px.
++#[derive(Debug, Default, Clone, Copy, PartialEq)]
++pub struct TabRows {
++    pub first_row_width: Option<Pixels>,
++    pub full_row_width: Option<Pixels>,
++}
++
++impl TabRows {
++    pub const REMEASURE_EPSILON: Pixels = px(1.);
++
++    pub fn update_widths(
++        &mut self,
++        first_row_width: Option<Pixels>,
++        full_row_width: Option<Pixels>,
++    ) -> bool {
++        let changed_first = match (self.first_row_width, first_row_width) {
++            (Some(old), Some(new)) if new > px(0.) => (old - new).abs() > Self::REMEASURE_EPSILON,
++            (None, Some(new)) => new > px(0.),
++            _ => false,
++        };
++        let changed_full = match (self.full_row_width, full_row_width) {
++            (Some(old), Some(new)) if new > px(0.) => (old - new).abs() > Self::REMEASURE_EPSILON,
++            (None, Some(new)) => new > px(0.),
++            _ => false,
++        };
++        if changed_first {
++            self.first_row_width = first_row_width;
++        }
++        if changed_full {
++            self.full_row_width = full_row_width;
++        }
++        changed_first || changed_full
++    }
++
++    pub fn ranges(
++        &self,
++        count: usize,
++        min_width: Option<Pixels>,
++        filler_width: Pixels,
++        max_rows: usize,
++    ) -> Vec<Range<usize>> {
++        let max_rows = max_rows.max(1);
++        let Some(min_width) = min_width.filter(|&w| w > px(0.)) else {
++            return vec![0..count];
++        };
++        if max_rows <= 1 || count <= 1 {
++            return vec![0..count];
++        }
++        let Some(first_w) = self.first_row_width.filter(|&w| w > px(0.)) else {
++            return vec![0..count];
++        };
++        let full_w = self
++            .full_row_width
++            .filter(|&w| w > px(0.))
++            .unwrap_or(first_w);
++        let first_cap = tab_row_capacity(first_w, min_width, filler_width);
++        let full_cap = tab_row_capacity(full_w, min_width, filler_width);
++        tab_row_ranges(count, first_cap, full_cap, max_rows)
++    }
++
++    /// Wraps a rendered tab element (which may be wrapped in `RightClickMenu`) in a block `Div`
++    /// with explicit `min_w` and `max_w` + `overflow_hidden` so Taffy's flexbox layout shrinks
++    /// tabs proportionally down to `min_width` before overflowing.
++    pub fn wrap_tab(tab: AnyElement, min_width: Pixels, max_width: Pixels) -> Div {
++        div()
++            .block()
++            .min_w(min_width)
++            .max_w(max_width)
++            .overflow_hidden()
++            .child(tab)
++    }
++}
++
+ #[derive(IntoElement, RegisterComponent)]
+ pub struct TabBar {
+     id: ElementId,
+@@ -204,3 +327,90 @@ impl Component for TabBar {
+             .into_any_element()
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn test_tab_row_capacity_and_ranges() {
++        // 1. tab_row_capacity with TAB_BAR_FILLER_MIN_WIDTH (24px)
++        assert_eq!(
++            tab_row_capacity(px(324.), px(100.), TAB_BAR_FILLER_MIN_WIDTH),
++            3
++        );
++        assert_eq!(
++            tab_row_capacity(px(323.), px(100.), TAB_BAR_FILLER_MIN_WIDTH),
++            2
++        );
++        // Narrow width < min_width + filler clamps to at least 1
++        assert_eq!(
++            tab_row_capacity(px(50.), px(100.), TAB_BAR_FILLER_MIN_WIDTH),
++            1
++        );
++        assert_eq!(
++            tab_row_capacity(px(10.), px(100.), TAB_BAR_FILLER_MIN_WIDTH),
++            1
++        );
++        // min_width <= 0 returns usize::MAX
++        assert_eq!(
++            tab_row_capacity(px(300.), px(0.), TAB_BAR_FILLER_MIN_WIDTH),
++            usize::MAX
++        );
++        assert_eq!(
++            tab_row_capacity(px(300.), px(-10.), TAB_BAR_FILLER_MIN_WIDTH),
++            usize::MAX
++        );
++
++        // 2. tab_row_ranges
++        // count == 0 -> [0..0]
++        assert_eq!(tab_row_ranges(0, 2, 3, 3), vec![0..0]);
++        // All tabs fit in row 0 -> [0..count]
++        assert_eq!(tab_row_ranges(2, 3, 4, 3), vec![0..2]);
++        // Exact capacity -> no extra empty row
++        assert_eq!(tab_row_ranges(2, 2, 3, 3), vec![0..2]);
++        assert_eq!(tab_row_ranges(5, 2, 3, 3), vec![0..2, 2..5]);
++        // Overflow to 2 rows and 3 rows where first_row_capacity != row_capacity
++        assert_eq!(tab_row_ranges(4, 2, 3, 3), vec![0..2, 2..4]);
++        assert_eq!(tab_row_ranges(6, 2, 3, 3), vec![0..2, 2..5, 5..6]);
++        // Remainder (> row_capacity) all placed in last row (max_rows - 1)
++        assert_eq!(tab_row_ranges(11, 2, 3, 3), vec![0..2, 2..5, 5..11]);
++        // max_rows == 1 or 0 -> [0..count]
++        assert_eq!(tab_row_ranges(7, 2, 3, 1), vec![0..7]);
++        assert_eq!(tab_row_ranges(7, 2, 3, 0), vec![0..7]);
++
++        // 3. TabRows width tracking (1px threshold) & ranges guards
++        let mut rows = TabRows::default();
++        // Without measurements -> single row [0..count]
++        assert_eq!(
++            rows.ranges(6, Some(px(100.)), TAB_BAR_FILLER_MIN_WIDTH, 3),
++            vec![0..6]
++        );
++        // Zero/negative widths ignored
++        assert!(!rows.update_widths(Some(px(0.)), Some(px(0.))));
++        // Initial measurement > 0 triggers true
++        assert!(rows.update_widths(Some(px(224.)), Some(px(324.))));
++        // Changes <= 1px ignored
++        assert!(!rows.update_widths(Some(px(224.8)), Some(px(323.2))));
++        assert_eq!(rows.first_row_width, Some(px(224.)));
++        assert_eq!(rows.full_row_width, Some(px(324.)));
++        // Changes > 1px trigger true and update stored width
++        assert!(rows.update_widths(Some(px(226.)), Some(px(324.))));
++        assert_eq!(rows.first_row_width, Some(px(226.)));
++
++        // With first_row_width = 226px (cap 2 at min 100 + filler 24) and full_row_width = 324px (cap 3):
++        assert_eq!(
++            rows.ranges(7, Some(px(100.)), TAB_BAR_FILLER_MIN_WIDTH, 3),
++            vec![0..2, 2..5, 5..7]
++        );
++        // max_rows <= 1 or min_width == None returns single range [0..count]
++        assert_eq!(
++            rows.ranges(7, Some(px(100.)), TAB_BAR_FILLER_MIN_WIDTH, 1),
++            vec![0..7]
++        );
++        assert_eq!(
++            rows.ranges(7, None, TAB_BAR_FILLER_MIN_WIDTH, 3),
++            vec![0..7]
++        );
++    }
++}
 diff --git a/crates/workspace/src/item.rs b/crates/workspace/src/item.rs
 index ab4195f6a4..15cd5e1723 100644
 --- a/crates/workspace/src/item.rs
@@ -280,18 +519,76 @@ index ab4195f6a4..15cd5e1723 100644
      }
  }
 diff --git a/crates/workspace/src/pane.rs b/crates/workspace/src/pane.rs
-index e19ec68347..5eb9f79087 100644
+index e19ec68347..4810f8c2a4 100644
 --- a/crates/workspace/src/pane.rs
 +++ b/crates/workspace/src/pane.rs
-@@ -2876,6 +2876,7 @@ impl Pane {
+@@ -436,6 +436,9 @@ pub struct Pane {
+     use_max_tabs: bool,
+     _subscriptions: Vec<Subscription>,
+     tab_bar_scroll_handle: ScrollHandle,
++    tab_rows: ui::TabRows,
++    last_row_start_unpinned_ix: usize,
++    scrolled_to_unpinned_in_last_row: Option<(usize, usize)>,
+     /// This is set to true if a user scroll has occurred more recently than a system scroll
+     /// We want to suppress certain system scrolls when the user has intentionally scrolled
+     suppress_scroll: bool,
+@@ -599,6 +602,9 @@ impl Pane {
+             }))),
+             toolbar: cx.new(|_| Toolbar::new()),
+             tab_bar_scroll_handle: ScrollHandle::new(),
++            tab_rows: ui::TabRows::default(),
++            last_row_start_unpinned_ix: 0,
++            scrolled_to_unpinned_in_last_row: None,
+             suppress_scroll: false,
+             drag_split_direction: None,
+             workspace,
+@@ -1522,8 +1528,12 @@ impl Pane {
+     fn update_active_tab(&mut self, index: usize) {
+         if !self.is_tab_pinned(index) {
+             self.suppress_scroll = false;
+-            self.tab_bar_scroll_handle
+-                .scroll_to_item(index - self.pinned_tab_count);
++            self.scrolled_to_unpinned_in_last_row = None;
++            let unpinned_index = index - self.pinned_tab_count;
++            if unpinned_index >= self.last_row_start_unpinned_ix {
++                self.tab_bar_scroll_handle
++                    .scroll_to_item(unpinned_index - self.last_row_start_unpinned_ix);
++            }
+         }
+     }
+ 
+@@ -2871,11 +2881,30 @@ impl Pane {
+         )
+     }
+ 
++    fn tab_position_for_index(
++        &self,
++        ix: usize,
++        row_start_ix: usize,
++        row_end_ix: usize,
++    ) -> TabPosition {
++        if ix == row_start_ix {
++            TabPosition::First
++        } else if ix + 1 == row_end_ix {
++            TabPosition::Last
++        } else if self.active_item_index >= row_start_ix && self.active_item_index < row_end_ix {
++            TabPosition::Middle(ix.cmp(&self.active_item_index))
++        } else {
++            TabPosition::Middle(cmp::Ordering::Greater)
++        }
++    }
++
+     fn render_tab(
+         &self,
          ix: usize,
          item: &dyn ItemHandle,
          detail: usize,
 +        is_chip: bool,
++        tab_position: TabPosition,
          focus_handle: &FocusHandle,
          window: &mut Window,
          cx: &mut Context<Pane>,
-@@ -2886,6 +2887,7 @@ impl Pane {
+@@ -2886,6 +2915,7 @@ impl Pane {
              .map(|id| id == item.item_id())
              .unwrap_or(false);
  
@@ -299,7 +596,7 @@ index e19ec68347..5eb9f79087 100644
          let label = item.tab_content(
              TabContentParams {
                  detail: Some(detail),
-@@ -2893,7 +2895,7 @@ impl Pane {
+@@ -2893,7 +2923,7 @@ impl Pane {
                  preview: is_preview,
                  deemphasized: !self.has_focus(window, cx),
                  max_title_len: None,
@@ -308,7 +605,7 @@ index e19ec68347..5eb9f79087 100644
              },
              window,
              cx,
-@@ -2901,7 +2903,6 @@ impl Pane {
+@@ -2901,16 +2931,12 @@ impl Pane {
  
          let icon = self.tab_icon_element(item, is_active, window, cx);
  
@@ -316,7 +613,29 @@ index e19ec68347..5eb9f79087 100644
          let close_side = &settings.close_position;
          let show_close_button = &settings.show_close_button;
          let indicator = render_item_indicator(item.boxed_clone(), cx);
-@@ -2954,6 +2955,9 @@ impl Pane {
+         let tab_tooltip_content = item.tab_tooltip_content(cx);
+         let item_id = item.item_id();
+-        let is_first_item = ix == 0;
+-        let is_last_item = ix == self.items.len() - 1;
+         let is_pinned = self.is_tab_pinned(ix);
+-        let position_relative_to_active_item = ix.cmp(&self.active_item_index);
+ 
+         let read_only_toggle = |toggleable: bool| {
+             IconButton::new("toggle_read_only", IconName::FileLock)
+@@ -2942,18 +2968,15 @@ impl Pane {
+ 
+         let capability = item.capability(cx);
+         let tab = Tab::new(ix)
+-            .position(if is_first_item {
+-                TabPosition::First
+-            } else if is_last_item {
+-                TabPosition::Last
+-            } else {
+-                TabPosition::Middle(position_relative_to_active_item)
+-            })
++            .position(tab_position)
+             .close_side(match close_side {
+                 ClosePosition::Left => ui::TabCloseSide::Start,
                  ClosePosition::Right => ui::TabCloseSide::End,
              })
              .toggle_state(is_active)
@@ -326,7 +645,7 @@ index e19ec68347..5eb9f79087 100644
              .on_click(cx.listener({
                  let item_handle = item.boxed_clone();
                  move |pane: &mut Self, event: &ClickEvent, window, cx| {
-@@ -3090,6 +3094,13 @@ impl Pane {
+@@ -3090,6 +3113,13 @@ impl Pane {
                  h_flex()
                      .id(("pane-tab-content", ix))
                      .gap_1()
@@ -340,41 +659,961 @@ index e19ec68347..5eb9f79087 100644
                      .children(if let Some(icon) = icon {
                          Some(icon)
                      } else if !capability.editable() {
-@@ -3553,13 +3564,23 @@ impl Pane {
+@@ -3553,17 +3583,15 @@ impl Pane {
                  }
              });
  
+-        let mut tab_items = self
+-            .items
+-            .iter()
+-            .enumerate()
+-            .zip(tab_details(&self.items, window, cx))
+-            .map(|((ix, item), detail)| {
+-                self.render_tab(ix, &**item, detail, &focus_handle, window, cx)
+-                    .into_any_element()
+-            })
+-            .collect::<Vec<_>>();
+-        let tab_count = tab_items.len();
 +        let tab_bar_settings = TabBarSettings::get_global(cx);
 +        let use_separate_rows = tab_bar_settings.show_pinned_tabs_in_separate_row;
++        let max_tab_rows = tab_bar_settings.max_tab_rows.max(1);
 +        let pinned_tab_chips = tab_bar_settings.pinned_tab_chips;
 +        let unpinned_tab_chips = tab_bar_settings.unpinned_tab_chips;
++        let item_settings = ItemSettings::get_global(cx);
++        let wrap_widths = item_settings.min_width.zip(item_settings.max_width);
 +
-         let mut tab_items = self
-             .items
-             .iter()
-             .enumerate()
-             .zip(tab_details(&self.items, window, cx))
-             .map(|((ix, item), detail)| {
--                self.render_tab(ix, &**item, detail, &focus_handle, window, cx)
-+                let is_chip = if self.is_tab_pinned(ix) {
-+                    pinned_tab_chips
++        let tab_count = self.items.len();
+         if self.is_tab_pinned(tab_count) {
+             log::warn!(
+                 "Pinned tab count ({}) exceeds actual tab count ({}). \
+@@ -3574,13 +3602,116 @@ impl Pane {
+             );
+             self.pinned_tab_count = tab_count;
+         }
++        let unpinned_count = tab_count.saturating_sub(self.pinned_tab_count);
++        let use_separate_pinned_row =
++            use_separate_rows && self.pinned_tab_count > 0 && unpinned_count > 0;
++        let can_wrap = max_tab_rows > 1 && unpinned_count > 0 && wrap_widths.is_some();
++        let row_ranges = if can_wrap {
++            let effective_tab_rows = if use_separate_pinned_row {
++                let full_w = self
++                    .tab_rows
++                    .full_row_width
++                    .or(self.tab_rows.first_row_width);
++                ui::TabRows {
++                    first_row_width: full_w,
++                    full_row_width: full_w,
++                }
++            } else {
++                self.tab_rows
++            };
++            effective_tab_rows.ranges(
++                unpinned_count,
++                item_settings.min_width,
++                ui::TAB_BAR_FILLER_MIN_WIDTH,
++                max_tab_rows,
++            )
++        } else {
++            if self.last_row_start_unpinned_ix != 0 {
++                self.last_row_start_unpinned_ix = 0;
++                self.tab_bar_scroll_handle.set_offset(Point::default());
++                if !self.suppress_scroll {
++                    if let Some(unpinned_ix) =
++                        self.active_item_index.checked_sub(self.pinned_tab_count)
++                    {
++                        self.tab_bar_scroll_handle.scroll_to_item(unpinned_ix);
++                    }
++                }
++            }
++            self.scrolled_to_unpinned_in_last_row = None;
++            vec![0..unpinned_count]
++        };
++
++        let details = tab_details(&self.items, window, cx);
++        let mut tab_items = Vec::with_capacity(tab_count);
++        for (ix, detail) in details.into_iter().enumerate() {
++            let item = &self.items[ix];
++            let is_chip = if self.is_tab_pinned(ix) {
++                pinned_tab_chips
++            } else {
++                unpinned_tab_chips
++            };
++            let tab_position = if !can_wrap {
++                self.tab_position_for_index(ix, 0, tab_count)
++            } else if ix < self.pinned_tab_count {
++                if use_separate_pinned_row {
++                    self.tab_position_for_index(ix, 0, self.pinned_tab_count)
 +                } else {
-+                    unpinned_tab_chips
++                    let row_0_end = self.pinned_tab_count
++                        + row_ranges.first().map_or(0, |range| range.end);
++                    self.tab_position_for_index(ix, 0, row_0_end)
++                }
++            } else {
++                let unpinned_ix = ix - self.pinned_tab_count;
++                let row_range = row_ranges
++                    .iter()
++                    .find(|range| range.contains(&unpinned_ix))
++                    .cloned()
++                    .unwrap_or(0..unpinned_count);
++                let row_start_ix = if row_range.start == 0 && !use_separate_pinned_row {
++                    0
++                } else {
++                    self.pinned_tab_count + row_range.start
 +                };
-+                self.render_tab(ix, &**item, detail, is_chip, &focus_handle, window, cx)
-                     .into_any_element()
-             })
-             .collect::<Vec<_>>();
-@@ -3577,9 +3598,6 @@ impl Pane {
++                let row_end_ix = self.pinned_tab_count + row_range.end;
++                self.tab_position_for_index(ix, row_start_ix, row_end_ix)
++            };
++            let tab = self
++                .render_tab(
++                    ix,
++                    &**item,
++                    detail,
++                    is_chip,
++                    tab_position,
++                    &focus_handle,
++                    window,
++                    cx,
++                )
++                .into_any_element();
++            tab_items.push(
++                if let Some((min_w, max_w)) =
++                    wrap_widths.filter(|_| can_wrap && ix >= self.pinned_tab_count)
++                {
++                    ui::TabRows::wrap_tab(tab, min_w, max_w).into_any_element()
++                } else {
++                    tab
++                },
++            );
++        }
          let unpinned_tabs = tab_items.split_off(self.pinned_tab_count);
          let pinned_tabs = tab_items;
  
 -        let tab_bar_settings = TabBarSettings::get_global(cx);
 -        let use_separate_rows = tab_bar_settings.show_pinned_tabs_in_separate_row;
 -
-         if use_separate_rows && !pinned_tabs.is_empty() && !unpinned_tabs.is_empty() {
+-        if use_separate_rows && !pinned_tabs.is_empty() && !unpinned_tabs.is_empty() {
++        if can_wrap {
++            self.render_wrapped_tab_bar(
++                pinned_tabs,
++                unpinned_tabs,
++                row_ranges,
++                use_separate_pinned_row,
++                navigate_backward,
++                navigate_forward,
++                window,
++                cx,
++            )
++        } else if use_separate_pinned_row {
              self.render_two_row_tab_bar(
                  pinned_tabs,
+                 unpinned_tabs,
+@@ -3662,6 +3793,239 @@ impl Pane {
+             })
+     }
+ 
++    fn render_wrapped_tab_bar(
++        &mut self,
++        pinned_tabs: Vec<AnyElement>,
++        unpinned_tabs: Vec<AnyElement>,
++        row_ranges: Vec<std::ops::Range<usize>>,
++        use_separate_pinned_row: bool,
++        navigate_backward: IconButton,
++        navigate_forward: IconButton,
++        window: &mut Window,
++        cx: &mut Context<Pane>,
++    ) -> AnyElement {
++        let last_row_range = row_ranges.last().cloned().unwrap_or(0..0);
++        if self.last_row_start_unpinned_ix != last_row_range.start {
++            self.last_row_start_unpinned_ix = last_row_range.start;
++            self.scrolled_to_unpinned_in_last_row = None;
++            self.tab_bar_scroll_handle.scroll_to_item(0);
++            self.tab_bar_scroll_handle.set_offset(Point::default());
++        } else if !self.suppress_scroll {
++            if let Some(unpinned_ix) = self.active_item_index.checked_sub(self.pinned_tab_count) {
++                if last_row_range.contains(&unpinned_ix) {
++                    let local_ix = unpinned_ix - last_row_range.start;
++                    let target = (unpinned_ix, last_row_range.start);
++                    if self.scrolled_to_unpinned_in_last_row != Some(target) {
++                        self.scrolled_to_unpinned_in_last_row = Some(target);
++                        self.tab_bar_scroll_handle.scroll_to_item(local_ix);
++                    }
++                } else {
++                    self.scrolled_to_unpinned_in_last_row = None;
++                }
++            }
++        }
++
++        let num_unpinned_rows = row_ranges.len();
++        let mut unpinned_iter = unpinned_tabs.into_iter();
++        let mut rows: Vec<AnyElement> =
++            Vec::with_capacity(num_unpinned_rows + usize::from(use_separate_pinned_row));
++
++        let mut nav_buttons = Some((navigate_backward, navigate_forward));
++
++        if use_separate_pinned_row {
++            let (nav_back, nav_fwd) = nav_buttons.take().unwrap();
++            let pinned_tab_bar = self
++                .configure_tab_bar_start(TabBar::new("pinned_tab_bar"), nav_back, nav_fwd, window, cx)
++                .child(
++                    h_flex()
++                        .id("pinned_tabs_row")
++                        .debug_selector(|| "pinned_tabs_row".into())
++                        .overflow_x_scroll()
++                        .w_full()
++                        .children(pinned_tabs)
++                        .child(self.render_pinned_tab_bar_drop_target(window, cx)),
++                );
++            rows.push(pinned_tab_bar.into_any_element());
++
++            for (row_ix, range) in row_ranges.into_iter().enumerate() {
++                let is_last_row = row_ix + 1 == num_unpinned_rows;
++                let row_len = range.len();
++                let drop_target_index = self.pinned_tab_count + range.end;
++                let row_tabs = unpinned_iter.by_ref().take(row_len).collect::<Vec<_>>();
++                let row_container = self.render_wrapped_unpinned_tabs_row(
++                    row_ix,
++                    row_tabs,
++                    drop_target_index,
++                    is_last_row,
++                    false,
++                    window,
++                    cx,
++                );
++                let tab_bar_id: ElementId = if row_ix == 0 {
++                    "unpinned_tab_bar".into()
++                } else {
++                    ("unpinned_tab_bar", row_ix).into()
++                };
++                rows.push(TabBar::new(tab_bar_id).child(row_container).into_any_element());
++            }
++        } else {
++            let mut pinned_tabs_opt = Some(pinned_tabs);
++            for (row_ix, range) in row_ranges.into_iter().enumerate() {
++                let is_last_row = row_ix + 1 == num_unpinned_rows;
++                let row_len = range.len();
++                let drop_target_index = self.pinned_tab_count + range.end;
++                let row_tabs = unpinned_iter.by_ref().take(row_len).collect::<Vec<_>>();
++                let row_container = self.render_wrapped_unpinned_tabs_row(
++                    row_ix,
++                    row_tabs,
++                    drop_target_index,
++                    is_last_row,
++                    row_ix == 0,
++                    window,
++                    cx,
++                );
++                if row_ix == 0 {
++                    let (nav_back, nav_fwd) = nav_buttons.take().unwrap();
++                    let pinned_tabs = pinned_tabs_opt.take().unwrap_or_default();
++                    let tab_bar = self
++                        .configure_tab_bar_start(
++                            TabBar::new("tab_bar"),
++                            nav_back,
++                            nav_fwd,
++                            window,
++                            cx,
++                        )
++                        .children(pinned_tabs.len().ne(&0).then(|| {
++                            let max_scroll = self.tab_bar_scroll_handle.max_offset().x;
++                            let is_scrolled = self.tab_bar_scroll_handle.offset().x < px(0.);
++                            let is_scrollable = max_scroll > px(2.0);
++                            let has_active_unpinned_tab =
++                                self.active_item_index >= self.pinned_tab_count;
++                            h_flex()
++                                .children(pinned_tabs)
++                                .when(is_last_row && is_scrollable && is_scrolled, |this| {
++                                    this.when(has_active_unpinned_tab, |this| this.border_r_2())
++                                        .when(!has_active_unpinned_tab, |this| this.border_r_1())
++                                        .border_color(cx.theme().colors().border)
++                                })
++                        }))
++                        .child(row_container);
++                    rows.push(tab_bar.into_any_element());
++                } else {
++                    rows.push(
++                        TabBar::new(("tab_bar_row", row_ix))
++                            .child(row_container)
++                            .into_any_element(),
++                    );
++                }
++            }
++        }
++
++        let entity = cx.entity().downgrade();
++        v_flex()
++            .w_full()
++            .flex_none()
++            .children(rows)
++            .on_children_prepainted(move |children_bounds, _, cx| {
++                if let Some(full_w) = children_bounds.first().map(|b| b.size.width) {
++                    if let Some(pane) = entity.upgrade() {
++                        pane.update(cx, |pane, cx| {
++                            let first_w = use_separate_pinned_row.then_some(full_w);
++                            if pane.tab_rows.update_widths(first_w, Some(full_w)) {
++                                cx.notify();
++                            }
++                            if !pane.suppress_scroll {
++                                if let Some(unpinned_ix) =
++                                    pane.active_item_index.checked_sub(pane.pinned_tab_count)
++                                {
++                                    if unpinned_ix >= pane.last_row_start_unpinned_ix {
++                                        let local_ix =
++                                            unpinned_ix - pane.last_row_start_unpinned_ix;
++                                        if let Some(tab_bounds) =
++                                            pane.tab_bar_scroll_handle.bounds_for_item(local_ix)
++                                        {
++                                            let scroll_bounds =
++                                                pane.tab_bar_scroll_handle.bounds();
++                                            let scroll_offset =
++                                                pane.tab_bar_scroll_handle.offset();
++                                            let actual_left = tab_bounds.left() + scroll_offset.x;
++                                            let actual_right =
++                                                tab_bounds.right() + scroll_offset.x;
++                                            if scroll_bounds.size.width > px(0.)
++                                                && (actual_left < scroll_bounds.left() - px(1.)
++                                                    || actual_right
++                                                        > scroll_bounds.right() + px(1.))
++                                            {
++                                                pane.tab_bar_scroll_handle
++                                                    .scroll_to_item(local_ix);
++                                                cx.notify();
++                                            }
++                                        }
++                                    }
++                                }
++                            }
++                        });
++                    }
++                }
++            })
++            .into_any_element()
++    }
++
++    fn render_wrapped_unpinned_tabs_row(
++        &mut self,
++        row_ix: usize,
++        row_tabs: Vec<AnyElement>,
++        drop_target_index: usize,
++        is_last_row: bool,
++        measure_first_row_unpinned_width: bool,
++        window: &mut Window,
++        cx: &mut Context<Pane>,
++    ) -> AnyElement {
++        let row_id: ElementId = if row_ix == 0 && is_last_row {
++            "unpinned tabs".into()
++        } else {
++            ("unpinned_tabs", row_ix).into()
++        };
++        let row = h_flex()
++            .id(row_id)
++            .w_full()
++            .map(|this| {
++                if is_last_row {
++                    this.overflow_x_scroll()
++                        .track_scroll(&self.tab_bar_scroll_handle)
++                        .on_scroll_wheel(cx.listener(|this, _, _, _| {
++                            this.suppress_scroll = true;
++                        }))
++                } else {
++                    this.overflow_x_hidden()
++                }
++            })
++            .children(row_tabs)
++            .child(self.render_tab_bar_drop_target(drop_target_index, window, cx));
++
++        if measure_first_row_unpinned_width {
++            let entity = cx.entity().downgrade();
++            div()
++                .w_full()
++                .overflow_x_hidden()
++                .child(row)
++                .on_children_prepainted(move |children_bounds, _, cx| {
++                    if let Some(first_w) = children_bounds.first().map(|b| b.size.width) {
++                        if let Some(pane) = entity.upgrade() {
++                            pane.update(cx, |pane, cx| {
++                                if pane.tab_rows.update_widths(Some(first_w), None) {
++                                    cx.notify();
++                                }
++                            });
++                        }
++                    }
++                })
++                .into_any_element()
++        } else {
++            row.into_any_element()
++        }
++    }
++
+     fn render_single_row_tab_bar(
+         &mut self,
+         pinned_tabs: Vec<AnyElement>,
+@@ -3763,12 +4127,13 @@ impl Pane {
+ 
+     fn render_tab_bar_drop_target(
+         &self,
+-        tab_count: usize,
++        drop_target_index: usize,
+         window: &mut Window,
+         cx: &mut Context<Pane>,
+     ) -> impl IntoElement {
+         div()
+-            .id("tab_bar_drop_target")
++            .id(("tab_bar_drop_target", drop_target_index))
++            .debug_selector(move || format!("tab_bar_drop_target-{drop_target_index}"))
+             .when(title_bar_in_status_bar(cx), |this| {
+                 move_window_on_drag(this, window, cx)
+             })
+@@ -3787,7 +4152,13 @@ impl Pane {
+             .on_drop(
+                 cx.listener(move |this, dragged_tab: &DraggedTab, window, cx| {
+                     this.drag_split_direction = None;
+-                    this.handle_tab_drop(dragged_tab, this.items.len(), false, window, cx)
++                    let target_ix =
++                        if dragged_tab.pane == cx.entity() && dragged_tab.ix < drop_target_index {
++                            drop_target_index.saturating_sub(1)
++                        } else {
++                            drop_target_index
++                        };
++                    this.handle_tab_drop(dragged_tab, target_ix, false, window, cx)
+                 }),
+             )
+             .on_drop(
+@@ -3795,7 +4166,7 @@ impl Pane {
+                     this.drag_split_direction = None;
+                     this.handle_project_entry_drop(
+                         &selection.active_selection.entry_id,
+-                        Some(tab_count),
++                        Some(drop_target_index),
+                         window,
+                         cx,
+                     )
+@@ -9618,6 +9989,526 @@ mod tests {
+         );
+     }
+ 
++    fn settle_tab_bar_layout(cx: &mut VisualTestContext) {
++        cx.run_until_parked();
++        cx.update(|window, _cx| window.refresh());
++        cx.run_until_parked();
++    }
++
++    fn tab_debug_bounds(cx: &mut VisualTestContext, ix: usize) -> Option<gpui::Bounds<Pixels>> {
++        let selector: &'static str = Box::leak(format!("TAB-{ix}").into_boxed_str());
++        cx.debug_bounds(selector)
++    }
++
++    fn set_tab_bar_wrapping_settings(
++        cx: &mut VisualTestContext,
++        max_tab_rows: Option<u32>,
++        min_width: Option<f32>,
++        max_width: Option<f32>,
++    ) {
++        cx.update_global(|store: &mut SettingsStore, cx| {
++            store.update_user_settings(cx, |settings| {
++                settings.tab_bar.get_or_insert_default().max_tab_rows = max_tab_rows;
++                let tabs = settings.tabs.get_or_insert_default();
++                tabs.min_width = min_width.map(Into::into);
++                tabs.max_width = max_width.map(Into::into);
++            });
++        });
++        settle_tab_bar_layout(cx);
++    }
++
++    #[gpui::test]
++    async fn test_tab_bar_max_tab_rows_wrapping_and_settings_guards(cx: &mut TestAppContext) {
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs, None, cx).await;
++        let (workspace, cx) =
++            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
++        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
++
++        cx.simulate_resize(size(px(300.), px(300.)));
++
++        for label in ["0", "1", "2", "3", "4", "5"] {
++            add_labeled_item(&pane, label, false, cx);
++        }
++        settle_tab_bar_layout(cx);
++
++        let tab_bounds_all = |cx: &mut VisualTestContext| -> [gpui::Bounds<Pixels>; 6] {
++            std::array::from_fn(|ix| {
++                tab_debug_bounds(cx, ix)
++                    .unwrap_or_else(|| panic!("TAB-{ix} should be rendered"))
++            })
++        };
++
++        // 1. Default (max_tab_rows = None -> 1): all 6 tabs stay on 1 row.
++        set_tab_bar_wrapping_settings(cx, None, Some(100.), Some(200.));
++        let bounds = tab_bounds_all(cx);
++        for ix in 1..6 {
++            assert_eq!(
++                bounds[ix].origin.y, bounds[0].origin.y,
++                "default max_tab_rows (1) must keep all tabs on a single row"
++            );
++        }
++
++        // 2. max_tab_rows = Some(0) (treated as 1): all 6 tabs stay on 1 row.
++        set_tab_bar_wrapping_settings(cx, Some(0), Some(100.), Some(200.));
++        let bounds = tab_bounds_all(cx);
++        for ix in 1..6 {
++            assert_eq!(
++                bounds[ix].origin.y, bounds[0].origin.y,
++                "max_tab_rows = 0 must behave as 1 (single row)"
++            );
++        }
++
++        // 3. max_tab_rows = Some(3) without both min_width and max_width: stays on 1 row.
++        for (min_w, max_w) in [(None, Some(200.)), (Some(100.), None), (None, None)] {
++            set_tab_bar_wrapping_settings(cx, Some(3), min_w, max_w);
++            let bounds = tab_bounds_all(cx);
++            for ix in 1..6 {
++                assert_eq!(
++                    bounds[ix].origin.y, bounds[0].origin.y,
++                    "max_tab_rows = 3 with min_width={min_w:?}, max_width={max_w:?} must stay single row"
++                );
++            }
++        }
++
++        // 4. max_tab_rows = Some(3) with both min_width = 100 and max_width = 200:
++        //    In a 300px window, row 1 has navigation and action buttons (W1 < 224px -> cap1 = 1),
++        //    row 2 spans the full 300px width (cap2 = floor((300 - 24) / 100) = 2),
++        //    and row 3 takes the remaining 3 tabs ([0..1, 1..3, 3..6]).
++        set_tab_bar_wrapping_settings(cx, Some(3), Some(100.), Some(200.));
++        let bounds = tab_bounds_all(cx);
++        let row_height = cx.update(|_window, cx| Tab::container_height(cx));
++        let (first_w, full_w) = pane.read_with(cx, |pane, _cx| {
++            (
++                pane.tab_rows
++                    .first_row_width
++                    .expect("first_row_width should be measured"),
++                pane.tab_rows
++                    .full_row_width
++                    .expect("full_row_width should be measured"),
++            )
++        });
++        assert!(
++            first_w < full_w,
++            "row 1 available width ({first_w:?}) must be narrower than full row width ({full_w:?})"
++        );
++        let cap1 = ui::tab_row_capacity(first_w, px(100.), ui::TAB_BAR_FILLER_MIN_WIDTH);
++        let cap2 = ui::tab_row_capacity(full_w, px(100.), ui::TAB_BAR_FILLER_MIN_WIDTH);
++        assert_eq!(cap1, 1);
++        assert_eq!(cap2, 2);
++        assert_eq!(
++            ui::tab_row_ranges(6, cap1, cap2, 3),
++            vec![0..1, 1..3, 3..6]
++        );
++
++        let row1_y = bounds[0].origin.y;
++        let row2_y = bounds[1].origin.y;
++        let row3_y = bounds[3].origin.y;
++        assert_eq!(row2_y - row1_y, row_height);
++        assert_eq!(row3_y - row2_y, row_height);
++        assert_eq!(bounds[2].origin.y, row2_y);
++        assert_eq!(bounds[4].origin.y, row3_y);
++        assert_eq!(bounds[5].origin.y, row3_y);
++        assert!(bounds[1].origin.x < bounds[2].origin.x);
++        assert!(bounds[3].origin.x < bounds[4].origin.x);
++        assert!(bounds[4].origin.x < bounds[5].origin.x);
++
++        // Row 1 is inset by navigation buttons, while Rows 2 and 3 start at the pane's left edge.
++        assert!(
++            bounds[0].origin.x > bounds[1].origin.x,
++            "row 1 first tab ({:?}) must start to the right of row 2 first tab ({:?})",
++            bounds[0].origin.x,
++            bounds[1].origin.x
++        );
++        assert_eq!(bounds[1].origin.x, bounds[3].origin.x);
++
++        let plus_button_bounds = cx
++            .debug_bounds("ICON-Plus")
++            .expect("new tab button should be rendered");
++        assert!(
++            plus_button_bounds.center().y >= bounds[0].top()
++                && plus_button_bounds.center().y <= bounds[0].bottom(),
++            "tab bar action buttons must stay in row 1"
++        );
++
++        #[cfg(target_os = "macos")]
++        {
++            let without_traffic_lights_x = bounds[0].origin.x;
++            cx.update_global(|store: &mut SettingsStore, cx| {
++                store.update_user_settings(cx, |settings| {
++                    settings.workspace.title_bar_to_status_bar = Some(true);
++                });
++            });
++            settle_tab_bar_layout(cx);
++            let bounds_tl = tab_bounds_all(cx);
++            assert!(
++                bounds_tl[0].origin.x
++                    >= without_traffic_lights_x + px(ui::utils::TRAFFIC_LIGHT_PADDING),
++                "row 1 must reserve traffic-light space when title_bar_to_status_bar is enabled"
++            );
++            assert_eq!(
++                bounds_tl[1].origin.x, bounds[1].origin.x,
++                "row 2 must start at full pane left edge without traffic-light spacer"
++            );
++        }
++    }
++
++    #[gpui::test]
++    async fn test_tab_bar_max_tab_rows_proportional_shrink_and_last_row_scroll(
++        cx: &mut TestAppContext,
++    ) {
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs, None, cx).await;
++        let (workspace, cx) =
++            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
++        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
++
++        cx.simulate_resize(size(px(220.), px(300.)));
++        set_tab_bar_wrapping_settings(cx, Some(3), Some(30.), Some(120.));
++
++        add_labeled_item(&pane, "0", false, cx);
++        settle_tab_bar_layout(cx);
++
++        let natural_width = cx
++            .debug_bounds("TAB-0")
++            .expect("TAB-0 should be rendered")
++            .size
++            .width;
++        assert!(
++            natural_width > px(30.) && natural_width <= px(120.),
++            "TestItem natural width ({natural_width:?}) should lie strictly between min_width (30px) and max_width (120px)"
++        );
++
++        let (first_w, full_w) = pane.read_with(cx, |pane, _cx| {
++            (
++                pane.tab_rows
++                    .first_row_width
++                    .expect("first_row_width should be measured"),
++                pane.tab_rows
++                    .full_row_width
++                    .expect("full_row_width should be measured"),
++            )
++        });
++        let cap1 = ui::tab_row_capacity(first_w, px(30.), ui::TAB_BAR_FILLER_MIN_WIDTH);
++        let cap2 = ui::tab_row_capacity(full_w, px(30.), ui::TAB_BAR_FILLER_MIN_WIDTH);
++        assert_eq!(cap2, 6);
++
++        // Add tabs so Row 1 has `cap1` tabs and Row 2 has 2 tabs (which fit at natural width ~44px in 220px).
++        for ix in 1..(cap1 + 2) {
++            add_labeled_item(&pane, &ix.to_string(), false, cx);
++        }
++        settle_tab_bar_layout(cx);
++
++        let row1_y = cx.debug_bounds("TAB-0").unwrap().origin.y;
++        let row2_first_bounds = tab_debug_bounds(cx, cap1)
++            .expect("first tab in row 2 should be rendered");
++        let row2_y = row2_first_bounds.origin.y;
++        assert!(row2_y > row1_y, "tabs should wrap onto row 2");
++        assert!(
++            (row2_first_bounds.size.width - natural_width).abs() < px(1.),
++            "tabs in non-full row 2 ({:?}) should keep their natural width ({natural_width:?})",
++            row2_first_bounds.size.width
++        );
++
++        // Fill Row 2 to its capacity `cap2 = 6` (6 * 44 + 24 = 288 > 220 >= 6 * 30 + 24 = 204),
++        // so tabs in Row 2 shrink below natural_width but never below min_width (30px).
++        for ix in (cap1 + 2)..(cap1 + cap2) {
++            add_labeled_item(&pane, &ix.to_string(), false, cx);
++        }
++        settle_tab_bar_layout(cx);
++
++        for ix in cap1..(cap1 + cap2) {
++            let bounds = tab_debug_bounds(cx, ix)
++                .unwrap_or_else(|| panic!("TAB-{ix} should be rendered in row 2"));
++            assert_eq!(bounds.origin.y, row2_y, "TAB-{ix} should remain in row 2");
++            assert!(
++                bounds.size.width < natural_width - px(1.)
++                    && bounds.size.width >= px(30.) - px(0.5),
++                "TAB-{ix} in full row 2 should shrink below natural width ({natural_width:?}) and >= min_width (30px), got {:?}",
++                bounds.size.width
++            );
++        }
++
++        // Add more tabs so Row 3 overflows (cap1 + cap2 + cap2 + 5 tabs).
++        let row3_start = cap1 + cap2;
++        let total_tabs = row3_start + cap2 + 5;
++        for ix in row3_start..total_tabs {
++            add_labeled_item(&pane, &ix.to_string(), false, cx);
++        }
++        settle_tab_bar_layout(cx);
++
++        let row3_y = tab_debug_bounds(cx, row3_start)
++            .expect("first tab of row 3 should be rendered")
++            .origin
++            .y;
++        assert!(row3_y > row2_y, "row 3 must be positioned below row 2");
++
++        for ix in row3_start..total_tabs {
++            let bounds = tab_debug_bounds(cx, ix)
++                .unwrap_or_else(|| panic!("TAB-{ix} should be rendered in row 3"));
++            assert_eq!(
++                bounds.origin.y, row3_y,
++                "TAB-{ix} must stay in row 3 (no 4th row allowed when max_tab_rows = 3)"
++            );
++            assert!(
++                (bounds.size.width - px(30.)).abs() < px(1.),
++                "overflowing row 3 tab TAB-{ix} must compress to min_width (30px), got {:?}",
++                bounds.size.width
++            );
++        }
++
++        // Activate tab 0, then activate the last tab in Row 3 and verify Row 3 scrolls it completely into view.
++        pane.update_in(cx, |pane, window, cx| {
++            pane.activate_item(0, true, true, window, cx);
++        });
++        settle_tab_bar_layout(cx);
++
++        let last_ix = total_tabs - 1;
++        pane.update_in(cx, |pane, window, cx| {
++            pane.activate_item(last_ix, true, true, window, cx);
++        });
++        settle_tab_bar_layout(cx);
++
++        let scroll_handle = pane.read_with(cx, |pane, _| pane.tab_bar_scroll_handle.clone());
++        assert!(
++            scroll_handle.max_offset().x > px(0.),
++            "row 3 must overflow horizontally"
++        );
++        assert!(
++            scroll_handle.offset().x < px(0.),
++            "row 3 must scroll horizontally to reveal the active tab"
++        );
++        let scroll_bounds = scroll_handle.bounds();
++        let last_tab_bounds = tab_debug_bounds(cx, last_ix)
++            .expect("active last tab in row 3 should be rendered");
++        assert!(
++            last_tab_bounds.left() >= scroll_bounds.left() - px(1.)
++                && last_tab_bounds.right() <= scroll_bounds.right() + px(1.),
++            "active tab in row 3 ({last_tab_bounds:?}) must be scrolled completely into view ({scroll_bounds:?})"
++        );
++    }
++
++    #[gpui::test]
++    async fn test_tab_bar_max_tab_rows_recomputes_on_close_and_keeps_pinned_unaffected(
++        cx: &mut TestAppContext,
++    ) {
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs, None, cx).await;
++        let (workspace, cx) =
++            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
++        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
++
++        cx.simulate_resize(size(px(300.), px(300.)));
++        set_tab_bar_wrapping_settings(cx, Some(3), Some(80.), Some(160.));
++
++        for label in ["P0", "P1", "U0", "U1", "U2", "U3", "U4", "U5", "U6"] {
++            add_labeled_item(&pane, label, false, cx);
++        }
++        pane.update_in(cx, |pane, window, cx| {
++            pane.pin_tab_at(0, window, cx);
++            pane.pin_tab_at(1, window, cx);
++        });
++        settle_tab_bar_layout(cx);
++
++        // 1. With show_pinned_tabs_in_separate_row = false:
++        //    Pinned tabs P0, P1 stay in row 1 alongside U0 (cap1 = 1), while U1..U3 wrap to row 2 (cap2 = 3)
++        //    and U4..U6 wrap to row 3.
++        let p0_y = cx.debug_bounds("TAB-0").unwrap().origin.y;
++        let p1_y = cx.debug_bounds("TAB-1").unwrap().origin.y;
++        let u0_y = cx.debug_bounds("TAB-2").unwrap().origin.y;
++        let u1_y = cx.debug_bounds("TAB-3").unwrap().origin.y;
++        let u4_y = cx.debug_bounds("TAB-6").unwrap().origin.y;
++        assert_eq!(p0_y, p1_y, "pinned tabs must stay on row 1");
++        assert_eq!(u0_y, p0_y, "first unpinned tab shares row 1 with inline pinned tabs");
++        assert!(u1_y > p0_y, "unpinned tabs overflow onto row 2");
++        assert!(u4_y > u1_y, "unpinned tabs overflow onto row 3");
++
++        // 2. Enable show_pinned_tabs_in_separate_row = true:
++        //    Pinned tabs occupy their own top row (pinned_y), which does NOT count toward max_tab_rows = 3,
++        //    allowing 3 full-width unpinned rows below pinned_y (3 + 3 + 1 = 7 unpinned tabs).
++        set_pinned_tabs_separate_row(cx, true);
++        settle_tab_bar_layout(cx);
++
++        let pinned_y = cx.debug_bounds("TAB-0").unwrap().origin.y;
++        assert_eq!(cx.debug_bounds("TAB-1").unwrap().origin.y, pinned_y);
++        let row1_y = cx.debug_bounds("TAB-2").unwrap().origin.y;
++        let row2_y = cx.debug_bounds("TAB-5").unwrap().origin.y;
++        let row3_y = cx.debug_bounds("TAB-8").unwrap().origin.y;
++        assert!(
++            pinned_y < row1_y && row1_y < row2_y && row2_y < row3_y,
++            "separate pinned row ({pinned_y:?}) must not count toward max_tab_rows = 3 ({row1_y:?}, {row2_y:?}, {row3_y:?})"
++        );
++        for ix in 2..=4 {
++            assert_eq!(tab_debug_bounds(cx, ix).unwrap().origin.y, row1_y);
++        }
++        for ix in 5..=7 {
++            assert_eq!(tab_debug_bounds(cx, ix).unwrap().origin.y, row2_y);
++        }
++        assert_eq!(cx.debug_bounds("TAB-8").unwrap().origin.y, row3_y);
++
++        // 3. Close 1 unpinned tab (U0 at index 2):
++        //    The 6 remaining unpinned tabs fit into 2 rows (3 + 3), so U6 moves up from row 3 to row 2
++        //    and surplus row 3 disappears immediately.
++        pane.update_in(cx, |pane, window, cx| {
++            let item_id = pane.items[2].item_id();
++            pane.close_item_by_id(item_id, SaveIntent::Close, window, cx)
++        })
++        .await
++        .unwrap();
++        settle_tab_bar_layout(cx);
++
++        assert!(cx.debug_bounds("TAB-8").is_none());
++        assert_eq!(
++            cx.debug_bounds("TAB-7").unwrap().origin.y,
++            row2_y,
++            "last unpinned tab must move up from row 3 to row 2 after closing a tab"
++        );
++
++        // 4. Close 3 more unpinned tabs so only 3 unpinned tabs remain:
++        //    All 3 remaining unpinned tabs move into row 1 and surplus row 2 disappears.
++        for _ in 0..3 {
++            pane.update_in(cx, |pane, window, cx| {
++                let item_id = pane.items[2].item_id();
++                pane.close_item_by_id(item_id, SaveIntent::Close, window, cx)
++            })
++            .await
++            .unwrap();
++        }
++        settle_tab_bar_layout(cx);
++
++        assert!(cx.debug_bounds("TAB-5").is_none());
++        for ix in 2..=4 {
++            assert_eq!(
++                tab_debug_bounds(cx, ix).unwrap().origin.y,
++                row1_y,
++                "remaining 3 unpinned tabs must all sit on unpinned row 1"
++            );
++        }
++    }
++
++    #[gpui::test]
++    async fn test_tab_bar_max_tab_rows_drop_in_row_empty_space(cx: &mut TestAppContext) {
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs, None, cx).await;
++        let (workspace, cx) =
++            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
++        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
++
++        // With window width 330px and min_width = max_width = 80px:
++        // Row 1 available width W1 is ~220px -> cap1 = floor((220 - 24) / 80) = 2 tabs ([0, 1]),
++        // leaving ~60px of empty filler space at the right end of Row 1.
++        // Row 2 has tabs [2, 3].
++        cx.simulate_resize(size(px(330.), px(300.)));
++        set_tab_bar_wrapping_settings(cx, Some(3), Some(80.), Some(80.));
++
++        for label in ["A", "B", "C", "D"] {
++            add_labeled_item(&pane, label, false, cx);
++        }
++        assert_item_labels(&pane, ["A", "B", "C", "D*"], cx);
++        settle_tab_bar_layout(cx);
++
++        let tab0 = cx.debug_bounds("TAB-0").unwrap();
++        let tab1 = cx.debug_bounds("TAB-1").unwrap();
++        let tab2 = cx.debug_bounds("TAB-2").unwrap();
++        let tab3 = cx.debug_bounds("TAB-3").unwrap();
++        assert_eq!(tab0.origin.y, tab1.origin.y, "A and B should be on row 1");
++        assert_eq!(tab2.origin.y, tab3.origin.y, "C and D should be on row 2");
++        assert!(
++            tab0.origin.y < tab2.origin.y,
++            "row 1 must be above row 2 when max_tab_rows = 3"
++        );
++
++        // 1. Drag tab D (index 3, in row 2) onto row 1's empty space filler (immediately right of TAB-1):
++        //    It must be placed right after row 1's last tab B (at index 2, before C).
++        let row1_empty_pos = gpui::point(tab1.right() + px(12.), tab1.center().y);
++        cx.simulate_event(MouseDownEvent {
++            position: tab3.center(),
++            button: MouseButton::Left,
++            modifiers: Modifiers::default(),
++            click_count: 1,
++            first_mouse: false,
++        });
++        cx.run_until_parked();
++        cx.simulate_event(MouseMoveEvent {
++            position: row1_empty_pos,
++            pressed_button: Some(MouseButton::Left),
++            modifiers: Modifiers::default(),
++        });
++        cx.run_until_parked();
++        cx.simulate_event(MouseUpEvent {
++            position: row1_empty_pos,
++            button: MouseButton::Left,
++            modifiers: Modifiers::default(),
++            click_count: 1,
++        });
++        settle_tab_bar_layout(cx);
++
++        assert_item_labels(&pane, ["A", "B", "D*", "C"], cx);
++
++        // 2. Drag tab A (index 0, first tab in row 1) onto row 1's empty space filler:
++        //    It must land immediately after row 1's last tab B (at index 1, before D).
++        let tab0 = cx.debug_bounds("TAB-0").unwrap();
++        let tab1 = cx.debug_bounds("TAB-1").unwrap();
++        let row1_empty_pos = gpui::point(tab1.right() + px(12.), tab1.center().y);
++        cx.simulate_event(MouseDownEvent {
++            position: tab0.center(),
++            button: MouseButton::Left,
++            modifiers: Modifiers::default(),
++            click_count: 1,
++            first_mouse: false,
++        });
++        cx.run_until_parked();
++        cx.simulate_event(MouseMoveEvent {
++            position: row1_empty_pos,
++            pressed_button: Some(MouseButton::Left),
++            modifiers: Modifiers::default(),
++        });
++        cx.run_until_parked();
++        cx.simulate_event(MouseUpEvent {
++            position: row1_empty_pos,
++            button: MouseButton::Left,
++            modifiers: Modifiers::default(),
++            click_count: 1,
++        });
++        settle_tab_bar_layout(cx);
++
++        assert_item_labels(&pane, ["B", "A*", "D", "C"], cx);
++
++        // 3. Double-clicking the empty space at the end of row 2 dispatches the double-click action (NewFile).
++        let new_file_dispatched = Rc::new(Cell::new(false));
++        cx.update(|_window, cx| {
++            let new_file_dispatched = new_file_dispatched.clone();
++            cx.on_action(move |_: &NewFile, _cx| {
++                new_file_dispatched.set(true);
++            });
++        });
++        let tab3 = cx.debug_bounds("TAB-3").unwrap();
++        let row2_empty_pos = gpui::point(tab3.right() + px(12.), tab3.center().y);
++        cx.simulate_event(MouseDownEvent {
++            position: row2_empty_pos,
++            button: MouseButton::Left,
++            modifiers: Modifiers::default(),
++            click_count: 2,
++            first_mouse: false,
++        });
++        cx.run_until_parked();
++        cx.simulate_event(MouseUpEvent {
++            position: row2_empty_pos,
++            button: MouseButton::Left,
++            modifiers: Modifiers::default(),
++            click_count: 2,
++        });
++        cx.run_until_parked();
++        assert!(
++            new_file_dispatched.get(),
++            "double-clicking row 2 empty space filler must dispatch the new file action"
++        );
++    }
++
+     mod property_test {
+         use super::*;
+         use proptest::prelude::*;
 diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
 index 23d14864de..acafc70ee8 100644
 --- a/crates/workspace/src/workspace.rs
@@ -426,24 +1665,26 @@ index 23d14864de..acafc70ee8 100644
      async fn test_window_title_format_empty_project(cx: &mut TestAppContext) {
          init_test(cx);
 diff --git a/crates/workspace/src/workspace_settings.rs b/crates/workspace/src/workspace_settings.rs
-index 8d3b027e30..8f39a1bdb2 100644
+index 8d3b027e30..c67e03d458 100644
 --- a/crates/workspace/src/workspace_settings.rs
 +++ b/crates/workspace/src/workspace_settings.rs
-@@ -93,6 +93,8 @@ pub struct TabBarSettings {
+@@ -93,6 +93,9 @@ pub struct TabBarSettings {
      pub show_nav_history_buttons: bool,
      pub show_tab_bar_buttons: bool,
      pub show_pinned_tabs_in_separate_row: bool,
 +    pub pinned_tab_chips: bool,
 +    pub unpinned_tab_chips: bool,
++    pub max_tab_rows: usize,
  }
  
  impl Settings for WorkspaceSettings {
-@@ -213,6 +215,8 @@ impl Settings for TabBarSettings {
+@@ -213,6 +216,9 @@ impl Settings for TabBarSettings {
              show_nav_history_buttons: tab_bar.show_nav_history_buttons.unwrap(),
              show_tab_bar_buttons: tab_bar.show_tab_bar_buttons.unwrap(),
              show_pinned_tabs_in_separate_row: tab_bar.show_pinned_tabs_in_separate_row.unwrap(),
 +            pinned_tab_chips: tab_bar.pinned_tab_chips.unwrap_or(false),
 +            unpinned_tab_chips: tab_bar.unpinned_tab_chips.unwrap_or(false),
++            max_tab_rows: tab_bar.max_tab_rows.unwrap_or(1).max(1) as usize,
          }
      }
  }

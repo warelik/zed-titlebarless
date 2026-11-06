@@ -577,6 +577,10 @@
     ],
     [
       "sidebar",
+      "test_agent_panel_thread_tabs_wrap_while_project_tabs_stay_single_row"
+    ],
+    [
+      "sidebar",
       "test_archive_removes_worktree_even_when_workspace_paths_diverge"
     ],
     [
@@ -797,6 +801,10 @@
     ],
     [
       "sidebar",
+      "test_terminal_close_uses_a_connected_project_on_the_same_host"
+    ],
+    [
+      "sidebar",
       "test_terminal_close_waits_for_pending_owner_in_another_window"
     ],
     [
@@ -860,6 +868,10 @@
       "test_write_init_command_after_startup_skips_after_keyboard_input"
     ],
     [
+      "ui",
+      "test_tab_row_capacity_and_ranges"
+    ],
+    [
       "workspace",
       "test_agent_panel_layout_changes_keep_empty_workspace_transient"
     ],
@@ -918,6 +930,22 @@
     [
       "workspace",
       "test_restored_remote_groups_keep_live_identity_options"
+    ],
+    [
+      "workspace",
+      "test_tab_bar_max_tab_rows_drop_in_row_empty_space"
+    ],
+    [
+      "workspace",
+      "test_tab_bar_max_tab_rows_proportional_shrink_and_last_row_scroll"
+    ],
+    [
+      "workspace",
+      "test_tab_bar_max_tab_rows_recomputes_on_close_and_keeps_pinned_unaffected"
+    ],
+    [
+      "workspace",
+      "test_tab_bar_max_tab_rows_wrapping_and_settings_guards"
     ],
     [
       "workspace",

@@ -57,7 +57,7 @@ Every setting below defaults to stock Zed. None of them has a Settings UI entry:
 {
   "title_bar_to_status_bar": true,
   "tabs": { "min_width": 120, "max_width": 200 },
-  "tab_bar": { "pinned_tab_chips": true, "unpinned_tab_chips": true },
+  "tab_bar": { "pinned_tab_chips": true, "unpinned_tab_chips": true, "max_tab_rows": 2 },
   "toolbar": { "compact": true },
   "panel_rows_tab_height": true,
   "agent": { "threads_sidebar": { "compact": true, "in_agent_panel": true } },
@@ -70,6 +70,7 @@ Every setting below defaults to stock Zed. None of them has a Settings UI entry:
 | `title_bar_to_status_bar` | `false` | See above. macOS only. |
 | `tabs.min_width` / `tabs.max_width` | `null` | Clamp tab width in px; `null` keeps tabs as wide as their title. With a maximum, editor and terminal titles are truncated in the middle. |
 | `tab_bar.pinned_tab_chips` / `tab_bar.unpinned_tab_chips` | `false` | Render the pinned or unpinned tabs as borderless chips that hug their content, as tall as the toolbar's default buttons. |
+| `tab_bar.max_tab_rows` | `1` | When both `tabs.min_width` and `tabs.max_width` are set, wrap overflowing unpinned editor and terminal tabs (and the agent panel's threads and terminals row) onto up to `N` rows before scrolling the last row (`0` behaves as `1`). |
 | `toolbar.compact` | `false` | The pane toolbar gets the height of the tab bar: no vertical padding, no gap above secondary rows, and search rows, errors, hints and banners are sized to the tab height, so a single-row toolbar equals the tab bar. The search bar above an agent panel terminal is compacted too. |
 | `panel_rows_tab_height` | `false` | Every row in the project, git and outline panels takes the tab bar height. |
 | `agent.threads_sidebar.compact` | `false` | Each thread is one row at the tab bar height; hovering a thread shows its metadata and actions instead of the title. Project group headers and the "No threads yet" row take the same height. |

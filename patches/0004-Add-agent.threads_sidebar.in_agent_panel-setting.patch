@@ -1,9 +1,11 @@
-From 9765e85f5a77f038f3fba5e4c5e1f63ee0d8bdcd Mon Sep 17 00:00:00 2001
+From c7b0b887c3f5f547f61c4ddc818fe075ea5ac290 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 11:03:26 +0300
 Subject: [PATCH 4/9] Add agent.threads_sidebar.in_agent_panel setting
 
-Show the threads sidebar as two tab rows inside the agent panel.
+Show the threads sidebar as two tab rows inside the agent panel; the
+threads and terminals row follows tab_bar.max_tab_rows while the
+projects row stays a single scrolling row.
 Keep the agent toolbar when sidebar rows are empty or when a project
 group is unavailable, retain the initial workspace when threads start
 in the panel, keep empty workspaces transient across layout changes and
@@ -11,7 +13,7 @@ real sidebar updates, and preserve the documented global sidebar
 minimum width across layouts.
 
 diff --git a/assets/settings/default.json b/assets/settings/default.json
-index 24a00f350c..bffdb9f989 100644
+index a2d10b542d..fafe9160fd 100644
 --- a/assets/settings/default.json
 +++ b/assets/settings/default.json
 @@ -1212,6 +1212,9 @@
@@ -113,7 +115,7 @@ index 0cecde9362..f34a2d74d3 100644
      fn test_threads_sidebar_compact_defaults_to_false_when_none(cx: &mut gpui::App) {
          let store = SettingsStore::test(cx);
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 2224d0fec3..19f4af6da3 100644
+index 2224d0fec3..bc468ad7c5 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
 @@ -94,7 +94,7 @@ use text::OffsetRangeExt;
@@ -233,7 +235,7 @@ index 2224d0fec3..19f4af6da3 100644
  
          let focus_handle = self.focus_handle(cx);
  
-@@ -6213,6 +6273,49 @@ impl AgentPanel {
+@@ -6213,6 +6273,40 @@ impl AgentPanel {
                      thread_view.update(cx, |thread_view, cx| thread_view.render_sandbox_status(cx))
                  });
  
@@ -243,8 +245,6 @@ index 2224d0fec3..19f4af6da3 100644
 +                // way the editor's tab bar does, and the threads row starts where they do.
 +                let at_traffic_lights = workspace::traffic_lights_overlay_workspace(window, cx)
 +                    && (self.position(window, cx) == DockPosition::Left || is_full_screen);
-+                let threads_inset =
-+                    workspace::traffic_light_inset(window, cx) - DynamicSpacing::Base02.px(cx);
 +                return v_flex()
 +                    .id("agent-panel-toolbar")
 +                    .flex_none()
@@ -269,21 +269,14 @@ index 2224d0fec3..19f4af6da3 100644
 +                            .end_child(full_screen_button)
 +                            .end_child(self.render_panel_options_menu(window, cx)),
 +                    )
-+                    .child(
-+                        TabBar::new("agent-panel-threads-tab-bar").child(
-+                            div()
-+                                .w_full()
-+                                .when(at_traffic_lights, |this| this.pl(threads_inset))
-+                                .child(rows.threads),
-+                        ),
-+                    )
++                    .child(rows.threads)
 +                    .into_any_element();
 +            }
 +
              base_container
                  .child(
                      h_flex()
-@@ -6252,6 +6355,7 @@ impl AgentPanel {
+@@ -6252,6 +6346,7 @@ impl AgentPanel {
              .border_b_1()
              .border_color(cx.theme().colors().border)
              .child(toolbar_content)
@@ -291,7 +284,7 @@ index 2224d0fec3..19f4af6da3 100644
      }
  
      fn should_render_trial_end_upsell(&self, cx: &mut Context<Self>) -> bool {
-@@ -6602,6 +6706,7 @@ impl AgentPanel {
+@@ -6602,6 +6697,7 @@ impl AgentPanel {
  
  impl Render for AgentPanel {
      fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -299,7 +292,7 @@ index 2224d0fec3..19f4af6da3 100644
          // WARNING: Changes to this element hierarchy can have
          // non-obvious implications to the layout of children.
          //
-@@ -6658,7 +6763,11 @@ impl Render for AgentPanel {
+@@ -6658,7 +6754,11 @@ impl Render for AgentPanel {
              }))
              .child(self.render_toolbar(window, cx))
              .children(self.render_new_user_onboarding(window, cx))
@@ -311,7 +304,7 @@ index 2224d0fec3..19f4af6da3 100644
                  VisibleSurface::Uninitialized if !self.has_open_project(cx) => {
                      parent.child(self.render_no_project_state(cx))
                  }
-@@ -9807,6 +9916,41 @@ mod tests {
+@@ -9807,6 +9907,41 @@ mod tests {
          assert_eq!(pasted, "file.rs:2-3 ");
      }
  
@@ -1048,7 +1041,7 @@ index bd0688f7f7..8896b98db3 100644
          let serialized = SerializedSidebar {
              width: self.width_set_by_user.then(|| f32::from(self.width)),
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index c3d444c03a..5a3a809ab5 100644
+index c3d444c03a..7106214c65 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
 @@ -1128,6 +1128,31 @@ async fn test_restored_width_preserves_legacy_resizes(cx: &mut TestAppContext) {
@@ -1083,7 +1076,7 @@ index c3d444c03a..5a3a809ab5 100644
  #[gpui::test]
  async fn test_configured_width_is_clamped_into_range(cx: &mut TestAppContext) {
      let project = init_test_project("/my-project", cx).await;
-@@ -16026,3 +16051,300 @@ fn sidebar_painted_background_at(position: Point<Pixels>, cx: &mut VisualTestCon
+@@ -16026,3 +16051,504 @@ fn sidebar_painted_background_at(position: Point<Pixels>, cx: &mut VisualTestCon
          u32::from(Rgba::from(color))
      })
  }
@@ -1384,16 +1377,222 @@ index c3d444c03a..5a3a809ab5 100644
 +        "Sidebar active_entry should remain None on startup when in_agent_panel is false"
 +    );
 +}
++
++#[gpui::test]
++async fn test_agent_panel_thread_tabs_wrap_while_project_tabs_stay_single_row(
++    cx: &mut TestAppContext,
++) {
++    let project = init_test_project_with_agent_panel("/my-project", cx).await;
++    cx.update(|cx| {
++        let content = serde_json::json!({
++            "agent": {
++                "flexible": false,
++                "default_width": 300.0,
++                "dock": "left",
++                "threads_sidebar": {
++                    "in_agent_panel": true
++                }
++            },
++            "tabs": {
++                "min_width": 136.0,
++                "max_width": 180.0
++            },
++            "tab_bar": {
++                "max_tab_rows": 3
++            },
++            "title_bar_to_status_bar": true
++        })
++        .to_string();
++        SettingsStore::update_global(cx, |store, cx| {
++            store.set_user_settings(&content, cx).unwrap();
++        });
++    });
++
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
++    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
++
++    multi_workspace.update(cx, |mw, cx| {
++        mw.retain_active_workspace(cx);
++        for ix in 1..5 {
++            let path = PathList::new(&[PathBuf::from(format!("/other-project-{ix}"))]);
++            mw.test_add_project_group(workspace::ProjectGroup {
++                key: ProjectGroupKey::new(None, path),
++                workspaces: Vec::new(),
++                expanded: false,
++            });
++        }
++    });
++
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.open_panel::<AgentPanel>(window, cx);
++    });
++
++    save_n_test_threads(6, &project, cx).await;
++    panel
++        .update_in(cx, |panel, window, cx| {
++            panel.insert_test_terminal("Term 1", false, window, cx)
++        })
++        .expect("first test terminal should be inserted");
++    panel
++        .update_in(cx, |panel, window, cx| {
++            panel.insert_test_terminal("Term 2", true, window, cx)
++        })
++        .expect("second test terminal should be inserted");
++
++    sidebar.update(cx, |s, cx| s.update_entries(cx));
++    cx.run_until_parked();
++    cx.update(|window, _cx| window.refresh());
++    cx.run_until_parked();
++    cx.update(|window, _cx| window.refresh());
++    cx.run_until_parked();
++
++    let debug_bounds = |cx: &mut VisualTestContext, selector: String| -> Option<Bounds<Pixels>> {
++        let s: &'static str = Box::leak(selector.into_boxed_str());
++        cx.debug_bounds(s)
++    };
++
++    // 1. All 5 project tabs ("projects" row) must stay on a single row despite overflowing 300px.
++    let proj0 = cx
++        .debug_bounds("TAB-project-tab-0")
++        .expect("TAB-project-tab-0 should be rendered");
++    for ix in 1..5 {
++        let proj_ix = debug_bounds(cx, format!("TAB-project-tab-{ix}"))
++            .unwrap_or_else(|| panic!("TAB-project-tab-{ix} should be rendered"));
++        assert_eq!(
++            proj_ix.origin.y, proj0.origin.y,
++            "project tab {ix} must remain on the single projects row"
++        );
++    }
++
++    // 2. The 6 thread tabs + 2 terminal tabs ("threads + terminals" row) must wrap across 3 rows
++    //    below the projects row, with no 4th row created.
++    let mut thread_tab_bounds: Vec<Bounds<Pixels>> = Vec::with_capacity(8);
++    for ix in 0..6 {
++        thread_tab_bounds.push(
++            debug_bounds(cx, format!("TAB-thread-tab-{ix}"))
++                .unwrap_or_else(|| panic!("TAB-thread-tab-{ix} should be rendered")),
++        );
++    }
++    for ix in 6..8 {
++        thread_tab_bounds.push(
++            debug_bounds(cx, format!("TAB-terminal-tab-{ix}"))
++                .unwrap_or_else(|| panic!("TAB-terminal-tab-{ix} should be rendered")),
++        );
++    }
++
++    let mut distinct_row_ys: Vec<Pixels> = Vec::new();
++    for bounds in &thread_tab_bounds {
++        if !distinct_row_ys.iter().any(|&y| (y - bounds.origin.y).abs() < px(1.)) {
++            distinct_row_ys.push(bounds.origin.y);
++        }
++    }
++    assert_eq!(
++        distinct_row_ys.len(),
++        3,
++        "threads + terminals tabs must wrap across exactly 3 rows when max_tab_rows = 3, got rows: {distinct_row_ys:?}"
++    );
++    let (row1_y, row2_y, row3_y) = (distinct_row_ys[0], distinct_row_ys[1], distinct_row_ys[2]);
++    assert!(proj0.origin.y < row1_y, "threads row 1 must be below projects row");
++    assert!(row1_y < row2_y && row2_y < row3_y, "thread tab rows must increase in y top-to-bottom");
++
++    // On macOS with title_bar_to_status_bar = true and left panel, row 1 is inset by threads_inset
++    // (cap1 = 1) while rows 2 and 3 span the full 300px panel width (cap2 = 2).
++    #[cfg(target_os = "macos")]
++    {
++        assert_eq!(thread_tab_bounds[0].origin.y, row1_y);
++        assert_eq!(thread_tab_bounds[1].origin.y, row2_y);
++        assert_eq!(thread_tab_bounds[2].origin.y, row2_y);
++        assert!(
++            thread_tab_bounds[0].origin.x > thread_tab_bounds[1].origin.x,
++            "row 1 must be indented by threads_inset ({:?}) while row 2 starts at full panel left edge ({:?})",
++            thread_tab_bounds[0].origin.x,
++            thread_tab_bounds[1].origin.x
++        );
++    }
++
++    // All tabs in row 3 must compress to min_width (136px) and the active last terminal tab must be scrolled into view.
++    for (ix, bounds) in thread_tab_bounds.iter().enumerate() {
++        if (bounds.origin.y - row3_y).abs() < px(1.) {
++            assert!(
++                (bounds.size.width - px(136.)).abs() < px(1.5),
++                "overflowing row 3 tab {ix} must compress to min_width (136px), got {:?}",
++                bounds.size.width
++            );
++        }
++    }
++    let last_terminal_bounds = thread_tab_bounds[7];
++    assert_eq!(last_terminal_bounds.origin.y, row3_y);
++    let row2_first_x = thread_tab_bounds
++        .iter()
++        .find(|b| (b.origin.y - row2_y).abs() < px(1.))
++        .unwrap()
++        .origin
++        .x;
++    assert!(
++        last_terminal_bounds.left() >= row2_first_x - px(1.)
++            && last_terminal_bounds.right() <= row2_first_x + px(300.) + px(2.),
++        "active terminal tab at end of row 3 ({last_terminal_bounds:?}) must be scrolled into panel view"
++    );
++
++    // 3. Setting tab_bar.max_tab_rows = 1 returns all thread + terminal tabs to a single row.
++    cx.update(|_window, cx| {
++        let content = serde_json::json!({
++            "agent": {
++                "flexible": false,
++                "default_width": 300.0,
++                "dock": "left",
++                "threads_sidebar": {
++                    "in_agent_panel": true
++                }
++            },
++            "tabs": {
++                "min_width": 136.0,
++                "max_width": 180.0
++            },
++            "tab_bar": {
++                "max_tab_rows": 1
++            },
++            "title_bar_to_status_bar": true
++        })
++        .to_string();
++        SettingsStore::update_global(cx, |store, cx| {
++            store.set_user_settings(&content, cx).unwrap();
++        });
++    });
++    cx.run_until_parked();
++    cx.update(|window, _cx| window.refresh());
++    cx.run_until_parked();
++
++    let single_row_y = cx.debug_bounds("TAB-thread-tab-0").unwrap().origin.y;
++    for ix in 1..6 {
++        assert_eq!(
++            debug_bounds(cx, format!("TAB-thread-tab-{ix}")).unwrap().origin.y,
++            single_row_y,
++            "thread tab {ix} must return to single row when max_tab_rows = 1"
++        );
++    }
++    for ix in 6..8 {
++        assert_eq!(
++            debug_bounds(cx, format!("TAB-terminal-tab-{ix}")).unwrap().origin.y,
++            single_row_y,
++            "terminal tab {ix} must return to single row when max_tab_rows = 1"
++        );
++    }
++}
 diff --git a/crates/sidebar/src/thread_tabs.rs b/crates/sidebar/src/thread_tabs.rs
 new file mode 100644
-index 0000000000..a4179e8acb
+index 0000000000..863f928b0b
 --- /dev/null
 +++ b/crates/sidebar/src/thread_tabs.rs
-@@ -0,0 +1,738 @@
+@@ -0,0 +1,916 @@
 +use super::*;
-+use gpui::ScrollHandle;
-+use ui::{IconButtonShape, Indicator, TabCloseSide, TabPosition};
++use gpui::{Bounds, Point, ScrollHandle};
++use std::ops::Range;
++use ui::{IconButtonShape, Indicator, TabBar, TabCloseSide, TabPosition};
 +use workspace::TabBarSettings;
++use workspace::dock::{DockPosition, Panel as _};
 +use workspace::item::{ClosePosition, ItemSettings, ShowCloseButton};
 +
 +#[derive(Clone, Copy, PartialEq, Eq)]
@@ -1410,8 +1609,10 @@ index 0000000000..a4179e8acb
 +    sidebar: WeakEntity<Sidebar>,
 +    kind: TabsRowKind,
 +    scroll_handle: ScrollHandle,
-+    scrolled_to: Option<usize>,
++    scrolled_to: Option<(usize, usize)>,
++    tab_rows: ui::TabRows,
 +    _observe_sidebar: gpui::Subscription,
++    _observe_settings: gpui::Subscription,
 +}
 +
 +impl ThreadTabsRow {
@@ -1425,7 +1626,9 @@ index 0000000000..a4179e8acb
 +            kind,
 +            scroll_handle: ScrollHandle::new(),
 +            scrolled_to: None,
++            tab_rows: ui::TabRows::default(),
 +            _observe_sidebar: cx.observe(sidebar, |_, _, cx| cx.notify()),
++            _observe_settings: cx.observe_global::<SettingsStore>(|_, cx| cx.notify()),
 +        }
 +    }
 +}
@@ -1435,50 +1638,176 @@ index 0000000000..a4179e8acb
 +        let Some(sidebar) = self.sidebar.upgrade() else {
 +            return div().into_any_element();
 +        };
-+        let kind = self.kind;
-+        let row = sidebar.update(cx, |sidebar, cx| match kind {
-+            TabsRowKind::Projects => Ok(sidebar.render_project_tabs(window, cx)),
-+            TabsRowKind::Threads => Ok(sidebar.render_thread_tabs(window, cx)),
-+            TabsRowKind::AddProject => Err(sidebar
-+                .render_recent_projects_button(true, cx)
-+                .into_any_element()),
-+        });
-+        let row = match row {
-+            Ok(row) => row,
-+            Err(button) => return button,
-+        };
-+
-+        // Like the editor's tab bar, bring the active tab into view when it changes.
-+        if row.active_index != self.scrolled_to {
-+            if let Some(index) = row.active_index {
-+                self.scroll_handle.scroll_to_item(index);
++        let make_filler = |id: ElementId, window: &mut Window, cx: &mut App| {
++            let filler = div()
++                .id(id)
++                .min_w_6()
++                .h(Tab::container_height(cx))
++                .flex_grow_1()
++                .child("");
++            if workspace::title_bar_in_status_bar(cx) {
++                workspace::move_window_on_drag(filler, window, cx)
++            } else {
++                filler
 +            }
-+            self.scrolled_to = row.active_index;
-+        }
-+
-+        let filler = div()
-+            .id("tab_bar_filler")
-+            .min_w_6()
-+            .h(Tab::container_height(cx))
-+            .flex_grow_1()
-+            .child("");
-+        let filler = if workspace::title_bar_in_status_bar(cx) {
-+            workspace::move_window_on_drag(filler, window, cx)
-+        } else {
-+            filler
 +        };
 +
-+        h_flex()
-+            .id(match kind {
-+                TabsRowKind::Projects => "agent_panel_project_tabs",
-+                TabsRowKind::Threads | TabsRowKind::AddProject => "agent_panel_thread_tabs",
-+            })
-+            .overflow_x_scroll()
-+            .w_full()
-+            .track_scroll(&self.scroll_handle)
-+            .children(row.tabs)
-+            .child(filler)
-+            .into_any_element()
++        match self.kind {
++            TabsRowKind::AddProject => sidebar.update(cx, |sidebar, cx| {
++                sidebar
++                    .render_recent_projects_button(true, cx)
++                    .into_any_element()
++            }),
++            TabsRowKind::Projects => {
++                let row = sidebar.update(cx, |sidebar, cx| sidebar.render_project_tabs(window, cx));
++                // Like the editor's tab bar, bring the active tab into view when it changes.
++                let scroll_target = row.active_index.map(|index| (index, 0));
++                if scroll_target != self.scrolled_to {
++                    if let Some((index, _)) = scroll_target {
++                        self.scroll_handle.scroll_to_item(index);
++                    }
++                    if self.scroll_handle.bounds().size.width > px(0.) {
++                        self.scrolled_to = scroll_target;
++                    }
++                }
++                let filler = make_filler("tab_bar_filler".into(), window, cx);
++                h_flex()
++                    .id("agent_panel_project_tabs")
++                    .overflow_x_scroll()
++                    .w_full()
++                    .track_scroll(&self.scroll_handle)
++                    .children(row.tabs)
++                    .child(filler)
++                    .into_any_element()
++            }
++            TabsRowKind::Threads => {
++                let max_tab_rows = TabBarSettings::get_global(cx).max_tab_rows.max(1);
++                let tab_settings = TabSettings::get(cx);
++                let can_wrap = max_tab_rows > 1
++                    && tab_settings.min_width.is_some()
++                    && tab_settings.max_width.is_some();
++                let threads_inset = sidebar
++                    .read(cx)
++                    .threads_row_traffic_light_inset(window, cx);
++                let tab_rows = self.tab_rows;
++                let (row, row_ranges) = sidebar.update(cx, |sidebar, cx| {
++                    sidebar.render_thread_tabs(tab_rows, window, cx)
++                });
++
++                let last_row_start = row_ranges.last().map_or(0, |range| range.start);
++                let scroll_target = row.active_index.map(|index| (index, last_row_start));
++                if scroll_target != self.scrolled_to {
++                    self.scroll_handle.set_offset(Point::default());
++                    if let Some((index, start)) = scroll_target
++                        && index >= start
++                    {
++                        self.scroll_handle.scroll_to_item(index - start);
++                    }
++                    if self.scroll_handle.bounds().size.width > px(0.) {
++                        self.scrolled_to = scroll_target;
++                    }
++                }
++
++                let entity = cx.entity().downgrade();
++                let measure_first_row =
++                    move |children_bounds: Vec<Bounds<Pixels>>, _: &mut Window, cx: &mut App| {
++                        if let Some(bounds) = children_bounds.first() {
++                            let first_w = bounds.size.width;
++                            let full_w = first_w + threads_inset.unwrap_or(px(0.));
++                            if let Some(entity) = entity.upgrade() {
++                                entity.update(cx, |this, cx| {
++                                    if this.tab_rows.update_widths(Some(first_w), Some(full_w)) {
++                                        cx.notify();
++                                    }
++                                });
++                            }
++                        }
++                    };
++
++                if !can_wrap {
++                    let filler = make_filler("tab_bar_filler".into(), window, cx);
++                    return TabBar::new("agent-panel-threads-tab-bar")
++                        .child(
++                            div()
++                                .w_full()
++                                .min_w_0()
++                                .overflow_x_hidden()
++                                .when_some(threads_inset, |this, inset| this.pl(inset))
++                                .on_children_prepainted(measure_first_row)
++                                .child(
++                                    h_flex()
++                                        .id("agent_panel_thread_tabs")
++                                        .overflow_x_scroll()
++                                        .w_full()
++                                        .min_w_0()
++                                        .track_scroll(&self.scroll_handle)
++                                        .children(row.tabs)
++                                        .child(filler),
++                                ),
++                        )
++                        .into_any_element();
++                }
++
++                let mut remaining_tabs = row.tabs.into_iter();
++                let row_count = row_ranges.len();
++                let mut rows_container = v_flex()
++                    .id("agent-panel-threads-tab-rows")
++                    .w_full()
++                    .flex_none();
++
++                for (row_ix, range) in row_ranges.into_iter().enumerate() {
++                    let row_tabs: Vec<AnyElement> =
++                        remaining_tabs.by_ref().take(range.len()).collect();
++                    let is_last_row = row_ix + 1 == row_count;
++                    let tab_bar_id: ElementId = if row_ix == 0 {
++                        "agent-panel-threads-tab-bar".into()
++                    } else {
++                        ("agent-panel-threads-tab-bar", row_ix).into()
++                    };
++                    let row_id: ElementId = if row_ix == 0 {
++                        "agent_panel_thread_tabs".into()
++                    } else {
++                        ("agent_panel_thread_tabs", row_ix).into()
++                    };
++                    let filler_id: ElementId = if row_ix == 0 {
++                        "tab_bar_filler".into()
++                    } else {
++                        ("tab_bar_filler", row_ix).into()
++                    };
++                    let filler = make_filler(filler_id, window, cx);
++
++                    let inner_row = h_flex()
++                        .id(row_id)
++                        .w_full()
++                        .min_w_0()
++                        .h(Tab::container_height(cx))
++                        .map(|this| {
++                            if is_last_row {
++                                this.overflow_x_scroll().track_scroll(&self.scroll_handle)
++                            } else {
++                                this.overflow_x_hidden()
++                            }
++                        })
++                        .children(row_tabs)
++                        .child(filler);
++
++                    let row_wrapper = div()
++                        .w_full()
++                        .min_w_0()
++                        .overflow_x_hidden()
++                        .when(row_ix == 0, |this| {
++                            this.when_some(threads_inset, |this, inset| this.pl(inset))
++                                .on_children_prepainted(measure_first_row.clone())
++                        })
++                        .child(inner_row);
++
++                    rows_container =
++                        rows_container.child(TabBar::new(tab_bar_id).child(row_wrapper));
++                }
++
++                rows_container.into_any_element()
++            }
++        }
 +    }
 +}
 +
@@ -1771,15 +2100,45 @@ index 0000000000..a4179e8acb
 +            .collect()
 +    }
 +
++    pub(crate) fn threads_row_traffic_light_inset(
++        &self,
++        window: &Window,
++        cx: &App,
++    ) -> Option<Pixels> {
++        let panel = self.active_workspace(cx)?.read(cx).panel::<AgentPanel>(cx)?;
++        let panel = panel.read(cx);
++        let at_traffic_lights = workspace::traffic_lights_overlay_workspace(window, cx)
++            && (panel.position(window, cx) == DockPosition::Left || panel.is_zoomed(window, cx));
++        at_traffic_lights.then(|| {
++            workspace::traffic_light_inset(window, cx) - DynamicSpacing::Base02.px(cx)
++        })
++    }
++
 +    pub(crate) fn render_thread_tabs(
 +        &mut self,
++        tab_rows: ui::TabRows,
 +        _window: &mut Window,
 +        cx: &mut Context<Self>,
-+    ) -> RenderedTabsRow {
-+        let chip = TabBarSettings::get_global(cx).unpinned_tab_chips;
++    ) -> (RenderedTabsRow, Vec<Range<usize>>) {
++        let tab_bar_settings = TabBarSettings::get_global(cx);
++        let chip = tab_bar_settings.unpinned_tab_chips;
++        let max_tab_rows = tab_bar_settings.max_tab_rows.max(1);
++        let settings = TabSettings::get(cx);
++        let wrap_widths = settings.min_width.zip(settings.max_width);
++        let can_wrap = max_tab_rows > 1 && wrap_widths.is_some();
 +        let rows = self.ordered_thread_tab_entries();
 +
 +        let count = rows.len();
++        let row_ranges = if can_wrap {
++            tab_rows.ranges(
++                count,
++                settings.min_width,
++                ui::TAB_BAR_FILLER_MIN_WIDTH,
++                max_tab_rows,
++            )
++        } else {
++            vec![0..count]
++        };
 +        let active_index = rows.iter().position(|(_, entry)| {
 +            self.active_entry
 +                .as_ref()
@@ -1789,9 +2148,20 @@ index 0000000000..a4179e8acb
 +            .into_iter()
 +            .enumerate()
 +            .filter_map(|(index, (entry_ix, entry))| {
-+                let position = tab_position(index, count, active_index);
++                let row_range = row_ranges
++                    .iter()
++                    .find(|range| range.contains(&index))
++                    .cloned()
++                    .unwrap_or(0..count);
++                let position = tab_position(
++                    index - row_range.start,
++                    row_range.len(),
++                    active_index
++                        .filter(|active| row_range.contains(active))
++                        .map(|active| active - row_range.start),
++                );
 +                let is_active = active_index == Some(index);
-+                match entry {
++                let tab = match entry {
 +                    ListEntry::Thread(thread) => Some(self.render_thread_tab(
 +                        index, entry_ix, &thread, position, is_active, chip, cx,
 +                    )),
@@ -1799,11 +2169,16 @@ index 0000000000..a4179e8acb
 +                        index, entry_ix, &terminal, position, is_active, chip, cx,
 +                    )),
 +                    ListEntry::ProjectHeader { .. } => None,
-+                }
++                }?;
++                Some(if let Some((min_w, max_w)) = wrap_widths.filter(|_| can_wrap) {
++                    ui::TabRows::wrap_tab(tab, min_w, max_w).into_any_element()
++                } else {
++                    tab
++                })
 +            })
 +            .collect();
 +
-+        RenderedTabsRow { tabs, active_index }
++        (RenderedTabsRow { tabs, active_index }, row_ranges)
 +    }
 +
 +    fn activate_project_tab(

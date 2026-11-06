@@ -1,4 +1,4 @@
-From dd0cadc1df2a6649f36e74ded0875b8d3683ea2c Mon Sep 17 00:00:00 2001
+From 7ce30dc31c22f11f96798d86118df11262a90b95 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 11:28:27 +0300
 Subject: [PATCH 3/9] Add compact layout settings, Mono Light theme and halved
@@ -15,7 +15,7 @@ single-line editors and bundles the Mono Light theme (not selected by
 default).
 
 diff --git a/assets/settings/default.json b/assets/settings/default.json
-index a62be025da..24a00f350c 100644
+index fb155baaef..a2d10b542d 100644
 --- a/assets/settings/default.json
 +++ b/assets/settings/default.json
 @@ -12,6 +12,9 @@
@@ -748,10 +748,10 @@ index a4757631a1..51eecceafe 100644
              .mr_2()
              .px_2()
 diff --git a/crates/settings/src/vscode_import.rs b/crates/settings/src/vscode_import.rs
-index 0966e1338c..588a0ba478 100644
+index 54b6abdf6e..e2fa7a42db 100644
 --- a/crates/settings/src/vscode_import.rs
 +++ b/crates/settings/src/vscode_import.rs
-@@ -1045,7 +1045,9 @@ impl VsCodeSettings {
+@@ -1046,7 +1046,9 @@ impl VsCodeSettings {
              mermaid_font_family: None,
              theme: None,
              icon_theme: None,
@@ -1332,7 +1332,7 @@ index acafc70ee8..0161979321 100644
  /// bottom border of the tab-height header beside them, as far from the left edge as from the top.
  /// The button size depends on the macOS SDK, so it is only known once the window exists; until
 diff --git a/crates/workspace/src/workspace_settings.rs b/crates/workspace/src/workspace_settings.rs
-index 8f39a1bdb2..76e8de2a7b 100644
+index c67e03d458..102226d7bd 100644
 --- a/crates/workspace/src/workspace_settings.rs
 +++ b/crates/workspace/src/workspace_settings.rs
 @@ -48,6 +48,7 @@ pub struct WorkspaceSettings {
@@ -1343,7 +1343,7 @@ index 8f39a1bdb2..76e8de2a7b 100644
  }
  
  #[cfg(target_os = "macos")]
-@@ -170,6 +171,12 @@ impl Settings for WorkspaceSettings {
+@@ -171,6 +172,12 @@ impl Settings for WorkspaceSettings {
                          .unwrap_or(250),
                  ),
              },
@@ -1356,7 +1356,7 @@ index 8f39a1bdb2..76e8de2a7b 100644
          }
      }
  }
-@@ -246,3 +253,27 @@ impl Settings for StatusBarSettings {
+@@ -248,3 +255,39 @@ impl Settings for StatusBarSettings {
          }
      }
  }
@@ -1374,6 +1374,7 @@ index 8f39a1bdb2..76e8de2a7b 100644
 +        if let Some(tab_bar) = raw.tab_bar.as_mut() {
 +            tab_bar.pinned_tab_chips = None;
 +            tab_bar.unpinned_tab_chips = None;
++            tab_bar.max_tab_rows = None;
 +        }
 +
 +        let settings = WorkspaceSettings::from_settings(&raw);
@@ -1382,6 +1383,17 @@ index 8f39a1bdb2..76e8de2a7b 100644
 +        let tab_settings = TabBarSettings::from_settings(&raw);
 +        assert!(!tab_settings.pinned_tab_chips);
 +        assert!(!tab_settings.unpinned_tab_chips);
++        assert_eq!(tab_settings.max_tab_rows, 1);
++
++        if let Some(tab_bar) = raw.tab_bar.as_mut() {
++            tab_bar.max_tab_rows = Some(0);
++        }
++        assert_eq!(TabBarSettings::from_settings(&raw).max_tab_rows, 1);
++
++        if let Some(tab_bar) = raw.tab_bar.as_mut() {
++            tab_bar.max_tab_rows = Some(3);
++        }
++        assert_eq!(TabBarSettings::from_settings(&raw).max_tab_rows, 3);
 +    }
 +}
 diff --git a/docs/src/reference/all-settings.md b/docs/src/reference/all-settings.md
