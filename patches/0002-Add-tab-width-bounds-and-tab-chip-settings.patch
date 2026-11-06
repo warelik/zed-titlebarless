@@ -1,4 +1,4 @@
-From 521704f7925034892fe31fe568e69ec301eefa6a Mon Sep 17 00:00:00 2001
+From 2db207629fa953da22f5e5682cf1c0ca0926ad47 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 16:05:02 +0300
 Subject: [PATCH 2/9] Add tab width bounds and tab chip settings
@@ -269,10 +269,10 @@ index 6a25ad4345..8b197a91d1 100644
              .h(Tab::container_height(cx))
              .bg(tab_bg)
 diff --git a/crates/ui/src/components/tab_bar.rs b/crates/ui/src/components/tab_bar.rs
-index 524f880398..fbb232818d 100644
+index 524f880398..7d1c89c698 100644
 --- a/crates/ui/src/components/tab_bar.rs
 +++ b/crates/ui/src/components/tab_bar.rs
-@@ -1,9 +1,132 @@
+@@ -1,9 +1,129 @@
 +use std::ops::Range;
 +
  use gpui::{AnyElement, ScrollHandle};
@@ -344,22 +344,19 @@ index 524f880398..fbb232818d 100644
 +        first_row_width: Option<Pixels>,
 +        full_row_width: Option<Pixels>,
 +    ) -> bool {
-+        let changed_first = match (self.first_row_width, first_row_width) {
-+            (Some(old), Some(new)) if new > px(0.) => (old - new).abs() > Self::REMEASURE_EPSILON,
-+            (None, Some(new)) => new > px(0.),
-+            _ => false,
-+        };
-+        let changed_full = match (self.full_row_width, full_row_width) {
-+            (Some(old), Some(new)) if new > px(0.) => (old - new).abs() > Self::REMEASURE_EPSILON,
-+            (None, Some(new)) => new > px(0.),
-+            _ => false,
-+        };
-+        if changed_first {
-+            self.first_row_width = first_row_width;
++        // Store a positive measurement only when it moves by more than the epsilon.
++        fn update(stored: &mut Option<Pixels>, measured: Option<Pixels>) -> bool {
++            let Some(new) = measured.filter(|&width| width > px(0.)) else {
++                return false;
++            };
++            let changed = stored.is_none_or(|old| (old - new).abs() > TabRows::REMEASURE_EPSILON);
++            if changed {
++                *stored = Some(new);
++            }
++            changed
 +        }
-+        if changed_full {
-+            self.full_row_width = full_row_width;
-+        }
++        let changed_first = update(&mut self.first_row_width, first_row_width);
++        let changed_full = update(&mut self.full_row_width, full_row_width);
 +        changed_first || changed_full
 +    }
 +
@@ -405,7 +402,7 @@ index 524f880398..fbb232818d 100644
  #[derive(IntoElement, RegisterComponent)]
  pub struct TabBar {
      id: ElementId,
-@@ -204,3 +327,90 @@ impl Component for TabBar {
+@@ -204,3 +324,90 @@ impl Component for TabBar {
              .into_any_element()
      }
  }
