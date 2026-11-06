@@ -22558,7 +22558,7 @@ index 661072f80d..aaeed9d73a 100644
 +        mw.test_add_project_group(ProjectGroup {key: key.clone(), workspaces: Vec::new(), expanded: true});
 +    });
 +    let task = multi_workspace.update_in(cx, |mw, window, cx| mw.remove_project_group(&key, window, cx));
-+    assert!(!task.await.unwrap(), "no loaded workspace was detached");
++    assert!(task.await.unwrap(), "the unloaded group's row was removed");
 +    assert!(multi_workspace.read_with(cx, |mw, _| mw.group_state_by_key(&key).is_none()));
 +}
 +
