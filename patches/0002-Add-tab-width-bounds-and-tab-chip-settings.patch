@@ -1,4 +1,4 @@
-From 2db207629fa953da22f5e5682cf1c0ca0926ad47 Mon Sep 17 00:00:00 2001
+From c991108481fbddded6a813503aa7ca7d87c622c3 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 16:05:02 +0300
 Subject: [PATCH 2/9] Add tab width bounds and tab chip settings
@@ -516,7 +516,7 @@ index ab4195f6a4..15cd5e1723 100644
      }
  }
 diff --git a/crates/workspace/src/pane.rs b/crates/workspace/src/pane.rs
-index e19ec68347..4810f8c2a4 100644
+index e19ec68347..020367ca98 100644
 --- a/crates/workspace/src/pane.rs
 +++ b/crates/workspace/src/pane.rs
 @@ -436,6 +436,9 @@ pub struct Pane {
@@ -1008,7 +1008,7 @@ index e19ec68347..4810f8c2a4 100644
 +                if is_last_row {
 +                    this.overflow_x_scroll()
 +                        .track_scroll(&self.tab_bar_scroll_handle)
-+                        .on_scroll_wheel(cx.listener(|this, _, _, _| {
++                        .on_scroll(cx.listener(|this, _, _, _| {
 +                            this.suppress_scroll = true;
 +                        }))
 +                } else {
