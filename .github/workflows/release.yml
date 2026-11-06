@@ -337,6 +337,9 @@ jobs:
       - name: Free Space On The Disposable macOS Runner
         run: |
           df -h /
+          for xcode in /Applications/Xcode_[2-9][0-9]*.app; do
+            [ ! -L "$xcode" ] && [ -d "$xcode/Contents/Developer" ] && sudo xcode-select -s "$xcode/Contents/Developer"
+          done
           keep=$(realpath "$(xcode-select -p)/../..")
           for xcode in /Applications/Xcode*.app; do
             [ "$(realpath "$xcode")" = "$keep" ] || sudo rm -rf "$xcode"
