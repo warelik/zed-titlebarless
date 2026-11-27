@@ -1,15 +1,11 @@
-From a920e7fe18464eaaa272f6a1f3d6c2ceff6889ed Mon Sep 17 00:00:00 2001
+From 42dd16014aca72e40a3bcc5695933e0e9b4da288 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 10:36:47 +0300
-Subject: [PATCH 6/9] Keep logs in --user-data-dir and isolate crash-handler
- log directories
+Subject: [PATCH 7/7] Isolate logs and crash diagnostics by data directory
 
-On macOS write logs under the user data directory when one is given,
-and forward the resolved log directory to the crash-handler and remote
-server subprocesses.
 
 diff --git a/crates/crashes/src/crashes.rs b/crates/crashes/src/crashes.rs
-index 87d6f5c640..c2faa71c69 100644
+index 87d6f5c640e5fa36eedfa0ef70229ef18d3096b2..c2faa71c69cdb6e3a0410617f6a8c54b40f29e57 100644
 --- a/crates/crashes/src/crashes.rs
 +++ b/crates/crashes/src/crashes.rs
 @@ -50,6 +50,7 @@ pub fn init<F, S, C, P>(
@@ -111,7 +107,7 @@ index 87d6f5c640..c2faa71c69 100644
 +
  }
 diff --git a/crates/paths/src/paths.rs b/crates/paths/src/paths.rs
-index 9c16f1db28..a73618d3e4 100644
+index 9c16f1db289585280e7919297c43085a5a76fdf2..a73618d3e4606cb594ad90cd8177ca5ffc48907a 100644
 --- a/crates/paths/src/paths.rs
 +++ b/crates/paths/src/paths.rs
 @@ -65,6 +65,9 @@ static CURRENT_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -175,7 +171,7 @@ index 9c16f1db28..a73618d3e4 100644
 +    }
 +}
 diff --git a/crates/remote_server/src/main.rs b/crates/remote_server/src/main.rs
-index 58123ebb95..63bb499f13 100644
+index 58123ebb95b6448d6dfea47bd491a3e61865b59e..63bb499f13b6e8530f492b89b60e67c5dc36c652 100644
 --- a/crates/remote_server/src/main.rs
 +++ b/crates/remote_server/src/main.rs
 @@ -16,6 +16,8 @@ struct Cli {
@@ -198,7 +194,7 @@ index 58123ebb95..63bb499f13 100644
      }
  
 diff --git a/crates/remote_server/src/server.rs b/crates/remote_server/src/server.rs
-index 48004fddd5..9ac95713a3 100644
+index 48004fddd548d4896f456f2760c26a7558734edc..9ac95713a3b834470b47567125f0c59254e8a8ef 100644
 --- a/crates/remote_server/src/server.rs
 +++ b/crates/remote_server/src/server.rs
 @@ -698,6 +698,7 @@ pub fn execute_run(
@@ -218,10 +214,10 @@ index 48004fddd5..9ac95713a3 100644
          .detach();
      };
 diff --git a/crates/zed/src/main.rs b/crates/zed/src/main.rs
-index 78dad31e73..9b25ad7e86 100644
+index c20f4ab9dd2d7d8a912f62c9ef53c680c94d0fef..8458501f0fce4813a86cbe2d6bf61a79947d5e15 100644
 --- a/crates/zed/src/main.rs
 +++ b/crates/zed/src/main.rs
-@@ -221,7 +221,8 @@ fn main() {
+@@ -232,7 +232,8 @@ fn main() {
  
      // `zed --crash-handler` Makes zed operate in minidump crash handler mode
      if let Some(socket) = &args.crash_handler {
@@ -231,7 +227,7 @@ index 78dad31e73..9b25ad7e86 100644
          return;
      }
  
-@@ -413,6 +414,7 @@ fn main() {
+@@ -425,6 +426,7 @@ fn main() {
                  },
                  |pid| paths::temp_dir().join(format!("zed-crash-handler-{pid}")),
                  move |duration| background_executor.timer(duration),
@@ -239,7 +235,7 @@ index 78dad31e73..9b25ad7e86 100644
              )),
          )
      } else {
-@@ -1748,6 +1750,8 @@ struct Args {
+@@ -2223,6 +2225,8 @@ struct Args {
      /// process communicating over a socket.
      #[arg(long, hide = true)]
      crash_handler: Option<PathBuf>,

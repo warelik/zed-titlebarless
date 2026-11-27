@@ -4752,6 +4752,14 @@ def build(app):
         image = target / "Zed-aarch64.dmg"
         if image.is_symlink() or not image.is_file():
             raise ValueError("The build did not produce a regular DMG")
+        remote_pairs = [(target / name, target / f"{name}.dwarf")
+                        for name in ("remote-server", "remote_server")]
+        remote_pairs = [pair for pair in remote_pairs
+                        if any(path.exists() or path.is_symlink() for path in pair)]
+        if len(remote_pairs) != 1 or not all(
+                path.is_file() and not path.is_symlink() for path in remote_pairs[0]):
+            raise ValueError("Expected exactly one regular remote server binary and symbols pair")
+        remote_binary, remote_symbols = remote_pairs[0]
         run("hdiutil", "verify", str(image), env=env)
         mount = Path(temporary) / "mount"
         mount.mkdir()
@@ -4773,11 +4781,11 @@ def build(app):
                 raise ValueError("Shipped binary does not report the exact reviewed version and SHA")
             binary_uuid = macho_uuid(binary, env)
             require_debug_info(target / "zed.dwarf", env)
-            require_debug_info(target / "remote_server.dwarf", env)
+            require_debug_info(remote_symbols, env)
             if macho_uuid(target / "zed.dwarf", env) != binary_uuid:
                 raise ValueError("Debug symbols do not match the binary inside the shipped DMG")
-            remote_uuid = macho_uuid(target / "remote_server.dwarf", env)
-            if macho_uuid(target / "remote_server", env) != remote_uuid:
+            remote_uuid = macho_uuid(remote_symbols, env)
+            if macho_uuid(remote_binary, env) != remote_uuid:
                 raise ValueError("Remote debug symbols do not match their diagnostic build")
         finally:
             run("hdiutil", "detach", str(mount), env=env)
@@ -4787,8 +4795,9 @@ def build(app):
     uuid_file.write_text(f"UUID: {binary_uuid} (arm64) zed.dwarf\n"
                          f"UUID: {remote_uuid} (arm64) remote_server.dwarf\n")
     with tarfile.open(directory / symbols, "w:gz") as archive:
-        for name in ("zed.dwarf", "remote_server.dwarf", "UUIDS.txt"):
-            archive.add(target / name, arcname=name, recursive=False)
+        archive.add(target / "zed.dwarf", arcname="zed.dwarf", recursive=False)
+        archive.add(remote_symbols, arcname="remote_server.dwarf", recursive=False)
+        archive.add(uuid_file, arcname="UUIDS.txt", recursive=False)
     for name in ("Zed.dmg", symbols):
         if not 0 < (directory / name).stat().st_size < 2 ** 31:
             raise ValueError(f"Release asset exceeds GitHub's supported size: {name}")

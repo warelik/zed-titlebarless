@@ -1,0 +1,4444 @@
+From 81914603c17d8b47c963db9a0208a4184f21857d Mon Sep 17 00:00:00 2001
+From: warelik <warelik@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 11:28:27 +0300
+Subject: [PATCH 1/7] Group window layout and appearance settings
+
+
+diff --git a/assets/settings/default.json b/assets/settings/default.json
+index ef5e8444744b549a508b4cc169ea3e82dc882ffd..f78e38d4eed0c9197c7e5f02f447a015373a59f1 100644
+--- a/assets/settings/default.json
++++ b/assets/settings/default.json
+@@ -12,6 +12,9 @@
+     "dark": "One Dark",
+   },
+   "icon_theme": "Zed (Default)",
++  // Whether rows in the project, git and outline panels take the tab bar height,
++  // so they line up with the tab bar and the sticky rows of the project panel.
++  "panel_rows_tab_height": false,
+   // The name of a base set of key bindings to use.
+   // This setting can take the following values:
+   //
+@@ -69,6 +72,13 @@
+   "ui_font_weight": 400,
+   // The default font size for text in the UI
+   "ui_font_size": 16,
++  // Toggles for individual UI shadows.
++  "shadows": {
++    // Whether to paint the shadow under the sticky folder rows of the project panel.
++    "project_panel": true,
++    // Whether to paint the shadow around the minimap.
++    "minimap": true,
++  },
+   // The font family for agent responses in the agent panel. Falls back to the UI font family if unset.
+   "agent_ui_font_family": null,
+   // The default font size for agent responses in the agent panel. Falls back to the UI font size if unset.
+@@ -605,6 +615,8 @@
+     "agent_review": true,
+     // Whether to show code action buttons in the editor toolbar.
+     "code_actions": false,
++    // Whether to shrink the pane toolbar to the height of the tab bar.
++    "compact": false,
+   },
+   // Whether to allow windows to tab together based on the user's tabbing preference (macOS only).
+   "use_system_window_tabs": false,
+@@ -616,6 +628,9 @@
+   //    on notched displays, the area around the notch.
+   //     "simple"
+   "fullscreen_mode": "native",
++  // Whether to hide the title bar and show its contents in the status bar instead.
++  // macOS only: other platforms draw their window controls in the title bar, so it stays.
++  "title_bar_to_status_bar": false,
+   // Titlebar related settings
+   "title_bar": {
+     // When to show the title bar: "always" | "never" | "hide_in_full_screen".
+@@ -1203,6 +1218,8 @@
+       "default_width": 300,
+       // Automatically open the Threads Sidebar when opening a folder in an existing window.
+       "auto_open": true,
++      // Show each thread on a single line at the height of the tab bar, with its details on hover.
++      "compact": false,
+     },
+     // Default fixed width when the agent panel is docked to the left or right and
+     // `flexible` is false.
+@@ -1496,9 +1513,15 @@
+     // Whether or not to show the tab bar buttons.
+     "show_tab_bar_buttons": true,
+     // Whether or not to show pinned tabs in a separate row.
+-    // When enabled, pinned tabs appear in a top row and unpinned tabs in a bottom row.
+-    // When disabled, all tabs appear in a single row (default behavior).
++    // Whether pinned tabs get their own row above unpinned tabs.
++    // By default, pinned and unpinned tabs share the first row.
+     "show_pinned_tabs_in_separate_row": false,
++    // Whether to render pinned tabs as compact borderless chips.
++    "pinned_tab_chips": false,
++    // Whether to render unpinned tabs as compact borderless chips.
++    "unpinned_tab_chips": false,
++    // Maximum number of rows for unpinned tabs when both `tabs.min_width` and `tabs.max_width` are set.
++    "max_tab_rows": 1,
+   },
+   // Settings related to the tab switcher (Ctrl-Tab).
+   "tab_switcher": {
+@@ -1545,6 +1568,10 @@
+     // 3. Mark files with errors and warnings:
+     //    "all"
+     "show_diagnostics": "off",
++    // Minimum width of a tab in pixels; null keeps tabs as wide as their title.
++    "min_width": null,
++    // Maximum width of a tab in pixels; longer titles are truncated in the middle.
++    "max_width": null,
+   },
+   // Settings related to preview tabs.
+   "preview_tabs": {
+diff --git a/assets/themes/mono/mono.json b/assets/themes/mono/mono.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..bd2223f2f9537f2c86da514f3d25dd724987c594
+--- /dev/null
++++ b/assets/themes/mono/mono.json
+@@ -0,0 +1,99 @@
++{
++  "$schema": "https://zed.dev/schema/themes/v0.2.0.json",
++  "name": "Mono",
++  "author": "warelik",
++  "themes": [
++    {
++      "name": "Mono Light",
++      "appearance": "light",
++      "style": {
++        "text": "#000000",
++        "text.muted": "#82827C",
++
++        "border": "#00000000",
++        "border.variant": "#00000000",
++        "border.focused": "#00000000",
++        "border.selected": "#00000000",
++        "panel.focused_border": "#00000000",
++        "pane.focused_border": "#00000000",
++        "scrollbar.track.border": "#00000000",
++
++        "background": "#F1F0EF",
++        "surface.background": "#F1F0EF",
++        "elevated_surface.background": "#F1F0EF",
++        "status_bar.background": "#F1F0EF",
++        "tab_bar.background": "#F1F0EF",
++        "tab.inactive_background": "#F1F0EF",
++        "tab.active_background": "#F1F0EF",
++        "toolbar.background": "#F1F0EF",
++        "panel.background": "#F1F0EF",
++        "editor.background": "#F1F0EF",
++        "editor.gutter.background": "#F1F0EF",
++        "editor.subheader.background": "#F1F0EF",
++        "terminal.background": "#F1F0EF",
++        "terminal.ansi.background": "#F1F0EF",
++
++        "element.selected": "#E2E1DE",
++        "element.hover": "#E2E1DE",
++        "scrollbar.thumb.background": "#00000000",
++        "scrollbar.thumb.hover_background": "#00000000",
++        "scrollbar.thumb.active_background": "#00000000",
++        "minimap.thumb.background": "#DCDBD7B3",
++        "minimap.thumb.hover_background": "#D7D5D1B3",
++        "minimap.thumb.active_background": "#DCDBD7B3",
++        "players": [{ "selection": "#E2E1DE" }],
++
++        "conflict": "#CE2C31", "conflict.background": "#FEEBEC", "conflict.border": "#CE2C31",
++        "created": "#2A7E3B", "created.background": "#E9F6E9", "created.border": "#2A7E3B",
++        "deleted": "#CE2C31", "deleted.background": "#FEEBEC", "deleted.border": "#CE2C31",
++        "error": "#CE2C31", "error.background": "#FEEBEC", "error.border": "#CE2C31",
++        "hidden": "#63635E", "hidden.background": "#F1F0EF", "hidden.border": "#63635E",
++        "hint": "#0D74CE", "hint.background": "#E6F4FE", "hint.border": "#0D74CE",
++        "ignored": "#63635E", "ignored.background": "#F1F0EF", "ignored.border": "#63635E",
++        "info": "#0D74CE", "info.background": "#E6F4FE", "info.border": "#0D74CE",
++        "modified": "#9E6C00", "modified.background": "#FFFAB8", "modified.border": "#9E6C00",
++        "predictive": "#080800A1", "predictive.background": "#20100010", "predictive.border": "#080800A1",
++        "renamed": "#0D74CE", "renamed.background": "#E6F4FE", "renamed.border": "#0D74CE",
++        "success": "#2A7E3B", "success.background": "#E9F6E9", "success.border": "#2A7E3B",
++        "unreachable": "#63635E", "unreachable.background": "#F1F0EF", "unreachable.border": "#63635E",
++        "warning": "#9E6C00", "warning.background": "#FFFAB8", "warning.border": "#9E6C00",
++
++        "syntax": {
++          "attribute": { "color": "#481B9C" },
++          "boolean": { "color": "#005293" },
++          "comment": { "color": "#82827C", "font_style": "italic" },
++          "constant": { "color": "#005293" },
++          "constructor": { "color": "#005293" },
++          "emphasis": { "font_style": "italic" },
++          "emphasis.strong": { "font_weight": 700 },
++          "enum": { "color": "#005293" },
++          "function": { "color": "#CD4500" },
++          "hint": { "color": "#82827C" },
++          "keyword": { "color": "#A30034" },
++          "label": { "color": "#CD4500" },
++          "link_uri": { "color": "#005293" },
++          "namespace": { "color": "#005293" },
++          "number": { "color": "#92156A" },
++          "predictive": { "color": "#82827C", "font_style": "italic" },
++          "preproc": { "color": "#A30034" },
++          "property": { "color": "#005293" },
++          "selector": { "color": "#3B7E84" },
++          "string": { "color": "#7565CC" },
++          "string.regex": { "color": "#0064B0" },
++          "string.special": { "color": "#A30034" },
++          "string.special.symbol": { "color": "#005293" },
++          "tag": { "color": "#007041" },
++          "text.literal": { "color": "#007041" },
++          "title": { "color": "#005293" },
++          "type": { "color": "#005293" },
++          "type.builtin": { "color": "#A30034" },
++          "variable.parameter": { "font_style": "italic" },
++          "variable.special": { "color": "#BE1744" },
++          "variant": { "color": "#005293" },
++          "diff.plus": { "color": "#007041" },
++          "diff.minus": { "color": "#A30034" }
++        }
++      }
++    }
++  ]
++}
+diff --git a/crates/agent/src/tool_permissions.rs b/crates/agent/src/tool_permissions.rs
+index c28f51e122d89fc2dd627939bfea018e60e83c98..f2429195d8b4d08356f38e294b750533e4c87ce4 100644
+--- a/crates/agent/src/tool_permissions.rs
++++ b/crates/agent/src/tool_permissions.rs
+@@ -634,6 +634,7 @@ mod tests {
+                 auto_open: true,
+                 default_width: px(300.),
+                 position: settings::SidebarDockPosition::Left,
++                compact: false,
+             },
+             thinking_display: Default::default(),
+         }
+diff --git a/crates/agent_settings/src/agent_settings.rs b/crates/agent_settings/src/agent_settings.rs
+index f5ae752b271ae2567038c81ae007cfbe159966ad..93d6c99bd9984550204b173c355107664185f5a6 100644
+--- a/crates/agent_settings/src/agent_settings.rs
++++ b/crates/agent_settings/src/agent_settings.rs
+@@ -34,7 +34,7 @@ pub const COMPACTION_PROMPT: &str = include_str!("prompts/compaction_prompt.txt"
+ /// Bounds on the width of the threads list. They constrain the configured
+ /// default as well as the width the user drags to, so that no width the sidebar
+ /// can hold is able to crowd out the editor or collapse the list.
+-pub const THREADS_LIST_MIN_WIDTH: Pixels = px(200.0);
++pub const THREADS_LIST_MIN_WIDTH: Pixels = px(100.0);
+ pub const THREADS_LIST_MAX_WIDTH: Pixels = px(800.0);
+ 
+ #[derive(Debug, Clone, Default, PartialEq, Eq)]
+@@ -258,6 +258,7 @@ pub struct ThreadsSidebarSettings {
+     pub auto_open: bool,
+     pub position: SidebarDockPosition,
+     pub default_width: Pixels,
++    pub compact: bool,
+ }
+ 
+ impl AgentSettings {
+@@ -786,6 +787,7 @@ impl Settings for AgentSettings {
+                     .unwrap()
+                     .into_gpui()
+                     .clamp(THREADS_LIST_MIN_WIDTH, THREADS_LIST_MAX_WIDTH),
++                compact: threads_sidebar.compact.unwrap_or(false),
+             },
+             default_width: agent.default_width.unwrap().into_gpui(),
+             default_height: agent.default_height.unwrap().into_gpui(),
+@@ -1205,6 +1207,22 @@ mod tests {
+         }
+     }
+ 
++    #[gpui::test]
++    fn test_threads_sidebar_compact_defaults_to_false_when_none(cx: &mut gpui::App) {
++        let store = SettingsStore::test(cx);
++        let mut content = store.raw_default_settings().clone();
++        content
++            .agent
++            .as_mut()
++            .unwrap()
++            .threads_sidebar
++            .as_mut()
++            .unwrap()
++            .compact = None;
++        let agent_settings = AgentSettings::from_settings(&content);
++        assert!(!agent_settings.threads_sidebar.compact);
++    }
++
+     #[gpui::test]
+     fn test_threads_sidebar_settings_edit_and_reset_clears_legacy_keys(cx: &mut gpui::App) {
+         let store = SettingsStore::test(cx);
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index 78a91d1c99143542066377ea82c94b5a39467ea3..f59e6ff2c93e0651b5548e150001da1d0c4b13a3 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -99,7 +99,7 @@ use ui::{
+ use util::ResultExt as _;
+ use workspace::{
+     CollaboratorId, DraggedSelection, DraggedTab, MultiWorkspace, PathList, SerializedPathList,
+-    ToggleWorkspaceSidebar, ToggleZoom, ToolbarItemView, Workspace, WorkspaceId,
++    ToggleWorkspaceSidebar, ToggleZoom, Toolbar, ToolbarItemView, Workspace, WorkspaceId,
+     dock::{DockPosition, Panel, PanelEvent},
+     item::{ItemEvent, ItemHandle},
+ };
+@@ -6693,7 +6693,9 @@ impl Render for AgentPanel {
+                                     v_flex()
+                                         .group("toolbar")
+                                         .relative()
+-                                        .py(DynamicSpacing::Base06.rems(cx))
++                                        .when(Toolbar::compact_row_height(cx).is_none(), |this| {
++                                            this.py(DynamicSpacing::Base06.rems(cx))
++                                        })
+                                         .px(DynamicSpacing::Base08.rems(cx))
+                                         .border_b_1()
+                                         .border_color(cx.theme().colors().border_variant)
+diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
+index 6b6e1f991532bd7b5a7a3b9cbbab57ca8d21ad67..99e115ec2a738cf28122bb1aeae0c57044a5f4e1 100644
+--- a/crates/agent_ui/src/agent_ui.rs
++++ b/crates/agent_ui/src/agent_ui.rs
+@@ -1091,6 +1091,7 @@ mod tests {
+                 auto_open: true,
+                 default_width: px(300.),
+                 position: settings::SidebarDockPosition::Left,
++                compact: false,
+             },
+             thinking_display: Default::default(),
+         };
+diff --git a/crates/agent_ui/src/threads_archive_view.rs b/crates/agent_ui/src/threads_archive_view.rs
+index 15ed40e93d16ed947f9e26a9328c275eaee078d2..1dbdae2f8045d15834697a85f22e142d673f3ead 100644
+--- a/crates/agent_ui/src/threads_archive_view.rs
++++ b/crates/agent_ui/src/threads_archive_view.rs
+@@ -28,14 +28,16 @@ use picker::{
+     Picker, PickerDelegate,
+     highlighted_match_with_paths::{HighlightedMatch, HighlightedMatchWithPaths},
+ };
+-use platform_title_bar::{SidebarWindowControls, TitleBarSettings, apply_title_bar_insets};
++use platform_title_bar::{
++    SidebarWindowControls, TitleBarSettings, apply_title_bar_insets, sidebar_header_height,
++    traffic_light_drag_area,
++};
+ use project::{AgentId, AgentServerStore};
+ use settings::Settings as _;
+ use theme::ActiveTheme;
+ use ui::{
+     AgentThreadStatus, Divider, KeyBinding, ListItem, ListItemSpacing, ListSubHeader, ScrollAxes,
+     Scrollbars, Tab, ThreadItem, Tooltip, WithScrollbar, prelude::*,
+-    utils::platform_title_bar_height,
+ };
+ use util::ResultExt;
+ use util::paths::PathExt;
+@@ -857,7 +859,7 @@ impl ThreadsArchiveView {
+         .detach_and_log_err(cx);
+     }
+ 
+-    fn render_header(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
++    fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+         let has_query = !self.filter_editor.read(cx).text(cx).is_empty();
+         let SidebarWindowControls {
+             traffic_lights,
+@@ -865,11 +867,8 @@ impl ThreadsArchiveView {
+             right: right_window_controls,
+         } = SidebarWindowControls::new(AgentSettings::get_global(cx).sidebar_side(), window, cx);
+         let title_bar_visible = TitleBarSettings::is_title_bar_visible(window, cx);
+-        let header_height = if title_bar_visible {
+-            platform_title_bar_height(window)
+-        } else {
+-            Tab::container_height(cx)
+-        };
++        let in_status_bar = workspace::title_bar_in_status_bar(cx);
++        let header_height = sidebar_header_height(window, cx);
+         let show_focus_keybinding =
+             self.selection.is_some() && !self.filter_editor.focus_handle(cx).is_focused(window);
+ 
+@@ -887,6 +886,7 @@ impl ThreadsArchiveView {
+                         right_window_controls,
+                         false,
+                     ),
++                    Decorations::Server if in_status_bar => header,
+                     Decorations::Server => header.mt_px().pb_px(),
+                 }
+             })
+@@ -902,6 +902,9 @@ impl ThreadsArchiveView {
+                     this
+                 }
+             })
++            .when(traffic_lights && in_status_bar, |this| {
++                this.child(traffic_light_drag_area(window, cx))
++            })
+             .when(!right_window_controls, |this| this.pr_1p5())
+             .gap_1()
+             .justify_between()
+diff --git a/crates/breadcrumbs/src/breadcrumbs.rs b/crates/breadcrumbs/src/breadcrumbs.rs
+index b981e17c33a50d379048755f90734bc4b85021f1..68b331fcc730875ece42aa81cbc56a5a24ed41ac 100644
+--- a/crates/breadcrumbs/src/breadcrumbs.rs
++++ b/crates/breadcrumbs/src/breadcrumbs.rs
+@@ -3,7 +3,7 @@ use gpui::{
+ };
+ use ui::prelude::*;
+ use workspace::{
+-    ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
++    Toolbar, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
+     item::{HighlightedText, ItemEvent, ItemHandle},
+ };
+ 
+@@ -50,7 +50,7 @@ impl Render for Breadcrumbs {
+         let element = h_flex()
+             .id("breadcrumb-container")
+             .flex_grow_1()
+-            .h_8()
++            .h(Toolbar::row_height(cx))
+             .overflow_x_scroll()
+             .text_ui(cx);
+ 
+diff --git a/crates/editor/src/element.rs b/crates/editor/src/element.rs
+index afc15a19b05eb3f927a6bdf22c853d47fbabe2f9..14fb7146a5d8152c1e1074a25f1cfaa34f1721bf 100644
+--- a/crates/editor/src/element.rs
++++ b/crates/editor/src/element.rs
+@@ -87,7 +87,7 @@ use std::{
+ use sum_tree::Bias;
+ use text::{BufferId, ToPoint as _};
+ use theme::{ActiveTheme, Appearance, PlayerColor};
+-use theme_settings::BufferLineHeight;
++use theme_settings::{BufferLineHeight, ThemeSettings};
+ use ui::utils::ensure_minimum_contrast;
+ use ui::{ButtonLike, POPOVER_Y_PADDING, Tooltip, prelude::*, scrollbars::ShowScrollbar};
+ use unicode_segmentation::UnicodeSegmentation;
+@@ -1695,7 +1695,9 @@ impl EditorElement {
+ 
+         let mut minimap = div()
+             .size_full()
+-            .shadow_xs()
++            .when(ThemeSettings::get_global(cx).shadows.minimap, |this| {
++                this.shadow_xs()
++            })
+             .px(PADDING_OFFSET)
+             .child(minimap_editor)
+             .into_any_element();
+@@ -8622,7 +8624,14 @@ impl Element for EditorElement {
+ 
+                     let right_margin = minimap_width + vertical_scrollbar_width;
+ 
+-                    let extended_right = 2 * em_width + right_margin;
++                    // A single-line editor has no content to scroll past its end, so it only
++                    // needs room for the cursor; the extra em hides text in narrow inputs.
++                    let overscroll_ems = if self.editor.read(cx).mode.is_single_line() {
++                        1.
++                    } else {
++                        2.
++                    };
++                    let extended_right = em_width * overscroll_ems + right_margin;
+                     let editor_width = text_width - gutter_dimensions.margin - extended_right;
+                     let editor_margins = EditorMargins {
+                         gutter: gutter_dimensions,
+diff --git a/crates/git_ui/src/git_panel.rs b/crates/git_ui/src/git_panel.rs
+index b401a1d204d11b3f4c2ef1da444c9a9eb275c722..056a7cfe2993c94620793f19dd9b9f0b8ea4d8d0 100644
+--- a/crates/git_ui/src/git_panel.rs
++++ b/crates/git_ui/src/git_panel.rs
+@@ -8787,7 +8787,7 @@ impl GitPanel {
+                                             ));
+                                         }
+                                         Some(GitListEntry::EmptySection(section)) => {
+-                                            items.push(this.render_empty_section(*section));
++                                            items.push(this.render_empty_section(*section, cx));
+                                         }
+                                         None => {}
+                                     }
+@@ -8837,8 +8837,11 @@ impl GitPanel {
+         Label::new(label.into()).single_line().color(color)
+     }
+ 
+-    fn list_item_height(&self) -> Rems {
+-        rems(1.75)
++    fn list_item_height(&self, cx: &App) -> gpui::DefiniteLength {
++        match workspace::panel_row_height(cx) {
++            Some(height) => height.into(),
++            None => rems(1.75).into(),
++        }
+     }
+ 
+     fn render_list_header(
+@@ -8876,7 +8879,7 @@ impl GitPanel {
+         h_flex()
+             .id(id)
+             .group(group_name)
+-            .h(self.list_item_height())
++            .h(self.list_item_height(cx))
+             .w_full()
+             .pl_2p5()
+             .pr_1()
+@@ -8958,14 +8961,14 @@ impl GitPanel {
+             .into_any_element()
+     }
+ 
+-    fn render_empty_section(&self, section: Section) -> AnyElement {
++    fn render_empty_section(&self, section: Section, cx: &App) -> AnyElement {
+         let message = match section {
+             Section::Staged => "No staged changes yet",
+             Section::Unstaged => "No unstaged changes",
+             _ => "No changes",
+         };
+         h_flex()
+-            .h(self.list_item_height())
++            .h(self.list_item_height(cx))
+             .w_full()
+             .pl_2p5()
+             .pr_1()
+@@ -9387,7 +9390,7 @@ impl GitPanel {
+ 
+         h_flex()
+             .id(id)
+-            .h(self.list_item_height())
++            .h(self.list_item_height(cx))
+             .w_full()
+             .pl_2p5()
+             .pr_1()
+@@ -9630,7 +9633,7 @@ impl GitPanel {
+             .child(self.entry_label(entry.name.clone(), label_color).truncate());
+         h_flex()
+             .id(id)
+-            .h(self.list_item_height())
++            .h(self.list_item_height(cx))
+             .min_w_0()
+             .w_full()
+             .pl_2p5()
+diff --git a/crates/gpui/src/platform.rs b/crates/gpui/src/platform.rs
+index 86520ab049857499e9be13d2b18e715d4ac83c24..f13f4045b9ff45f750ab95bc0f2309bbbfc1575f 100644
+--- a/crates/gpui/src/platform.rs
++++ b/crates/gpui/src/platform.rs
+@@ -1392,6 +1392,10 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+     fn set_traffic_light_position(&self, _position: Point<Pixels>) {}
+     #[cfg(target_os = "macos")]
+     fn set_native_titlebar_visibility(&self, _visible: bool) {}
++    #[cfg(target_os = "macos")]
++    fn traffic_light_size(&self) -> Option<Size<Pixels>> {
++        None
++    }
+     fn show_character_palette(&self) {}
+     fn titlebar_double_click(&self, _is_resizable: bool, _is_minimizable: bool) {}
+     fn on_move_tab_to_new_window(&self, _callback: Box<dyn FnMut()>) {}
+diff --git a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
+index 9432b5db092e14f21ad9f311eaef9ab57d273054..43f243b6770e78724b769a7e63617819f1c2640a 100644
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -3409,6 +3409,12 @@ impl Window {
+         self.platform_window.set_native_titlebar_visibility(visible);
+     }
+ 
++    /// Returns the size of a macOS traffic light button, which depends on the SDK the app links against.
++    #[cfg(target_os = "macos")]
++    pub fn traffic_light_size(&self) -> Option<Size<Pixels>> {
++        self.platform_window.traffic_light_size()
++    }
++
+     /// Sets the application identifier.
+     pub fn set_app_id(&mut self, app_id: &str) {
+         self.platform_window.set_app_id(app_id);
+diff --git a/crates/gpui_macos/src/window.rs b/crates/gpui_macos/src/window.rs
+index b3492c084c172083449076cfe68d6b300177df33..45cbf5bb27eb0cd7b808968bea0ab9e21be2a7e1 100644
+--- a/crates/gpui_macos/src/window.rs
++++ b/crates/gpui_macos/src/window.rs
+@@ -1721,6 +1721,15 @@ impl PlatformWindow for MacWindow {
+         state.move_traffic_light();
+     }
+ 
++    fn traffic_light_size(&self) -> Option<Size<Pixels>> {
++        let state = self.0.lock();
++        let frame = state.traffic_light_buttons()?.close.frame();
++        Some(size(
++            Pixels::from(frame.size.width),
++            Pixels::from(frame.size.height),
++        ))
++    }
++
+     fn scale_factor(&self) -> f32 {
+         self.0.as_ref().lock().scale_factor()
+     }
+diff --git a/crates/language_onboarding/src/python.rs b/crates/language_onboarding/src/python.rs
+index 64b6502327f71e7a68f40b5a7690f308ecbf8c40..d477b47e40d6988a076b625a8bb2e1a4a4219e61 100644
+--- a/crates/language_onboarding/src/python.rs
++++ b/crates/language_onboarding/src/python.rs
+@@ -66,6 +66,11 @@ impl Render for BasedPyrightBanner {
+                                     cx.listener(|this, _, _, cx| {
+                                         this.dismissed = true;
+                                         Self::set_dismissed(true, cx);
++                                        // Keep the cached location hidden if compact mode
++                                        // is enabled after this banner has been dismissed.
++                                        cx.emit(ToolbarItemEvent::ChangeLocation(
++                                            ToolbarItemLocation::Hidden,
++                                        ));
+                                         cx.notify();
+                                     }),
+                                 ))
+diff --git a/crates/onboarding/src/multibuffer_hint.rs b/crates/onboarding/src/multibuffer_hint.rs
+index 56092863c8b5ae1a18694a23419fc2127c5bdc81..a0bc7c6ab8c6e1cca8539a58b4eaaae7bd7e3907 100644
+--- a/crates/onboarding/src/multibuffer_hint.rs
++++ b/crates/onboarding/src/multibuffer_hint.rs
+@@ -6,7 +6,7 @@ use db::kvp::KeyValueStore;
+ use gpui::{App, EntityId, EventEmitter, Subscription};
+ use ui::{IconButtonShape, Tooltip, prelude::*};
+ use workspace::item::{ItemBufferKind, ItemEvent, ItemHandle};
+-use workspace::{ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView};
++use workspace::{Toolbar, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView};
+ 
+ pub struct MultibufferHint {
+     shown_on: HashSet<EntityId>,
+@@ -136,7 +136,9 @@ impl Render for MultibufferHint {
+     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+         h_flex()
+             .px_2()
+-            .py_0p5()
++            .when(Toolbar::compact_row_height(cx).is_none(), |this| {
++                this.py_0p5()
++            })
+             .justify_between()
+             .bg(cx.theme().status().info_background.opacity(0.5))
+             .border_1()
+diff --git a/crates/outline_panel/src/outline_panel.rs b/crates/outline_panel/src/outline_panel.rs
+index e86dc4602300413049e2447fe06a16aa2886713b..050c6b0e5c1968d067a060e82516af37a8bfdbb6 100644
+--- a/crates/outline_panel/src/outline_panel.rs
++++ b/crates/outline_panel/src/outline_panel.rs
+@@ -3031,9 +3031,11 @@ impl OutlinePanel {
+             PanelEntry::Fs(FsEntry::File(file)) => file.is_deleted,
+             _ => false,
+         };
++        let row_height = workspace::panel_row_height(cx);
+         div()
+             .text_ui(cx)
+             .id(item_id.clone())
++            .when_some(row_height, |this, height| this.h(height))
+             .on_click({
+                 let clicked_entry = rendered_entry.clone();
+                 cx.listener(move |outline_panel, event: &gpui::ClickEvent, window, cx| {
+@@ -3055,6 +3057,7 @@ impl OutlinePanel {
+             .cursor_pointer()
+             .child(
+                 ListItem::new(item_id)
++                    .when(row_height.is_some(), |this| this.height(relative(1.)))
+                     .indent_level(depth)
+                     .indent_step_size(px(settings.indent_size))
+                     .toggle_state(is_active)
+diff --git a/crates/platform_title_bar/src/platform_title_bar.rs b/crates/platform_title_bar/src/platform_title_bar.rs
+index 16203410e48dd3520e6f1abe3f1fa0d94e563ab3..9c8c07ea2baf6ea24035ce26825daae3e4c64ba0 100644
+--- a/crates/platform_title_bar/src/platform_title_bar.rs
++++ b/crates/platform_title_bar/src/platform_title_bar.rs
+@@ -3,15 +3,16 @@ mod system_window_tabs;
+ mod title_bar_settings;
+ 
+ use gpui::{
+-    Action, AnyElement, App, Context, Decorations, Entity, Hsla, InteractiveElement, IntoElement,
+-    MouseButton, ParentElement, StatefulInteractiveElement, Styled, WeakEntity, Window,
+-    WindowButtonLayout, WindowControlArea, div, px,
++    Action, AnyElement, App, Context, Decorations, Div, Entity, Hsla, InteractiveElement,
++    IntoElement, MouseButton, ParentElement, Pixels, Stateful, StatefulInteractiveElement, Styled,
++    WeakEntity, Window, WindowButtonLayout, WindowControlArea, div, px,
+ };
+ use project::DisableAiSettings;
+ use settings::Settings;
+ use smallvec::SmallVec;
+ use std::mem;
+ use ui::{
++    Tab,
+     prelude::*,
+     utils::{TRAFFIC_LIGHT_PADDING, platform_title_bar_height},
+ };
+@@ -70,6 +71,29 @@ impl SidebarWindowControls {
+     }
+ }
+ 
++/// The height of the header a sidebar draws where the title bar would be. If the title bar
++/// is hidden or its contents are in the status bar, match the tab bar beside it.
++pub fn sidebar_header_height(window: &Window, cx: &App) -> Pixels {
++    if workspace::title_bar_in_status_bar(cx)
++        || !TitleBarSettings::is_title_bar_visible(window, cx)
++    {
++        Tab::container_height(cx)
++    } else {
++        platform_title_bar_height(window)
++    }
++}
++
++/// The padding a sidebar header keeps free for the macOS traffic lights, made draggable (and
++/// zoomable by double-click) like the title bar it replaces.
++pub fn traffic_light_drag_area(window: &mut Window, cx: &mut App) -> Stateful<Div> {
++    workspace::title_bar_area(div().id("traffic-light-area"), window, cx)
++        .absolute()
++        .top_0()
++        .left_0()
++        .h_full()
++        .w(px(TRAFFIC_LIGHT_PADDING))
++}
++
+ pub struct PlatformTitleBar {
+     id: ElementId,
+     platform_style: PlatformStyle,
+diff --git a/crates/project_panel/src/project_panel.rs b/crates/project_panel/src/project_panel.rs
+index 52cd7bc9fcd0c661c7137f8dd8006dc10b381251..97dc8f4eaacc2eb30f93dcb889eb3dfbd7fcea34 100644
+--- a/crates/project_panel/src/project_panel.rs
++++ b/crates/project_panel/src/project_panel.rs
+@@ -6248,8 +6248,11 @@ impl ProjectPanel {
+                     .into_owned()
+             });
+ 
++        let row_height = workspace::panel_row_height(cx);
++
+         div()
+             .id(id.clone())
++            .when_some(row_height, |this, height| this.h(height))
+             .relative()
+             .group(GROUP_NAME)
+             .when_some(
+@@ -6626,6 +6629,7 @@ impl ProjectPanel {
+             )
+             .child(
+                 ListItem::new(id)
++                    .when(row_height.is_some(), |this| this.height(relative(1.)))
+                     .indent_level(depth)
+                     .indent_step_size(px(settings.indent_size))
+                     .spacing(match settings.entry_spacing {
+@@ -7446,6 +7450,7 @@ impl ProjectPanel {
+         // already checked if non empty above
+         let last_item_index = sticky_parents.len() - 1;
+         let marked_selections: Arc<[SelectedEntry]> = Arc::from(self.marked_entries.clone());
++        let shadow_enabled = ThemeSettings::get_global(cx).shadows.project_panel;
+         sticky_parents
+             .iter()
+             .enumerate()
+@@ -7474,7 +7479,7 @@ impl ProjectPanel {
+                     window,
+                     cx,
+                 )
+-                .when(index == last_item_index, |this| {
++                .when(index == last_item_index && shadow_enabled, |this| {
+                     let shadow_color_top = hsla(0.0, 0.0, 0.0, 0.1);
+                     let shadow_color_bottom = hsla(0.0, 0.0, 0.0, 0.);
+                     let sticky_shadow = div()
+diff --git a/crates/search/src/buffer_search.rs b/crates/search/src/buffer_search.rs
+index ff893cc107ab48536100aaf7f8cbf1f896efc29c..ea567d13a0ef1affb46b965fbfc6f767b4d7c646 100644
+--- a/crates/search/src/buffer_search.rs
++++ b/crates/search/src/buffer_search.rs
+@@ -6,9 +6,9 @@ use crate::{
+     ToggleCaseSensitive, ToggleRegex, ToggleReplace, ToggleSelection, ToggleWholeWord,
+     buffer_search::registrar::WithResultsOrExternalQuery,
+     search_bar::{
+-        ActionButtonState, HistoryNavigationDirection, alignment_element,
++        ActionButtonState, HistoryNavigationDirection, alignment_element, error_line,
+         filter_search_results_input, input_base_styles, render_local_action_button,
+-        render_text_input, should_navigate_history,
++        render_text_input, should_navigate_history, text_input_cell,
+     },
+ };
+ use any_vec::AnyVec;
+@@ -37,7 +37,7 @@ use zed_actions::{outline::ToggleOutline, workspace::CopyPath, workspace::CopyRe
+ use ui::{BASE_REM_SIZE_IN_PX, IconButtonShape, Tooltip, prelude::*, utils::SearchInputWidth};
+ use util::{ResultExt, paths::PathMatcher};
+ use workspace::{
+-    ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace,
++    Toolbar, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace,
+     item::{ItemBufferKind, ItemHandle},
+     searchable::{
+         Direction, FilteredSearchRange, SearchEvent, SearchToken, SearchableItemHandle,
+@@ -221,7 +221,7 @@ impl Render for BufferSearchBar {
+         let input_width = SearchInputWidth::calc_width(container_width);
+ 
+         let input_base_styles =
+-            |border_color| input_base_styles(border_color, |div| div.w(input_width));
++            |border_color| input_base_styles(border_color, |div| div.w(input_width), cx);
+ 
+         let input_style = if find_in_results {
+             filter_search_results_input(query_border, |div| div.w(input_width), cx)
+@@ -230,7 +230,7 @@ impl Render for BufferSearchBar {
+         };
+ 
+         let query_column = input_style
+-            .child(div().flex_1().min_w_0().py_1().child(render_text_input(
++            .child(text_input_cell(cx).min_w_0().child(render_text_input(
+                 &self.query_editor,
+                 color_override,
+                 cx,
+@@ -389,10 +389,7 @@ impl Render for BufferSearchBar {
+ 
+         let replace_line = should_show_replace_input.then(|| {
+             let replace_column = input_base_styles(replacement_border).child(
+-                div()
+-                    .flex_1()
+-                    .py_1()
+-                    .child(render_text_input(&self.replacement_editor, None, cx)),
++                text_input_cell(cx).child(render_text_input(&self.replacement_editor, None, cx)),
+             );
+             let focus_handle = self.replacement_editor.read(cx).focus_handle(cx);
+ 
+@@ -434,13 +431,7 @@ impl Render for BufferSearchBar {
+             key_context.add("in_replace");
+         }
+ 
+-        let query_error_line = self.query_error.as_ref().map(|error| {
+-            Label::new(error)
+-                .size(LabelSize::Small)
+-                .color(Color::Error)
+-                .mt_neg_1()
+-                .ml_2()
+-        });
++        let query_error_line = self.query_error.as_ref().map(|error| error_line(error, cx));
+ 
+         let search_line =
+             h_flex()
+@@ -471,7 +462,9 @@ impl Render for BufferSearchBar {
+ 
+         v_flex()
+             .id("buffer_search")
+-            .gap_2()
++            .when(Toolbar::compact_row_height(cx).is_none(), |this| {
++                this.gap_2()
++            })
+             .w_full()
+             .track_scroll(&self.scroll_handle)
+             .key_context(key_context)
+diff --git a/crates/search/src/project_search.rs b/crates/search/src/project_search.rs
+index 25202647fa76ad4cb827e925de05760a7450e5c8..7893a6313d579bc14a88088d98353c42a9d6d420 100644
+--- a/crates/search/src/project_search.rs
++++ b/crates/search/src/project_search.rs
+@@ -5,8 +5,9 @@ use crate::{
+     ToggleCaseSensitive, ToggleIncludeIgnored, ToggleRegex, ToggleReplace, ToggleWholeWord,
+     buffer_search::Deploy,
+     search_bar::{
+-        ActionButtonState, HistoryNavigationDirection, alignment_element, input_base_styles,
+-        render_local_action_button, render_text_input, should_navigate_history,
++        ActionButtonState, HistoryNavigationDirection, alignment_element, error_line,
++        input_base_styles, render_local_action_button, render_text_input, should_navigate_history,
++        text_input_cell,
+     },
+     text_finder::TextFinder,
+ };
+@@ -56,7 +57,7 @@ use ui::{
+ };
+ use util::{ResultExt as _, paths::PathMatcher};
+ use workspace::{
+-    DeploySearch, ItemNavHistory, NewSearch, ToolbarItemEvent, ToolbarItemLocation,
++    DeploySearch, ItemNavHistory, NewSearch, Toolbar, ToolbarItemEvent, ToolbarItemLocation,
+     ToolbarItemView, Workspace, WorkspaceId,
+     item::{Item, ItemBufferKind, ItemEvent, ItemHandle, SaveOptions},
+     searchable::{Direction, SearchEvent, SearchToken, SearchableItem, SearchableItemHandle},
+@@ -3047,10 +3048,14 @@ impl Render for ProjectSearchBar {
+         let input_width = SearchInputWidth::calc_width(container_width);
+ 
+         let input_base_styles = |panel: InputPanel| {
+-            input_base_styles(search.border_color_for(panel, cx), |div| match panel {
+-                InputPanel::Query | InputPanel::Replacement => div.w(input_width),
+-                InputPanel::Include | InputPanel::Exclude => div.flex_grow_1(),
+-            })
++            input_base_styles(
++                search.border_color_for(panel, cx),
++                |div| match panel {
++                    InputPanel::Query | InputPanel::Replacement => div.w(input_width),
++                    InputPanel::Include | InputPanel::Exclude => div.flex_grow_1(),
++                },
++                cx,
++            )
+         };
+         let theme_colors = cx.theme().colors();
+         let project_search = search.entity.read(cx);
+@@ -3099,7 +3104,7 @@ impl Render for ProjectSearchBar {
+             .on_action(
+                 cx.listener(|this, action, window, cx| this.next_history_query(action, window, cx)),
+             )
+-            .child(div().flex_1().py_1().child(render_text_input(
++            .child(text_input_cell(cx).child(render_text_input(
+                 &search.query_editor,
+                 color_override,
+                 cx,
+@@ -3268,11 +3273,7 @@ impl Render for ProjectSearchBar {
+ 
+         let replace_line = search.replace_enabled.then(|| {
+             let replace_column = input_base_styles(InputPanel::Replacement).child(
+-                div().flex_1().py_1().child(render_text_input(
+-                    &search.replacement_editor,
+-                    None,
+-                    cx,
+-                )),
++                text_input_cell(cx).child(render_text_input(&search.replacement_editor, None, cx)),
+             );
+ 
+             let focus_handle = search.replacement_editor.read(cx).focus_handle(cx);
+@@ -3370,28 +3371,18 @@ impl Render for ProjectSearchBar {
+         let query_error_line = search
+             .panels_with_errors
+             .get(&InputPanel::Query)
+-            .map(|error| {
+-                Label::new(error)
+-                    .size(LabelSize::Small)
+-                    .color(Color::Error)
+-                    .mt_neg_1()
+-                    .ml_2()
+-            });
++            .map(|error| error_line(error, cx));
+ 
+         let filter_error_line = search
+             .panels_with_errors
+             .get(&InputPanel::Include)
+             .or_else(|| search.panels_with_errors.get(&InputPanel::Exclude))
+-            .map(|error| {
+-                Label::new(error)
+-                    .size(LabelSize::Small)
+-                    .color(Color::Error)
+-                    .mt_neg_1()
+-                    .ml_2()
+-            });
++            .map(|error| error_line(error, cx));
+ 
+         v_flex()
+-            .gap_2()
++            .when(Toolbar::compact_row_height(cx).is_none(), |this| {
++                this.gap_2()
++            })
+             .w_full()
+             .key_context(key_context)
+             .on_action(cx.listener(|this, _: &ToggleFocus, window, cx| {
+diff --git a/crates/search/src/search_bar.rs b/crates/search/src/search_bar.rs
+index fb4c9de6494f703885583df0c02a44b932f52637..93b481c2250cb49bad71662cbbd1a1fd5afef566 100644
+--- a/crates/search/src/search_bar.rs
++++ b/crates/search/src/search_bar.rs
+@@ -6,6 +6,7 @@ use settings::Settings;
+ use theme_settings::ThemeSettings;
+ use ui::{IconButton, IconButtonShape};
+ use ui::{Tooltip, prelude::*};
++use workspace::Toolbar;
+ 
+ pub(super) enum HistoryNavigationDirection {
+     Previous,
+@@ -70,11 +71,39 @@ pub(super) fn render_local_action_button<T: 'static, A: Action>(
+     })
+ }
+ 
+-pub(crate) fn input_base_styles(border_color: Hsla, map: impl FnOnce(Div) -> Div) -> Div {
++/// Wraps a search editor. The vertical padding of stock rows does not fit a compact row, and
++/// the editor is centred in the row either way.
++pub(crate) fn text_input_cell(cx: &App) -> Div {
++    div()
++        .flex_1()
++        .when(Toolbar::compact_row_height(cx).is_none(), |this| {
++            this.py_1()
++        })
++}
++
++/// A search error shown under its input row. Stock tucks it 4px under the row (`mt_neg_1`
++/// against the stack's `gap_2`). A compact stack has no gap, so there the message gets a row of
++/// its own, as tall as the input rows, with the text centred in it.
++pub(crate) fn error_line(message: impl Into<SharedString>, cx: &App) -> AnyElement {
++    let label = Label::new(message)
++        .size(LabelSize::Small)
++        .color(Color::Error)
++        .ml_2();
++    match Toolbar::compact_row_height(cx) {
++        Some(_) => v_flex()
++            .min_h(Toolbar::row_height(cx))
++            .justify_center()
++            .child(label)
++            .into_any_element(),
++        None => label.mt_neg_1().into_any_element(),
++    }
++}
++
++pub(crate) fn input_base_styles(border_color: Hsla, map: impl FnOnce(Div) -> Div, cx: &App) -> Div {
+     h_flex()
+         .map(map)
+         .min_w_32()
+-        .min_h_8()
++        .min_h(Toolbar::row_height(cx))
+         .pl_2()
+         .pr_1()
+         .border_1()
+@@ -86,7 +115,7 @@ pub(crate) fn filter_search_results_input(
+     map: impl FnOnce(Div) -> Div,
+     cx: &App,
+ ) -> Div {
+-    input_base_styles(border_color, map).pl_0().child(
++    input_base_styles(border_color, map, cx).pl_0().child(
+         h_flex()
+             .mr_2()
+             .px_2()
+diff --git a/crates/settings/src/vscode_import.rs b/crates/settings/src/vscode_import.rs
+index 60dece06bd5fcfd7bb66409a648989fdc52a664f..b92bc0cc3a28666ef90bd32cb91f633d58c65be1 100644
+--- a/crates/settings/src/vscode_import.rs
++++ b/crates/settings/src/vscode_import.rs
+@@ -804,6 +804,8 @@ impl VsCodeSettings {
+                         ShowCloseButton::Hidden
+                     }
+                 }),
++            min_width: None,
++            max_width: None,
+         })
+     }
+ 
+@@ -833,6 +835,9 @@ impl VsCodeSettings {
+                 .read_str("workbench.editor.editorActionsLocation")
+                 .and_then(|str| if str == "hidden" { Some(false) } else { None }),
+             show_pinned_tabs_in_separate_row: None,
++            pinned_tab_chips: None,
++            unpinned_tab_chips: None,
++            max_tab_rows: None,
+         })
+     }
+ 
+@@ -1042,7 +1047,9 @@ impl VsCodeSettings {
+             mermaid_font_family: None,
+             theme: None,
+             icon_theme: None,
++            panel_rows_tab_height: None,
+             ui_density: None,
++            shadows: None,
+             unnecessary_code_fade: None,
+             experimental_theme_overrides: None,
+             theme_overrides: Default::default(),
+@@ -1099,6 +1106,7 @@ impl VsCodeSettings {
+             reveal_if_open: self.read_bool("workbench.editor.revealIfOpen"),
+             restore_on_startup: None,
+             window_decorations: None,
++            title_bar_to_status_bar: None,
+             show_call_status_icon: None,
+             use_system_path_prompts: self.read_bool("files.simpleDialog.enable").map(|b| !b),
+             use_system_prompts: None,
+diff --git a/crates/settings_content/src/agent.rs b/crates/settings_content/src/agent.rs
+index 7a966494de67d98c99051aef3e28d0ad434c48b5..6519343b36b794067ac4dd571257977363dae3ae 100644
+--- a/crates/settings_content/src/agent.rs
++++ b/crates/settings_content/src/agent.rs
+@@ -51,12 +51,17 @@ pub struct ThreadsSidebarSettingsContent {
+     pub position: Option<SidebarDockPosition>,
+     /// Default width of the threads sidebar in pixels.
+     ///
+-    /// Values range from 200 to 800, matching the widths the sidebar can be
++    /// Values range from 100 to 800, matching the widths the sidebar can be
+     /// dragged to. Values outside that range are clamped into it.
+     ///
+     /// Default: 300
+-    #[schemars(range(min = 200, max = 800))]
++    #[schemars(range(min = 100, max = 800))]
+     pub default_width: Option<crate::PixelSetting>,
++    /// Whether to show each thread on a single line at the height of the tab bar, with its
++    /// details on hover.
++    ///
++    /// Default: false
++    pub compact: Option<bool>,
+ }
+ 
+ #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+diff --git a/crates/settings_content/src/editor.rs b/crates/settings_content/src/editor.rs
+index b3822991ede0396af5401da50f31c34db2922e8c..9d59c731373cacd576210bc6599274e5874bf273 100644
+--- a/crates/settings_content/src/editor.rs
++++ b/crates/settings_content/src/editor.rs
+@@ -400,6 +400,10 @@ pub struct ToolbarContent {
+     ///
+     /// Default: false
+     pub code_actions: Option<bool>,
++    /// Whether to shrink the pane toolbar to the height of the tab bar.
++    ///
++    /// Default: false
++    pub compact: Option<bool>,
+ }
+ 
+ /// Scrollbar related settings
+diff --git a/crates/settings_content/src/theme.rs b/crates/settings_content/src/theme.rs
+index 0b2b7106091ea01e5de8cb2635d3bc5178491a4e..1ae62495c013bf95412d55459c421d8cefaed961 100644
+--- a/crates/settings_content/src/theme.rs
++++ b/crates/settings_content/src/theme.rs
+@@ -221,6 +221,10 @@ pub struct ThemeSettingsContent {
+     pub theme: Option<ThemeSelection>,
+     /// The name of the icon theme to use.
+     pub icon_theme: Option<IconThemeSelection>,
++    /// Whether rows in the project, git and outline panels take the tab bar height.
++    ///
++    /// Default: false
++    pub panel_rows_tab_height: Option<bool>,
+ 
+     /// UNSTABLE: Expect many elements to be broken.
+     ///
+@@ -228,6 +232,9 @@ pub struct ThemeSettingsContent {
+     #[serde(rename = "unstable.ui_density")]
+     pub ui_density: Option<UiDensity>,
+ 
++    /// Which UI shadows to paint.
++    pub shadows: Option<ShadowsContent>,
++
+     /// How much to fade out unused code.
+     #[schemars(range(min = 0.0, max = 0.9))]
+     pub unnecessary_code_fade: Option<CodeFade>,
+@@ -245,6 +252,20 @@ pub struct ThemeSettingsContent {
+     pub theme_overrides: HashMap<String, ThemeStyleContent>,
+ }
+ 
++/// Toggles for individual UI shadows.
++#[with_fallible_options]
++#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
++pub struct ShadowsContent {
++    /// Whether to paint the shadow under the sticky folder rows of the project panel.
++    ///
++    /// Default: true
++    pub project_panel: Option<bool>,
++    /// Whether to paint the shadow around the minimap.
++    ///
++    /// Default: true
++    pub minimap: Option<bool>,
++}
++
+ /// A font size value in pixels, wrapping around `f32` for custom settings UI rendering.
+ #[derive(
+     Clone,
+diff --git a/crates/settings_content/src/workspace.rs b/crates/settings_content/src/workspace.rs
+index ff17532f57d6be3d841c624943e06c09bbe19888..e3ff5c16b3349425cdbf70484f9d6a93c8c7882d 100644
+--- a/crates/settings_content/src/workspace.rs
++++ b/crates/settings_content/src/workspace.rs
+@@ -173,6 +173,11 @@ pub struct WorkspaceSettingsContent {
+     ///
+     /// Default: client
+     pub window_decorations: Option<WindowDecorations>,
++    /// Whether to hide the title bar and show its contents in the status bar instead (macOS only).
++    /// Other platforms draw their window controls in the title bar, so they ignore this setting.
++    ///
++    /// Default: false
++    pub title_bar_to_status_bar: Option<bool>,
+     /// Whether the focused panel follows the mouse location
+     /// Default: false
+     pub focus_follows_mouse: Option<FocusFollowsMouse>,
+@@ -206,6 +211,15 @@ pub struct ItemSettingsContent {
+     ///
+     /// Default: hover
+     pub show_close_button: Option<ShowCloseButton>,
++    /// Minimum width of a tab in pixels. `null` keeps tabs as wide as their title.
++    ///
++    /// Default: null
++    pub min_width: Option<crate::PixelSetting>,
++    /// Maximum width of a tab in pixels. Longer titles are truncated in the middle.
++    /// `null` keeps tabs as wide as their title.
++    ///
++    /// Default: null
++    pub max_width: Option<crate::PixelSetting>,
+ }
+ 
+ #[with_fallible_options]
+@@ -555,6 +569,18 @@ pub struct TabBarSettingsContent {
+     ///
+     /// Default: false
+     pub show_pinned_tabs_in_separate_row: Option<bool>,
++    /// Whether to render pinned tabs as compact borderless chips.
++    ///
++    /// Default: false
++    pub pinned_tab_chips: Option<bool>,
++    /// Whether to render unpinned tabs as compact borderless chips.
++    ///
++    /// Default: false
++    pub unpinned_tab_chips: Option<bool>,
++    /// Maximum number of rows for unpinned tabs when both `tabs.min_width` and `tabs.max_width` are set.
++    ///
++    /// Default: 1
++    pub max_tab_rows: Option<u32>,
+ }
+ 
+ #[with_fallible_options]
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index da0dc357306d73843bafe0d62382332c56cf3545..a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -39,11 +39,13 @@ use menu::{
+     Cancel, Confirm, SelectChild, SelectFirst, SelectLast, SelectNext, SelectParent, SelectPrevious,
+ };
+ use notifications::status_toast::StatusToast;
+-use platform_title_bar::{SidebarWindowControls, TitleBarSettings, apply_title_bar_insets};
++use platform_title_bar::{
++    SidebarWindowControls, TitleBarSettings, apply_title_bar_insets, sidebar_header_height,
++    traffic_light_drag_area,
++};
+ use project::{AgentId, AgentRegistryStore, Event as ProjectEvent, WorktreeId};
+ use recent_projects::sidebar_recent_projects::SidebarRecentProjects;
+ use remote::RemoteConnectionOptions;
+-use ui::utils::platform_title_bar_height;
+ 
+ use serde::{Deserialize, Serialize};
+ use settings::{Settings as _, SettingsStore};
+@@ -2407,7 +2409,13 @@ impl Sidebar {
+             .group(&group_name)
+             .when(!has_filter, |this| this.cursor_pointer())
+             .relative()
+-            .h(Tab::content_height(cx))
++            // Every header but the first also gets 1px from its separator wrapper (or the sticky
++            // copy's bottom border), so only the first one has to supply the full tab height.
++            .h(if Self::is_compact(cx) && !is_sticky && ix == 0 {
++                Tab::container_height(cx)
++            } else {
++                Tab::content_height(cx)
++            })
+             .w_full()
+             .pl_2()
+             .pr_1p5()
+@@ -2538,15 +2546,16 @@ impl Sidebar {
+             .block_mouse_except_scroll();
+ 
+         if !is_collapsed && !has_threads {
++            let compact = Self::is_compact(cx);
+             v_flex()
+                 .w_full()
+                 .child(header)
+                 .child(
+                     h_flex()
+                         .px_2()
+-                        .pt_1()
+-                        .pb_2()
+                         .gap(px(7.))
++                        .when(compact, |this| this.h(Tab::container_height(cx)))
++                        .when(!compact, |this| this.pt_1().pb_2())
+                         .child(Icon::new(IconName::Circle).size(IconSize::Small).color(
+                             Color::Custom(cx.theme().colors().icon_placeholder.opacity(0.1)),
+                         ))
+@@ -3434,6 +3443,10 @@ impl Sidebar {
+         !self.filter_editor.read(cx).text(cx).is_empty()
+     }
+ 
++    fn is_compact(cx: &App) -> bool {
++        AgentSettings::get_global(cx).threads_sidebar.compact
++    }
++
+     fn start_renaming_entry(
+         &mut self,
+         ix: usize,
+@@ -6304,6 +6317,7 @@ impl Sidebar {
+ 
+         let thread_item = ThreadItem::new(id, title.clone())
+             .base_bg(sidebar_bg)
++            .compact(Self::is_compact(cx))
+             .icon(icon)
+             .when(is_draft, |this| {
+                 this.icon_color(Color::Custom(cx.theme().colors().icon_muted.opacity(0.2)))
+@@ -6633,6 +6647,7 @@ impl Sidebar {
+ 
+         let terminal_item = ThreadItem::new(id, title)
+             .base_bg(sidebar_bg)
++            .compact(Self::is_compact(cx))
+             .icon(IconName::Terminal)
+             .when_some(icon_char, |this, icon_char| this.icon_char(icon_char))
+             .is_remote(is_remote)
+@@ -7371,21 +7386,19 @@ impl Sidebar {
+     fn render_sidebar_header(
+         &self,
+         no_open_projects: bool,
+-        window: &Window,
++        window: &mut Window,
+         cx: &mut Context<Self>,
+     ) -> impl IntoElement {
+         let has_query = self.has_filter_query(cx);
++        let compact = Self::is_compact(cx);
+         let SidebarWindowControls {
+             traffic_lights,
+             left: left_window_controls,
+             right: right_window_controls,
+         } = SidebarWindowControls::new(self.side(cx), window, cx);
+         let title_bar_visible = TitleBarSettings::is_title_bar_visible(window, cx);
+-        let header_height = if title_bar_visible {
+-            platform_title_bar_height(window)
+-        } else {
+-            Tab::container_height(cx)
+-        };
++        let in_status_bar = workspace::title_bar_in_status_bar(cx);
++        let header_height = sidebar_header_height(window, cx);
+ 
+         h_flex()
+             .debug_selector(|| "sidebar-header".into())
+@@ -7402,6 +7415,7 @@ impl Sidebar {
+                         right_window_controls,
+                         no_open_projects,
+                     ),
++                    Decorations::Server if in_status_bar => header,
+                     Decorations::Server => header.mt_px().pb_px(),
+                 }
+             })
+@@ -7417,24 +7431,29 @@ impl Sidebar {
+                     this
+                 }
+             })
++            .when(traffic_lights && in_status_bar, |this| {
++                this.child(traffic_light_drag_area(window, cx))
++            })
+             .when(!right_window_controls, |this| this.pr_1p5())
+             .gap_1()
+             .when(!no_open_projects, |this| {
+                 this.border_b_1()
+                     .border_color(cx.theme().colors().border)
+-                    .when(traffic_lights, |this| {
++                    .when(traffic_lights && !compact, |this| {
+                         this.child(Divider::vertical().color(ui::DividerColor::Border))
+                     })
+-                    .child(
+-                        div()
+-                            .debug_selector(|| "sidebar-header-search".into())
+-                            .ml_1()
+-                            .child(
+-                                Icon::new(IconName::MagnifyingGlass)
+-                                    .size(IconSize::Small)
+-                                    .color(Color::Muted),
+-                            ),
+-                    )
++                    .when(!compact, |this| {
++                        this.child(
++                            div()
++                                .debug_selector(|| "sidebar-header-search".into())
++                                .ml_1()
++                                .child(
++                                    Icon::new(IconName::MagnifyingGlass)
++                                        .size(IconSize::Small)
++                                        .color(Color::Muted),
++                                ),
++                        )
++                    })
+                     .child(self.render_filter_input(cx))
+                     .child(
+                         h_flex()
+@@ -7444,7 +7463,7 @@ impl Sidebar {
+                                     && !self.filter_editor.focus_handle(cx).is_focused(window),
+                                 |this| this.child(KeyBinding::for_action(&FocusSidebarFilter, cx)),
+                             )
+-                            .when(has_query, |this| {
++                            .when(has_query && !compact, |this| {
+                                 this.child(
+                                     IconButton::new("clear_filter", IconName::Close)
+                                         .icon_size(IconSize::Small)
+diff --git a/crates/terminal_view/src/terminal_view.rs b/crates/terminal_view/src/terminal_view.rs
+index cc121674c161dc24c3b3de5517d0e75f2d55edc7..3b862dbc40600e814622096413981238bc0c5ab0 100644
+--- a/crates/terminal_view/src/terminal_view.rs
++++ b/crates/terminal_view/src/terminal_view.rs
+@@ -53,7 +53,8 @@ use workspace::{
+     CloseActiveItem, DraggedSelection, DraggedTab, NewCenterTerminal, NewTerminal, Pane,
+     ToolbarItemLocation, Workspace, WorkspaceId, delete_unloaded_items,
+     item::{
+-        HighlightedText, Item, ItemEvent, SerializableItem, TabContentParams, TabTooltipContent,
++        HighlightedText, Item, ItemEvent, ItemSettings, SerializableItem, TabContentParams,
++        TabTooltipContent,
+     },
+     register_serializable_item,
+     searchable::{
+@@ -1643,10 +1644,17 @@ impl Item for TerminalView {
+             None => (IconName::Terminal, Color::Muted, None),
+         };
+ 
++        // The tab switcher always asks for middle truncation; terminal titles only follow it
++        // when a maximum tab width is configured, so the default layout is unchanged.
++        let truncate_title_middle =
++            params.truncate_title_middle && ItemSettings::get_global(cx).max_width.is_some();
+         let self_handle = self.self_handle.clone();
+         h_flex()
+             .gap_1()
+             .group("term-tab-icon")
++            .when(truncate_title_middle, |this| {
++                this.w_full().min_w_0().overflow_hidden()
++            })
+             .when(!params.selected, |this| {
+                 this.track_focus(&self.focus_handle)
+             })
+@@ -1677,10 +1685,12 @@ impl Item for TerminalView {
+             .child(
+                 div()
+                     .relative()
++                    .when(truncate_title_middle, |this| this.flex_1().min_w_0())
+                     .child(
+                         Label::new(title)
+                             .single_line()
+                             .color(params.text_color())
++                            .when(truncate_title_middle, |this| this.truncate_middle())
+                             .when(self.is_renaming(), |this| this.alpha(0.)),
+                     )
+                     .when_some(self.rename_editor.clone(), |this, editor| {
+diff --git a/crates/theme_settings/src/settings.rs b/crates/theme_settings/src/settings.rs
+index 0a587340f5b7cb3473b6a4fecaf92c3ae7f0a5aa..43a4414794ed0872001a4067427793877caec892 100644
+--- a/crates/theme_settings/src/settings.rs
++++ b/crates/theme_settings/src/settings.rs
+@@ -96,13 +96,26 @@ pub struct ThemeSettings {
+     pub theme_overrides: HashMap<String, settings::ThemeStyleContent>,
+     /// The current icon theme selection.
+     pub icon_theme: IconThemeSelection,
++    /// Whether rows in the project, git and outline panels take the tab bar height.
++    pub panel_rows_tab_height: bool,
+     /// The density of the UI.
+     /// Note: This setting is still experimental. See [this tracking issue](
+     pub ui_density: UiDensity,
++    /// Which UI shadows to paint.
++    pub shadows: ShadowSettings,
+     /// The amount of fading applied to unnecessary code.
+     pub unnecessary_code_fade: f32,
+ }
+ 
++/// Toggles for individual UI shadows.
++#[derive(Debug, Clone, Copy, PartialEq)]
++pub struct ShadowSettings {
++    /// Whether to paint the shadow under the sticky folder rows of the project panel.
++    pub project_panel: bool,
++    /// Whether to paint the shadow around the minimap.
++    pub minimap: bool,
++}
++
+ /// Returns the name of the default theme for the given [`Appearance`].
+ pub fn default_theme(appearance: Appearance) -> &'static str {
+     match appearance {
+@@ -725,6 +738,7 @@ impl settings::Settings for ThemeSettings {
+         let markdown_preview = settings_content.markdown_preview.as_ref();
+         let theme_selection: ThemeSelection = content.theme.clone().unwrap().into();
+         let icon_theme_selection: IconThemeSelection = content.icon_theme.clone().unwrap().into();
++        let shadows = content.shadows.as_ref();
+         Self {
+             ui_font_size: clamp_font_size(content.ui_font_size.unwrap().into_gpui()),
+             ui_font: Font {
+@@ -786,7 +800,14 @@ impl settings::Settings for ThemeSettings {
+             experimental_theme_overrides: content.experimental_theme_overrides.clone(),
+             theme_overrides: content.theme_overrides.clone(),
+             icon_theme: icon_theme_selection,
++            panel_rows_tab_height: content.panel_rows_tab_height.unwrap_or(false),
+             ui_density: ui_density_from_settings(content.ui_density.unwrap_or_default()),
++            shadows: ShadowSettings {
++                project_panel: shadows
++                    .and_then(|shadows| shadows.project_panel)
++                    .unwrap_or(true),
++                minimap: shadows.and_then(|shadows| shadows.minimap).unwrap_or(true),
++            },
+             unnecessary_code_fade: content.unnecessary_code_fade.unwrap().0.clamp(0.0, 0.9),
+         }
+     }
+@@ -796,6 +817,19 @@ impl settings::Settings for ThemeSettings {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn test_theme_settings_defaults_when_fields_none() {
++        let mut raw: ::settings::SettingsContent =
++            ::settings::parse_json_with_comments(&::settings::default_settings()).unwrap();
++        raw.theme.shadows = None;
++        raw.theme.panel_rows_tab_height = None;
++
++        let settings = ThemeSettings::from_settings(&raw);
++        assert!(!settings.panel_rows_tab_height);
++        assert!(settings.shadows.project_panel);
++        assert!(settings.shadows.minimap);
++    }
++
+     fn theme_with_colors(colors: ::settings::ThemeColorsContent) -> Theme {
+         crate::refine_theme(&crate::ThemeContent {
+             name: "Test".into(),
+diff --git a/crates/theme_settings/src/theme_settings.rs b/crates/theme_settings/src/theme_settings.rs
+index c18212c597fbf07ce81bbfaf9c96221da37ebe1b..33c88067a0e75b76e9e82b3c7f000b9f4ef07f1e 100644
+--- a/crates/theme_settings/src/theme_settings.rs
++++ b/crates/theme_settings/src/theme_settings.rs
+@@ -30,8 +30,8 @@ use crate::settings::adjust_buffer_font_size;
+ pub use crate::settings::{
+     AgentBufferFontSize, AgentUiFontSize, BufferLineHeight, FontFamilyName,
+     GitCommitBufferFontSize, IconThemeName, IconThemeSelection, MarkdownPreviewFontSize,
+-    ThemeAppearanceMode, ThemeName, ThemeSelection, ThemeSettings, adjust_agent_buffer_font_size,
+-    adjust_agent_ui_font_size, adjust_git_commit_buffer_font_size,
++    ShadowSettings, ThemeAppearanceMode, ThemeName, ThemeSelection, ThemeSettings,
++    adjust_agent_buffer_font_size, adjust_agent_ui_font_size, adjust_git_commit_buffer_font_size,
+     adjust_markdown_preview_font_size, adjust_ui_font_size, adjusted_font_size, appearance_to_mode,
+     buffer_line_height_from_settings, clamp_font_size, default_theme,
+     observe_buffer_font_size_adjustment, reset_agent_buffer_font_size, reset_agent_ui_font_size,
+diff --git a/crates/title_bar/src/title_bar.rs b/crates/title_bar/src/title_bar.rs
+index ba50023f1bbba43be3fcc834b40808a53c588fce..73cabd31c498a3c63a7e7a534f2908b2e925c445 100644
+--- a/crates/title_bar/src/title_bar.rs
++++ b/crates/title_bar/src/title_bar.rs
+@@ -54,6 +54,7 @@ use util::ResultExt;
+ use workspace::{
+     AccessibleMode, MultiWorkspace, ToggleWorktreeSecurity, Workspace,
+     notifications::{NotifyResultExt, NotifyTaskExt as _},
++    title_bar_in_status_bar,
+ };
+ 
+ use zed_actions::OpenRemote;
+@@ -218,6 +219,15 @@ fn set_window_layout(layout: WindowLayout, cx: &App) {
+     drop(AgentSettings::set_layout(layout, fs, cx));
+ }
+ 
++/// The status bar is at the bottom of the window, so popovers open upward from it.
++fn popover_anchor(anchor: Anchor, cx: &App) -> Anchor {
++    if title_bar_in_status_bar(cx) {
++        anchor.other_side_along(gpui::Axis::Vertical)
++    } else {
++        anchor
++    }
++}
++
+ pub struct TitleBar {
+     platform_titlebar: Entity<PlatformTitleBar>,
+     project: Entity<Project>,
+@@ -420,6 +430,18 @@ impl Render for TitleBar {
+                 .into_any_element(),
+         );
+ 
++        if title_bar_in_status_bar(cx) {
++            // In the status bar, the platform title bar (window controls, drag area) has no place.
++            return h_flex()
++                .w_full()
++                .justify_between()
++                .when(show_menus, |this| {
++                    this.children(self.application_menu.clone())
++                })
++                .children(children)
++                .into_any_element();
++        }
++
+         if show_menus {
+             self.platform_titlebar.update(cx, |this, _| {
+                 this.set_button_layout(button_layout);
+@@ -706,7 +728,7 @@ impl TitleBar {
+                         )
+                     },
+                 )
+-                .anchor(gpui::Anchor::TopLeft)
++                .anchor(popover_anchor(Anchor::TopLeft, cx))
+                 .into_any_element(),
+         )
+     }
+@@ -880,7 +902,7 @@ impl TitleBar {
+                     Tooltip::for_action("Recent Projects", &zed_actions::OpenRecent::default(), cx)
+                 },
+             )
+-            .anchor(gpui::Anchor::TopLeft)
++            .anchor(popover_anchor(Anchor::TopLeft, cx))
+             .into_any_element()
+     }
+ 
+@@ -932,7 +954,7 @@ impl TitleBar {
+                     Tooltip::for_action("Recent Projects", &zed_actions::OpenRecent::default(), cx)
+                 },
+             )
+-            .anchor(gpui::Anchor::TopLeft)
++            .anchor(popover_anchor(Anchor::TopLeft, cx))
+     }
+ 
+     fn render_worktree_and_branch(
+@@ -1038,7 +1060,7 @@ impl TitleBar {
+                         )
+                     },
+                 )
+-                .anchor(gpui::Anchor::TopLeft)
++                .anchor(popover_anchor(Anchor::TopLeft, cx))
+         });
+ 
+         let branch_picker = branch_name.and_then(|branch_name| {
+@@ -1095,7 +1117,7 @@ impl TitleBar {
+                             cx,
+                         )
+                     })
+-                    .anchor(gpui::Anchor::TopLeft)
++                    .anchor(popover_anchor(Anchor::TopLeft, cx))
+             })
+         });
+ 
+@@ -1444,7 +1466,7 @@ impl TitleBar {
+                 })
+                 .into()
+             })
+-            .anchor(Anchor::TopRight)
++            .anchor(popover_anchor(Anchor::TopRight, cx))
+     }
+ }
+ 
+diff --git a/crates/ui/src/components/ai/thread_item.rs b/crates/ui/src/components/ai/thread_item.rs
+index 3df79d9fbf47c653b7a9f62c6d0e7acee06ecf63..8a9dcbcf0dd737007092ed9be0f5d5ee67811ded 100644
+--- a/crates/ui/src/components/ai/thread_item.rs
++++ b/crates/ui/src/components/ai/thread_item.rs
+@@ -65,6 +65,7 @@ pub struct ThreadItem {
+     on_hover: Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>,
+     action_slot: Option<AnyElement>,
+     base_bg: Option<Hsla>,
++    compact: bool,
+ }
+ 
+ impl ThreadItem {
+@@ -100,6 +101,7 @@ impl ThreadItem {
+             on_hover: Box::new(|_, _, _| {}),
+             action_slot: None,
+             base_bg: None,
++            compact: false,
+         }
+     }
+ 
+@@ -247,10 +249,18 @@ impl ThreadItem {
+         self.base_bg = Some(color);
+         self
+     }
++
++    /// Renders a single line at the height of the tab bar; the metadata appears on hover.
++    pub fn compact(mut self, compact: bool) -> Self {
++        self.compact = compact;
++        self
++    }
+ }
+ 
+ impl RenderOnce for ThreadItem {
+     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
++        let compact = self.compact;
++        let hovered = self.hovered;
+         let color = cx.theme().colors();
+         let raw_bg = self.base_bg.unwrap_or(color.surface_background);
+         // The fade gradient paints a solid color over the title to blend it into
+@@ -426,6 +436,35 @@ impl RenderOnce for ThreadItem {
+             || has_worktree
+             || has_diff_stats
+             || has_timestamp;
++        // A compact row has room for one line: on hover it trades the always visible title
++        // for the metadata a regular row shows on its second line.
++        let show_title = !(compact && hovered && has_metadata);
++
++        let action_slot = self.action_slot.filter(|_| hovered).map(|slot| {
++            h_flex()
++                .relative()
++                // In compact mode the metadata sits right before the actions; the fade would hide it.
++                .when(opaque_window && !compact, |this| {
++                    this.child(
++                        GradientFade::new(base_bg, hover_bg, active_bg)
++                            .width(px(120.0))
++                            .right(px(8.))
++                            .gradient_stop(0.90)
++                            .group_name("thread-item"),
++                    )
++                })
++                .child(
++                    h_flex()
++                        .pr_1p5()
++                        .child(slot)
++                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
++                )
++        });
++        let (title_row_action_slot, trailing_action_slot) = if compact {
++            (None, action_slot.map(|slot| slot.flex_none()))
++        } else {
++            (action_slot, None)
++        };
+ 
+         v_flex()
+             .id(self.id.clone())
+@@ -435,8 +474,17 @@ impl RenderOnce for ThreadItem {
+             .flex_shrink_0()
+             .overflow_hidden()
+             .w_full()
+-            .py_1()
+             .px_1p5()
++            .map(|this| {
++                if compact {
++                    this.flex_row()
++                        .items_center()
++                        .gap_2()
++                        .h(crate::Tab::container_height(cx))
++                } else {
++                    this.py_1()
++                }
++            })
+             .when(self.selected, |s| s.bg(color.ghost_element_selected))
+             .border_1()
+             .border_r_2()
+@@ -450,6 +498,13 @@ impl RenderOnce for ThreadItem {
+                 h_flex()
+                     .min_w_0()
+                     .w_full()
++                    .when(compact, |this| {
++                        if show_title {
++                            this.w_auto().flex_auto().relative()
++                        } else {
++                            this.w_auto().flex_none()
++                        }
++                    })
+                     .h_6()
+                     .gap_2()
+                     .justify_between()
+@@ -458,44 +513,22 @@ impl RenderOnce for ThreadItem {
+                             .id("content")
+                             .min_w_0()
+                             .flex_1()
++                            .when(compact, |this| this.overflow_hidden())
+                             .gap_1p5()
+                             .child(icon)
+-                            .child(title_label),
++                            .when(show_title, |this| this.child(title_label)),
+                     )
+-                    .when(self.is_truncated && opaque_window, |this| {
++                    .when(self.is_truncated && opaque_window && show_title, |this| {
+                         this.child(gradient_overlay)
+                     })
+-                    .when(self.hovered, |this| {
+-                        this.when_some(self.action_slot, |this, slot| {
+-                            this.child(
+-                                h_flex()
+-                                    .relative()
+-                                    .when(opaque_window, |this| {
+-                                        this.child(
+-                                            GradientFade::new(base_bg, hover_bg, active_bg)
+-                                                .width(px(120.0))
+-                                                .right(px(8.))
+-                                                .gradient_stop(0.90)
+-                                                .group_name("thread-item"),
+-                                        )
+-                                    })
+-                                    .child(
+-                                        h_flex()
+-                                            .pr_1p5()
+-                                            .child(slot)
+-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+-                                                cx.stop_propagation()
+-                                            }),
+-                                    ),
+-                            )
+-                        })
+-                    }),
++                    .children(title_row_action_slot),
+             )
+-            .when(has_metadata, |this| {
++            .when(has_metadata && (!compact || hovered), |this| {
+                 this.child(
+                     h_flex()
+                         .gap_1p5()
+-                        .child(icon_container()) // Icon Spacing
++                        .when(compact, |this| this.flex_1().min_w_0().overflow_hidden())
++                        .when(!compact, |this| this.child(icon_container())) // Icon Spacing
+                         .when(self.archived, |this| {
+                             this.child(
+                                 Icon::new(IconName::Archive).size(IconSize::XSmall).color(
+@@ -614,6 +647,7 @@ impl RenderOnce for ThreadItem {
+                         }),
+                 )
+             })
++            .children(trailing_action_slot)
+             .when(show_tooltip, |this| {
+                 let status = self.status;
+                 this.tooltip(Tooltip::element(move |_, _| match status {
+diff --git a/crates/ui/src/components/tab.rs b/crates/ui/src/components/tab.rs
+index 6a25ad4345752c223f29c0111913303adfe550e9..8b197a91d145a07462bcf497581b5fcc00dcb0c8 100644
+--- a/crates/ui/src/components/tab.rs
++++ b/crates/ui/src/components/tab.rs
+@@ -38,6 +38,8 @@ pub struct Tab {
+     start_slot: Option<AnyElement>,
+     end_slot: Option<AnyElement>,
+     children: SmallVec<[AnyElement; 2]>,
++    chip: bool,
++    has_max_width: bool,
+ }
+ 
+ impl Tab {
+@@ -53,9 +55,17 @@ impl Tab {
+             start_slot: None,
+             end_slot: None,
+             children: SmallVec::new(),
++            chip: false,
++            has_max_width: false,
+         }
+     }
+ 
++    /// Renders the tab as a compact borderless chip that hugs its content.
++    pub fn chip(mut self, chip: bool) -> Self {
++        self.chip = chip;
++        self
++    }
++
+     pub fn position(mut self, position: TabPosition) -> Self {
+         self.position = position;
+         self
+@@ -83,6 +93,23 @@ impl Tab {
+     pub fn container_height(cx: &App) -> Pixels {
+         DynamicSpacing::Base32.px(cx)
+     }
++
++    pub fn min_width(mut self, width: Option<Pixels>) -> Self {
++        if let Some(width) = width {
++            self.div = self.div.min_w(width);
++        }
++        self
++    }
++
++    pub fn max_width(mut self, width: Option<Pixels>) -> Self {
++        if let Some(width) = width {
++            // Clips the title at the bound; `has_max_width` keeps the slots at full size so
++            // that only the title shrinks.
++            self.div = self.div.max_w(width).overflow_hidden();
++            self.has_max_width = true;
++        }
++        self
++    }
+ }
+ 
+ impl InteractiveElement for Tab {
+@@ -124,14 +151,17 @@ impl RenderOnce for Tab {
+             ),
+         };
+ 
++        let keep_slot_size = self.chip || self.has_max_width;
+         let (start_slot, end_slot) = {
+             let start_slot = h_flex()
+                 .size(START_TAB_SLOT_SIZE)
++                .when(keep_slot_size, |this| this.flex_shrink_0())
+                 .justify_center()
+                 .children(self.start_slot);
+ 
+             let end_slot = h_flex()
+                 .size(END_TAB_SLOT_SIZE)
++                .when(keep_slot_size, |this| this.flex_shrink_0())
+                 .justify_center()
+                 .children(self.end_slot);
+ 
+@@ -141,6 +171,45 @@ impl RenderOnce for Tab {
+             }
+         };
+ 
++        if self.chip {
++            let selected_bg = cx.theme().colors().element_selected;
++            let hover_bg = cx.theme().colors().element_hover;
++            return self
++                .div
++                .h(Tab::container_height(cx))
++                // Leaves the bottom line out of the centring, like regular tabs and the toolbar.
++                .pb_px()
++                .flex()
++                .items_center()
++                .px(DynamicSpacing::Base02.px(cx))
++                .cursor_pointer()
++                .child(
++                    h_flex()
++                        // Without an id the hover style gets no element state, so hovering does
++                        // not repaint and the highlight waits for an unrelated redraw.
++                        .id("chip")
++                        .group("")
++                        .relative()
++                        .min_w_0()
++                        .flex_grow(1.)
++                        .h(crate::ButtonSize::Default.rems())
++                        .px(DynamicSpacing::Base04.px(cx))
++                        .gap(DynamicSpacing::Base04.rems(cx))
++                        .rounded_sm()
++                        .text_color(text_color)
++                        .map(|this| {
++                            if self.selected {
++                                this.bg(selected_bg)
++                            } else {
++                                this.hover(move |style| style.bg(hover_bg))
++                            }
++                        })
++                        .child(start_slot)
++                        .children(self.children)
++                        .child(end_slot),
++                );
++        }
++
+         self.div
+             .h(Tab::container_height(cx))
+             .bg(tab_bg)
+diff --git a/crates/ui/src/components/tab_bar.rs b/crates/ui/src/components/tab_bar.rs
+index 524f880398b9af1e088ed06271b018902cdcdbf1..2d3199db9d24043f8bb1b4475d752114f859c503 100644
+--- a/crates/ui/src/components/tab_bar.rs
++++ b/crates/ui/src/components/tab_bar.rs
+@@ -1,9 +1,131 @@
++use std::ops::Range;
++
+ use gpui::{AnyElement, ScrollHandle};
+ use smallvec::SmallVec;
+ 
+ use crate::Tab;
+ use crate::prelude::*;
+ 
++/// Minimum width reserved at the end of each tab row for the empty tab bar filler (`.min_w_6()`).
++pub const TAB_BAR_FILLER_MIN_WIDTH: Pixels = px(24.);
++
++/// Returns how many tabs of `min_width` fit into `row_width` alongside `filler_width`.
++/// Always returns at least `1`.
++pub fn tab_row_capacity(row_width: Pixels, min_width: Pixels, filler_width: Pixels) -> usize {
++    if min_width <= px(0.) {
++        return usize::MAX;
++    }
++    let available = (row_width - filler_width).max(px(0.));
++    ((available / min_width).floor() as usize).max(1)
++}
++
++/// Partitions `0..count` tab indices across up to `max_rows` rows.
++/// - Row 0 takes up to `first_row_capacity.max(1)` tabs.
++/// - Rows `1..max_rows - 1` take up to `row_capacity.max(1)` tabs each.
++/// - The last allowed row (`max_rows - 1`) takes all remaining tabs (`start..count`).
++/// - Never returns empty trailing rows; when `count == 0`, returns `vec![0..0]`.
++pub fn tab_row_ranges(
++    count: usize,
++    first_row_capacity: usize,
++    row_capacity: usize,
++    max_rows: usize,
++) -> Vec<Range<usize>> {
++    let max_rows = max_rows.max(1);
++    if count == 0 || max_rows == 1 {
++        return vec![0..count];
++    }
++    let first_cap = first_row_capacity.max(1);
++    let full_cap = row_capacity.max(1);
++    // There can be at most one non-empty range per tab. Bound the allocation by the
++    // actual item count so an extreme but valid setting cannot reserve unbounded memory.
++    let mut ranges = Vec::with_capacity(max_rows.min(count));
++    let mut start = 0;
++    for row_ix in 0..max_rows {
++        if start >= count {
++            break;
++        }
++        if row_ix + 1 == max_rows {
++            ranges.push(start..count);
++            break;
++        }
++        let cap = if row_ix == 0 { first_cap } else { full_cap };
++        let end = start.saturating_add(cap).min(count);
++        ranges.push(start..end);
++        start = end;
++    }
++    ranges
++}
++
++/// Tracks measured widths for wrapped tab rows and notifies only when width changes by > 1px.
++#[derive(Debug, Default, Clone, Copy, PartialEq)]
++pub struct TabRows {
++    pub first_row_width: Option<Pixels>,
++    pub full_row_width: Option<Pixels>,
++}
++
++impl TabRows {
++    pub const REMEASURE_EPSILON: Pixels = px(1.);
++
++    pub fn update_widths(
++        &mut self,
++        first_row_width: Option<Pixels>,
++        full_row_width: Option<Pixels>,
++    ) -> bool {
++        // Store a positive measurement only when it moves by more than the epsilon.
++        fn update(stored: &mut Option<Pixels>, measured: Option<Pixels>) -> bool {
++            let Some(new) = measured.filter(|&width| width > px(0.)) else {
++                return false;
++            };
++            let changed = stored.is_none_or(|old| (old - new).abs() > TabRows::REMEASURE_EPSILON);
++            if changed {
++                *stored = Some(new);
++            }
++            changed
++        }
++        let changed_first = update(&mut self.first_row_width, first_row_width);
++        let changed_full = update(&mut self.full_row_width, full_row_width);
++        changed_first || changed_full
++    }
++
++    pub fn ranges(
++        &self,
++        count: usize,
++        min_width: Option<Pixels>,
++        filler_width: Pixels,
++        max_rows: usize,
++    ) -> Vec<Range<usize>> {
++        let max_rows = max_rows.max(1);
++        let Some(min_width) = min_width.filter(|&w| w > px(0.)) else {
++            return vec![0..count];
++        };
++        if max_rows <= 1 || count <= 1 {
++            return vec![0..count];
++        }
++        let Some(first_w) = self.first_row_width.filter(|&w| w > px(0.)) else {
++            return vec![0..count];
++        };
++        let full_w = self
++            .full_row_width
++            .filter(|&w| w > px(0.))
++            .unwrap_or(first_w);
++        let first_cap = tab_row_capacity(first_w, min_width, filler_width);
++        let full_cap = tab_row_capacity(full_w, min_width, filler_width);
++        tab_row_ranges(count, first_cap, full_cap, max_rows)
++    }
++
++    /// Wraps a rendered tab element (which may be wrapped in `RightClickMenu`) in a block `Div`
++    /// with explicit `min_w` and `max_w` + `overflow_hidden` so Taffy's flexbox layout shrinks
++    /// tabs proportionally down to `min_width` before overflowing.
++    pub fn wrap_tab(tab: AnyElement, min_width: Pixels, max_width: Pixels) -> Div {
++        div()
++            .block()
++            .min_w(min_width)
++            .max_w(max_width)
++            .overflow_hidden()
++            .child(tab)
++    }
++}
++
+ #[derive(IntoElement, RegisterComponent)]
+ pub struct TabBar {
+     id: ElementId,
+@@ -204,3 +326,99 @@ impl Component for TabBar {
+             .into_any_element()
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn test_tab_row_capacity_and_ranges() {
++        // 1. tab_row_capacity with TAB_BAR_FILLER_MIN_WIDTH (24px)
++        assert_eq!(
++            tab_row_capacity(px(324.), px(100.), TAB_BAR_FILLER_MIN_WIDTH),
++            3
++        );
++        assert_eq!(
++            tab_row_capacity(px(323.), px(100.), TAB_BAR_FILLER_MIN_WIDTH),
++            2
++        );
++        // Narrow width < min_width + filler clamps to at least 1
++        assert_eq!(
++            tab_row_capacity(px(50.), px(100.), TAB_BAR_FILLER_MIN_WIDTH),
++            1
++        );
++        assert_eq!(
++            tab_row_capacity(px(10.), px(100.), TAB_BAR_FILLER_MIN_WIDTH),
++            1
++        );
++        // min_width <= 0 returns usize::MAX
++        assert_eq!(
++            tab_row_capacity(px(300.), px(0.), TAB_BAR_FILLER_MIN_WIDTH),
++            usize::MAX
++        );
++        assert_eq!(
++            tab_row_capacity(px(300.), px(-10.), TAB_BAR_FILLER_MIN_WIDTH),
++            usize::MAX
++        );
++
++        // 2. tab_row_ranges
++        // count == 0 -> [0..0]
++        assert_eq!(tab_row_ranges(0, 2, 3, 3), vec![0..0]);
++        // All tabs fit in row 0 -> [0..count]
++        assert_eq!(tab_row_ranges(2, 3, 4, 3), vec![0..2]);
++        // Exact capacity -> no extra empty row
++        assert_eq!(tab_row_ranges(2, 2, 3, 3), vec![0..2]);
++        assert_eq!(tab_row_ranges(5, 2, 3, 3), vec![0..2, 2..5]);
++        // Overflow to 2 rows and 3 rows where first_row_capacity != row_capacity
++        assert_eq!(tab_row_ranges(4, 2, 3, 3), vec![0..2, 2..4]);
++        assert_eq!(tab_row_ranges(6, 2, 3, 3), vec![0..2, 2..5, 5..6]);
++        // Remainder (> row_capacity) all placed in last row (max_rows - 1)
++        assert_eq!(tab_row_ranges(11, 2, 3, 3), vec![0..2, 2..5, 5..11]);
++        // max_rows == 1 or 0 -> [0..count]
++        assert_eq!(tab_row_ranges(7, 2, 3, 1), vec![0..7]);
++        assert_eq!(tab_row_ranges(7, 2, 3, 0), vec![0..7]);
++        // Extremely large row limits stay bounded by the number of tabs and do not overflow
++        // when a very large capacity is supplied.
++        let ranges = tab_row_ranges(3, 1, 1, u32::MAX as usize);
++        assert_eq!(ranges, vec![0..1, 1..2, 2..3]);
++        assert!(ranges.capacity() <= 3);
++        assert_eq!(
++            tab_row_ranges(3, 1, usize::MAX, 3),
++            vec![0..1, 1..3]
++        );
++
++        // 3. TabRows width tracking (1px threshold) & ranges guards
++        let mut rows = TabRows::default();
++        // Without measurements -> single row [0..count]
++        assert_eq!(
++            rows.ranges(6, Some(px(100.)), TAB_BAR_FILLER_MIN_WIDTH, 3),
++            vec![0..6]
++        );
++        // Zero/negative widths ignored
++        assert!(!rows.update_widths(Some(px(0.)), Some(px(0.))));
++        // Initial measurement > 0 triggers true
++        assert!(rows.update_widths(Some(px(224.)), Some(px(324.))));
++        // Changes <= 1px ignored
++        assert!(!rows.update_widths(Some(px(224.8)), Some(px(323.2))));
++        assert_eq!(rows.first_row_width, Some(px(224.)));
++        assert_eq!(rows.full_row_width, Some(px(324.)));
++        // Changes > 1px trigger true and update stored width
++        assert!(rows.update_widths(Some(px(226.)), Some(px(324.))));
++        assert_eq!(rows.first_row_width, Some(px(226.)));
++
++        // With first_row_width = 226px (cap 2 at min 100 + filler 24) and full_row_width = 324px (cap 3):
++        assert_eq!(
++            rows.ranges(7, Some(px(100.)), TAB_BAR_FILLER_MIN_WIDTH, 3),
++            vec![0..2, 2..5, 5..7]
++        );
++        // max_rows <= 1 or min_width == None returns single range [0..count]
++        assert_eq!(
++            rows.ranges(7, Some(px(100.)), TAB_BAR_FILLER_MIN_WIDTH, 1),
++            vec![0..7]
++        );
++        assert_eq!(
++            rows.ranges(7, None, TAB_BAR_FILLER_MIN_WIDTH, 3),
++            vec![0..7]
++        );
++    }
++}
+diff --git a/crates/workspace/src/dock.rs b/crates/workspace/src/dock.rs
+index 41b3df0ad8391703af25f71cbaf4a66480bb026c..77991edef183c7321d8594ac9eac01c8274f81a2 100644
+--- a/crates/workspace/src/dock.rs
++++ b/crates/workspace/src/dock.rs
+@@ -1,7 +1,10 @@
+ use crate::focus_follows_mouse::FocusFollowsMouse as _;
+ use crate::persistence::model::DockData;
+ use crate::status_bar::HideStatusItem;
+-use crate::{DraggedDock, Event, ModalLayer, Pane, WorkspaceSettings};
++use crate::{
++    DraggedDock, Event, ModalLayer, Pane, WorkspaceSettings, traffic_light_row,
++    traffic_lights_overlay_workspace,
++};
+ use crate::{Workspace, status_bar::StatusItemView};
+ use anyhow::Context as _;
+ use client::proto;
+@@ -1274,10 +1277,14 @@ impl Dock {
+ }
+ 
+ impl Render for Dock {
+-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
++    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+         let dispatch_context = Self::dispatch_context(cx);
+         if let Some(entry) = self.visible_entry() {
+             let position = self.position;
++            let top_spacer = (position == DockPosition::Left
++                && traffic_lights_overlay_workspace(window, cx))
++            .then(|| traffic_light_row(window, cx));
++            let has_top_spacer = top_spacer.is_some();
+             let create_resize_handle = || {
+                 let handle = div()
+                     .id("resize-handle")
+@@ -1349,6 +1356,7 @@ impl Render for Dock {
+                 .map(|this| match self.position().axis() {
+                     // Width and height are always set on the workspace wrapper in
+                     // render_dock, so fill whatever space the wrapper provides.
++                    Axis::Horizontal if has_top_spacer => this.w_full().h_full().flex_col(),
+                     Axis::Horizontal => this.w_full().h_full().flex_row(),
+                     Axis::Vertical => this.h_full().w_full().flex_col(),
+                 })
+@@ -1357,9 +1365,11 @@ impl Render for Dock {
+                     DockPosition::Right => this.border_l_1(),
+                     DockPosition::Bottom => this.border_t_1(),
+                 })
++                .children(top_spacer)
+                 .child(
+                     div()
+                         .map(|this| match self.position().axis() {
++                            Axis::Horizontal if has_top_spacer => this.w_full().flex_1().min_h_0(),
+                             Axis::Horizontal => this.w_full().h_full(),
+                             Axis::Vertical => this.h_full().w_full(),
+                         })
+diff --git a/crates/workspace/src/item.rs b/crates/workspace/src/item.rs
+index a1785f01106f0343c39bd7335cf20d951c0238a1..846c01288c1ef3bba57c1e450795ad312151703a 100644
+--- a/crates/workspace/src/item.rs
++++ b/crates/workspace/src/item.rs
+@@ -61,6 +61,8 @@ pub struct ItemSettings {
+     pub file_icons: bool,
+     pub show_diagnostics: ShowDiagnostics,
+     pub show_close_button: ShowCloseButton,
++    pub min_width: Option<Pixels>,
++    pub max_width: Option<Pixels>,
+ }
+ 
+ #[derive(RegisterSetting)]
+@@ -91,6 +93,8 @@ impl Settings for ItemSettings {
+             file_icons: tabs.file_icons.unwrap(),
+             show_diagnostics: tabs.show_diagnostics.unwrap(),
+             show_close_button: tabs.show_close_button.unwrap(),
++            min_width: tabs.min_width.map(|width| gpui::px(width.0)),
++            max_width: tabs.max_width.map(|width| gpui::px(width.0)),
+         }
+     }
+ }
+diff --git a/crates/workspace/src/pane.rs b/crates/workspace/src/pane.rs
+index 20011850842025de251ec02fcad9d4cc3bf37a91..1b9adc966ced01eced1cdc905b29836fd704abec 100644
+--- a/crates/workspace/src/pane.rs
++++ b/crates/workspace/src/pane.rs
+@@ -9,9 +9,11 @@ use crate::{
+         PreviewTabsSettings, ProjectItemKind, SaveOptions, ShowCloseButton, ShowDiagnostics,
+         TabContentParams, TabTooltipContent, WeakItemHandle,
+     },
+-    move_item,
++    move_item, move_window_on_drag,
+     notifications::NotifyResultExt,
++    title_bar_area, title_bar_in_status_bar,
+     toolbar::Toolbar,
++    traffic_light_row, traffic_lights_overlay_workspace,
+     workspace_settings::{AutosaveSetting, FocusFollowsMouse, TabBarSettings, WorkspaceSettings},
+ };
+ use anyhow::Result;
+@@ -434,6 +436,9 @@ pub struct Pane {
+     use_max_tabs: bool,
+     _subscriptions: Vec<Subscription>,
+     tab_bar_scroll_handle: ScrollHandle,
++    tab_rows: ui::TabRows,
++    last_row_start_unpinned_ix: usize,
++    scrolled_to_unpinned_in_last_row: Option<(usize, usize)>,
+     /// This is set to true if a user scroll has occurred more recently than a system scroll
+     /// We want to suppress certain system scrolls when the user has intentionally scrolled
+     suppress_scroll: bool,
+@@ -597,6 +602,9 @@ impl Pane {
+             }))),
+             toolbar: cx.new(|_| Toolbar::new()),
+             tab_bar_scroll_handle: ScrollHandle::new(),
++            tab_rows: ui::TabRows::default(),
++            last_row_start_unpinned_ix: 0,
++            scrolled_to_unpinned_in_last_row: None,
+             suppress_scroll: false,
+             drag_split_direction: None,
+             workspace,
+@@ -1522,8 +1530,12 @@ impl Pane {
+     fn update_active_tab(&mut self, index: usize) {
+         if !self.is_tab_pinned(index) {
+             self.suppress_scroll = false;
+-            self.tab_bar_scroll_handle
+-                .scroll_to_item(index - self.pinned_tab_count);
++            self.scrolled_to_unpinned_in_last_row = None;
++            let unpinned_index = index - self.pinned_tab_count;
++            if unpinned_index >= self.last_row_start_unpinned_ix {
++                self.tab_bar_scroll_handle
++                    .scroll_to_item(unpinned_index - self.last_row_start_unpinned_ix);
++            }
+         }
+     }
+ 
+@@ -2871,11 +2883,30 @@ impl Pane {
+         )
+     }
+ 
++    fn tab_position_for_index(
++        &self,
++        ix: usize,
++        row_start_ix: usize,
++        row_end_ix: usize,
++    ) -> TabPosition {
++        if ix == row_start_ix {
++            TabPosition::First
++        } else if ix + 1 == row_end_ix {
++            TabPosition::Last
++        } else if self.active_item_index >= row_start_ix && self.active_item_index < row_end_ix {
++            TabPosition::Middle(ix.cmp(&self.active_item_index))
++        } else {
++            TabPosition::Middle(cmp::Ordering::Greater)
++        }
++    }
++
+     fn render_tab(
+         &self,
+         ix: usize,
+         item: &dyn ItemHandle,
+         detail: usize,
++        is_chip: bool,
++        tab_position: TabPosition,
+         focus_handle: &FocusHandle,
+         window: &mut Window,
+         cx: &mut Context<Pane>,
+@@ -2886,6 +2917,7 @@ impl Pane {
+             .map(|id| id == item.item_id())
+             .unwrap_or(false);
+ 
++        let settings = ItemSettings::get_global(cx);
+         let label = item.tab_content(
+             TabContentParams {
+                 detail: Some(detail),
+@@ -2893,7 +2925,7 @@ impl Pane {
+                 preview: is_preview,
+                 deemphasized: !self.has_focus(window, cx),
+                 max_title_len: None,
+-                truncate_title_middle: false,
++                truncate_title_middle: settings.max_width.is_some(),
+             },
+             window,
+             cx,
+@@ -2901,16 +2933,12 @@ impl Pane {
+ 
+         let icon = self.tab_icon_element(item, is_active, window, cx);
+ 
+-        let settings = ItemSettings::get_global(cx);
+         let close_side = &settings.close_position;
+         let show_close_button = &settings.show_close_button;
+         let indicator = render_item_indicator(item.boxed_clone(), cx);
+         let tab_tooltip_content = item.tab_tooltip_content(cx);
+         let item_id = item.item_id();
+-        let is_first_item = ix == 0;
+-        let is_last_item = ix == self.items.len() - 1;
+         let is_pinned = self.is_tab_pinned(ix);
+-        let position_relative_to_active_item = ix.cmp(&self.active_item_index);
+ 
+         let read_only_toggle = |toggleable: bool| {
+             IconButton::new("toggle_read_only", IconName::FileLock)
+@@ -2943,18 +2971,15 @@ impl Pane {
+         let capability = item.capability(cx);
+         let can_toggle_read_only = item.read_only_toggle_buffer(cx).is_some();
+         let tab = Tab::new(ix)
+-            .position(if is_first_item {
+-                TabPosition::First
+-            } else if is_last_item {
+-                TabPosition::Last
+-            } else {
+-                TabPosition::Middle(position_relative_to_active_item)
+-            })
++            .position(tab_position)
+             .close_side(match close_side {
+                 ClosePosition::Left => ui::TabCloseSide::Start,
+                 ClosePosition::Right => ui::TabCloseSide::End,
+             })
+             .toggle_state(is_active)
++            .chip(is_chip)
++            .min_width(settings.min_width)
++            .max_width(settings.max_width)
+             .on_click(cx.listener({
+                 let item_handle = item.boxed_clone();
+                 move |pane: &mut Self, event: &ClickEvent, window, cx| {
+@@ -3091,6 +3116,13 @@ impl Pane {
+                 h_flex()
+                     .id(("pane-tab-content", ix))
+                     .gap_1()
++                    .when(
++                        settings.min_width.is_some() || settings.max_width.is_some(),
++                        |this| this.flex_grow(1.),
++                    )
++                    .when(settings.max_width.is_some(), |this| {
++                        this.min_w_0().overflow_hidden()
++                    })
+                     .children(if let Some(icon) = icon {
+                         Some(icon)
+                     } else if can_toggle_read_only && !capability.editable() {
+@@ -3555,17 +3587,15 @@ impl Pane {
+                 }
+             });
+ 
+-        let mut tab_items = self
+-            .items
+-            .iter()
+-            .enumerate()
+-            .zip(tab_details(&self.items, window, cx))
+-            .map(|((ix, item), detail)| {
+-                self.render_tab(ix, &**item, detail, &focus_handle, window, cx)
+-                    .into_any_element()
+-            })
+-            .collect::<Vec<_>>();
+-        let tab_count = tab_items.len();
++        let tab_bar_settings = TabBarSettings::get_global(cx);
++        let use_separate_rows = tab_bar_settings.show_pinned_tabs_in_separate_row;
++        let max_tab_rows = tab_bar_settings.max_tab_rows.max(1);
++        let pinned_tab_chips = tab_bar_settings.pinned_tab_chips;
++        let unpinned_tab_chips = tab_bar_settings.unpinned_tab_chips;
++        let item_settings = ItemSettings::get_global(cx);
++        let wrap_widths = item_settings.min_width.zip(item_settings.max_width);
++
++        let tab_count = self.items.len();
+         if self.is_tab_pinned(tab_count) {
+             log::warn!(
+                 "Pinned tab count ({}) exceeds actual tab count ({}). \
+@@ -3576,13 +3606,116 @@ impl Pane {
+             );
+             self.pinned_tab_count = tab_count;
+         }
++        let unpinned_count = tab_count.saturating_sub(self.pinned_tab_count);
++        let use_separate_pinned_row =
++            use_separate_rows && self.pinned_tab_count > 0 && unpinned_count > 0;
++        let can_wrap = max_tab_rows > 1 && unpinned_count > 0 && wrap_widths.is_some();
++        let row_ranges = if can_wrap {
++            let effective_tab_rows = if use_separate_pinned_row {
++                let full_w = self
++                    .tab_rows
++                    .full_row_width
++                    .or(self.tab_rows.first_row_width);
++                ui::TabRows {
++                    first_row_width: full_w,
++                    full_row_width: full_w,
++                }
++            } else {
++                self.tab_rows
++            };
++            effective_tab_rows.ranges(
++                unpinned_count,
++                item_settings.min_width,
++                ui::TAB_BAR_FILLER_MIN_WIDTH,
++                max_tab_rows,
++            )
++        } else {
++            if self.last_row_start_unpinned_ix != 0 {
++                self.last_row_start_unpinned_ix = 0;
++                self.tab_bar_scroll_handle.set_offset(Point::default());
++                if !self.suppress_scroll {
++                    if let Some(unpinned_ix) =
++                        self.active_item_index.checked_sub(self.pinned_tab_count)
++                    {
++                        self.tab_bar_scroll_handle.scroll_to_item(unpinned_ix);
++                    }
++                }
++            }
++            self.scrolled_to_unpinned_in_last_row = None;
++            vec![0..unpinned_count]
++        };
++
++        let details = tab_details(&self.items, window, cx);
++        let mut tab_items = Vec::with_capacity(tab_count);
++        for (ix, detail) in details.into_iter().enumerate() {
++            let item = &self.items[ix];
++            let is_chip = if self.is_tab_pinned(ix) {
++                pinned_tab_chips
++            } else {
++                unpinned_tab_chips
++            };
++            let tab_position = if !can_wrap {
++                self.tab_position_for_index(ix, 0, tab_count)
++            } else if ix < self.pinned_tab_count {
++                if use_separate_pinned_row {
++                    self.tab_position_for_index(ix, 0, self.pinned_tab_count)
++                } else {
++                    let row_0_end =
++                        self.pinned_tab_count + row_ranges.first().map_or(0, |range| range.end);
++                    self.tab_position_for_index(ix, 0, row_0_end)
++                }
++            } else {
++                let unpinned_ix = ix - self.pinned_tab_count;
++                let row_range = row_ranges
++                    .iter()
++                    .find(|range| range.contains(&unpinned_ix))
++                    .cloned()
++                    .unwrap_or(0..unpinned_count);
++                let row_start_ix = if row_range.start == 0 && !use_separate_pinned_row {
++                    0
++                } else {
++                    self.pinned_tab_count + row_range.start
++                };
++                let row_end_ix = self.pinned_tab_count + row_range.end;
++                self.tab_position_for_index(ix, row_start_ix, row_end_ix)
++            };
++            let tab = self
++                .render_tab(
++                    ix,
++                    &**item,
++                    detail,
++                    is_chip,
++                    tab_position,
++                    &focus_handle,
++                    window,
++                    cx,
++                )
++                .into_any_element();
++            tab_items.push(
++                if let Some((min_w, max_w)) =
++                    wrap_widths.filter(|_| can_wrap && ix >= self.pinned_tab_count)
++                {
++                    ui::TabRows::wrap_tab(tab, min_w, max_w).into_any_element()
++                } else {
++                    tab
++                },
++            );
++        }
+         let unpinned_tabs = tab_items.split_off(self.pinned_tab_count);
+         let pinned_tabs = tab_items;
+ 
+-        let tab_bar_settings = TabBarSettings::get_global(cx);
+-        let use_separate_rows = tab_bar_settings.show_pinned_tabs_in_separate_row;
+-
+-        if use_separate_rows && !pinned_tabs.is_empty() && !unpinned_tabs.is_empty() {
++        if can_wrap {
++            self.render_wrapped_tab_bar(
++                pinned_tabs,
++                unpinned_tabs,
++                row_ranges,
++                use_separate_pinned_row,
++                navigate_backward,
++                navigate_forward,
++                window,
++                cx,
++            )
++        } else if use_separate_pinned_row {
+             self.render_two_row_tab_bar(
+                 pinned_tabs,
+                 unpinned_tabs,
+@@ -3605,6 +3738,27 @@ impl Pane {
+         }
+     }
+ 
++    /// Whether this pane's header is the one the traffic lights sit in: the top-left pane, unless
++    /// the left dock covers that corner, or the pane the zoom overlay shows over everything.
++    fn holds_traffic_lights(&self, window: &Window, cx: &Context<Pane>) -> bool {
++        traffic_lights_overlay_workspace(window, cx)
++            && self.workspace.upgrade().is_some_and(|workspace| {
++                let workspace = workspace.read(cx);
++                let this = cx.entity();
++                // The zoom overlay covers the left dock too, so a zoomed pane needs the spacer
++                // whatever the dock shows.
++                let zoomed = workspace.zoomed.as_ref() == Some(&this.downgrade().into());
++                let maximized = workspace
++                    .maximized_pane
++                    .as_ref()
++                    .and_then(|pane| pane.upgrade())
++                    .is_some_and(|pane| pane == this);
++                zoomed
++                    || ((maximized || workspace.center.first_pane() == this)
++                        && workspace.left_dock.read(cx).visible_panel().is_none())
++            })
++    }
++
+     fn configure_tab_bar_start(
+         &mut self,
+         tab_bar: TabBar,
+@@ -3613,7 +3767,15 @@ impl Pane {
+         window: &mut Window,
+         cx: &mut Context<Pane>,
+     ) -> TabBar {
++        let traffic_light_spacer = self.holds_traffic_lights(window, cx);
+         tab_bar
++            .when(traffic_light_spacer, |tab_bar| {
++                tab_bar.start_child(
++                    title_bar_area(div().id("traffic-light-spacer"), window, cx)
++                        .h_full()
++                        .w(px(ui::utils::TRAFFIC_LIGHT_PADDING)),
++                )
++            })
+             .when(
+                 self.display_nav_history_buttons.unwrap_or_default(),
+                 |tab_bar| {
+@@ -3635,6 +3797,246 @@ impl Pane {
+             })
+     }
+ 
++    fn render_wrapped_tab_bar(
++        &mut self,
++        pinned_tabs: Vec<AnyElement>,
++        unpinned_tabs: Vec<AnyElement>,
++        row_ranges: Vec<std::ops::Range<usize>>,
++        use_separate_pinned_row: bool,
++        navigate_backward: IconButton,
++        navigate_forward: IconButton,
++        window: &mut Window,
++        cx: &mut Context<Pane>,
++    ) -> AnyElement {
++        let last_row_range = row_ranges.last().cloned().unwrap_or(0..0);
++        if self.last_row_start_unpinned_ix != last_row_range.start {
++            self.last_row_start_unpinned_ix = last_row_range.start;
++            self.scrolled_to_unpinned_in_last_row = None;
++            self.tab_bar_scroll_handle.scroll_to_item(0);
++            self.tab_bar_scroll_handle.set_offset(Point::default());
++        } else if !self.suppress_scroll {
++            if let Some(unpinned_ix) = self.active_item_index.checked_sub(self.pinned_tab_count) {
++                if last_row_range.contains(&unpinned_ix) {
++                    let local_ix = unpinned_ix - last_row_range.start;
++                    let target = (unpinned_ix, last_row_range.start);
++                    if self.scrolled_to_unpinned_in_last_row != Some(target) {
++                        self.scrolled_to_unpinned_in_last_row = Some(target);
++                        self.tab_bar_scroll_handle.scroll_to_item(local_ix);
++                    }
++                } else {
++                    self.scrolled_to_unpinned_in_last_row = None;
++                }
++            }
++        }
++
++        let num_unpinned_rows = row_ranges.len();
++        let mut unpinned_iter = unpinned_tabs.into_iter();
++        let mut rows: Vec<AnyElement> =
++            Vec::with_capacity(num_unpinned_rows + usize::from(use_separate_pinned_row));
++
++        let mut nav_buttons = Some((navigate_backward, navigate_forward));
++
++        if use_separate_pinned_row {
++            let (nav_back, nav_fwd) = nav_buttons.take().unwrap();
++            let pinned_tab_bar = self
++                .configure_tab_bar_start(
++                    TabBar::new("pinned_tab_bar"),
++                    nav_back,
++                    nav_fwd,
++                    window,
++                    cx,
++                )
++                .child(
++                    h_flex()
++                        .id("pinned_tabs_row")
++                        .debug_selector(|| "pinned_tabs_row".into())
++                        .overflow_x_scroll()
++                        .w_full()
++                        .children(pinned_tabs)
++                        .child(self.render_pinned_tab_bar_drop_target(window, cx)),
++                );
++            rows.push(pinned_tab_bar.into_any_element());
++
++            for (row_ix, range) in row_ranges.into_iter().enumerate() {
++                let is_last_row = row_ix + 1 == num_unpinned_rows;
++                let row_len = range.len();
++                let drop_target_index = self.pinned_tab_count + range.end;
++                let row_tabs = unpinned_iter.by_ref().take(row_len).collect::<Vec<_>>();
++                let row_container = self.render_wrapped_unpinned_tabs_row(
++                    row_ix,
++                    row_tabs,
++                    drop_target_index,
++                    is_last_row,
++                    false,
++                    window,
++                    cx,
++                );
++                let tab_bar_id: ElementId = if row_ix == 0 {
++                    "unpinned_tab_bar".into()
++                } else {
++                    ("unpinned_tab_bar", row_ix).into()
++                };
++                rows.push(
++                    TabBar::new(tab_bar_id)
++                        .child(row_container)
++                        .into_any_element(),
++                );
++            }
++        } else {
++            let mut pinned_tabs_opt = Some(pinned_tabs);
++            for (row_ix, range) in row_ranges.into_iter().enumerate() {
++                let is_last_row = row_ix + 1 == num_unpinned_rows;
++                let row_len = range.len();
++                let drop_target_index = self.pinned_tab_count + range.end;
++                let row_tabs = unpinned_iter.by_ref().take(row_len).collect::<Vec<_>>();
++                let row_container = self.render_wrapped_unpinned_tabs_row(
++                    row_ix,
++                    row_tabs,
++                    drop_target_index,
++                    is_last_row,
++                    row_ix == 0,
++                    window,
++                    cx,
++                );
++                if row_ix == 0 {
++                    let (nav_back, nav_fwd) = nav_buttons.take().unwrap();
++                    let pinned_tabs = pinned_tabs_opt.take().unwrap_or_default();
++                    let tab_bar = self
++                        .configure_tab_bar_start(
++                            TabBar::new("tab_bar"),
++                            nav_back,
++                            nav_fwd,
++                            window,
++                            cx,
++                        )
++                        .children(pinned_tabs.len().ne(&0).then(|| {
++                            let max_scroll = self.tab_bar_scroll_handle.max_offset().x;
++                            let is_scrolled = self.tab_bar_scroll_handle.offset().x < px(0.);
++                            let is_scrollable = max_scroll > px(2.0);
++                            let has_active_unpinned_tab =
++                                self.active_item_index >= self.pinned_tab_count;
++                            h_flex().children(pinned_tabs).when(
++                                is_last_row && is_scrollable && is_scrolled,
++                                |this| {
++                                    this.when(has_active_unpinned_tab, |this| this.border_r_2())
++                                        .when(!has_active_unpinned_tab, |this| this.border_r_1())
++                                        .border_color(cx.theme().colors().border)
++                                },
++                            )
++                        }))
++                        .child(row_container);
++                    rows.push(tab_bar.into_any_element());
++                } else {
++                    rows.push(
++                        TabBar::new(("tab_bar_row", row_ix))
++                            .child(row_container)
++                            .into_any_element(),
++                    );
++                }
++            }
++        }
++
++        let entity = cx.entity().downgrade();
++        v_flex()
++            .w_full()
++            .flex_none()
++            .children(rows)
++            .on_children_prepainted(move |children_bounds, _, cx| {
++                if let Some(full_w) = children_bounds.first().map(|b| b.size.width) {
++                    if let Some(pane) = entity.upgrade() {
++                        pane.update(cx, |pane, cx| {
++                            let first_w = use_separate_pinned_row.then_some(full_w);
++                            if pane.tab_rows.update_widths(first_w, Some(full_w)) {
++                                cx.notify();
++                            }
++                            if !pane.suppress_scroll {
++                                if let Some(unpinned_ix) =
++                                    pane.active_item_index.checked_sub(pane.pinned_tab_count)
++                                {
++                                    if unpinned_ix >= pane.last_row_start_unpinned_ix {
++                                        let local_ix =
++                                            unpinned_ix - pane.last_row_start_unpinned_ix;
++                                        if let Some(tab_bounds) =
++                                            pane.tab_bar_scroll_handle.bounds_for_item(local_ix)
++                                        {
++                                            let scroll_bounds = pane.tab_bar_scroll_handle.bounds();
++                                            let scroll_offset = pane.tab_bar_scroll_handle.offset();
++                                            let actual_left = tab_bounds.left() + scroll_offset.x;
++                                            let actual_right = tab_bounds.right() + scroll_offset.x;
++                                            if scroll_bounds.size.width > px(0.)
++                                                && (actual_left < scroll_bounds.left() - px(1.)
++                                                    || actual_right
++                                                        > scroll_bounds.right() + px(1.))
++                                            {
++                                                pane.tab_bar_scroll_handle.scroll_to_item(local_ix);
++                                                cx.notify();
++                                            }
++                                        }
++                                    }
++                                }
++                            }
++                        });
++                    }
++                }
++            })
++            .into_any_element()
++    }
++
++    fn render_wrapped_unpinned_tabs_row(
++        &mut self,
++        row_ix: usize,
++        row_tabs: Vec<AnyElement>,
++        drop_target_index: usize,
++        is_last_row: bool,
++        measure_first_row_unpinned_width: bool,
++        window: &mut Window,
++        cx: &mut Context<Pane>,
++    ) -> AnyElement {
++        let row_id: ElementId = if row_ix == 0 && is_last_row {
++            "unpinned tabs".into()
++        } else {
++            ("unpinned_tabs", row_ix).into()
++        };
++        let row = h_flex()
++            .id(row_id)
++            .w_full()
++            .map(|this| {
++                if is_last_row {
++                    this.overflow_x_scroll()
++                        .track_scroll(&self.tab_bar_scroll_handle)
++                        .on_scroll(cx.listener(|this, _, _, _| {
++                            this.suppress_scroll = true;
++                        }))
++                } else {
++                    this.overflow_x_hidden()
++                }
++            })
++            .children(row_tabs)
++            .child(self.render_tab_bar_drop_target(drop_target_index, window, cx));
++
++        if measure_first_row_unpinned_width {
++            let entity = cx.entity().downgrade();
++            div()
++                .w_full()
++                .overflow_x_hidden()
++                .child(row)
++                .on_children_prepainted(move |children_bounds, _, cx| {
++                    if let Some(first_w) = children_bounds.first().map(|b| b.size.width) {
++                        if let Some(pane) = entity.upgrade() {
++                            pane.update(cx, |pane, cx| {
++                                if pane.tab_rows.update_widths(Some(first_w), None) {
++                                    cx.notify();
++                                }
++                            });
++                        }
++                    }
++                })
++                .into_any_element()
++        } else {
++            row.into_any_element()
++        }
++    }
++
+     fn render_single_row_tab_bar(
+         &mut self,
+         pinned_tabs: Vec<AnyElement>,
+@@ -3669,7 +4071,7 @@ impl Pane {
+                             .border_color(cx.theme().colors().border)
+                     })
+             }))
+-            .child(self.render_unpinned_tabs_container(unpinned_tabs, tab_count, cx));
++            .child(self.render_unpinned_tabs_container(unpinned_tabs, tab_count, window, cx));
+         tab_bar.into_any_element()
+     }
+ 
+@@ -3698,7 +4100,7 @@ impl Pane {
+                     .overflow_x_scroll()
+                     .w_full()
+                     .children(pinned_tabs)
+-                    .child(self.render_pinned_tab_bar_drop_target(cx)),
++                    .child(self.render_pinned_tab_bar_drop_target(window, cx)),
+             );
+         v_flex()
+             .w_full()
+@@ -3708,6 +4110,7 @@ impl Pane {
+                 TabBar::new("unpinned_tab_bar").child(self.render_unpinned_tabs_container(
+                     unpinned_tabs,
+                     tab_count,
++                    window,
+                     cx,
+                 )),
+             )
+@@ -3718,6 +4121,7 @@ impl Pane {
+         &mut self,
+         unpinned_tabs: Vec<AnyElement>,
+         tab_count: usize,
++        window: &mut Window,
+         cx: &mut Context<Pane>,
+     ) -> impl IntoElement {
+         h_flex()
+@@ -3729,16 +4133,21 @@ impl Pane {
+                 this.suppress_scroll = true;
+             }))
+             .children(unpinned_tabs)
+-            .child(self.render_tab_bar_drop_target(tab_count, cx))
++            .child(self.render_tab_bar_drop_target(tab_count, window, cx))
+     }
+ 
+     fn render_tab_bar_drop_target(
+         &self,
+-        tab_count: usize,
++        drop_target_index: usize,
++        window: &mut Window,
+         cx: &mut Context<Pane>,
+     ) -> impl IntoElement {
+         div()
+-            .id("tab_bar_drop_target")
++            .id(("tab_bar_drop_target", drop_target_index))
++            .debug_selector(move || format!("tab_bar_drop_target-{drop_target_index}"))
++            .when(title_bar_in_status_bar(cx), |this| {
++                move_window_on_drag(this, window, cx)
++            })
+             .min_w_6()
+             .h(Tab::container_height(cx))
+             .flex_grow_1()
+@@ -3754,7 +4163,13 @@ impl Pane {
+             .on_drop(
+                 cx.listener(move |this, dragged_tab: &DraggedTab, window, cx| {
+                     this.drag_split_direction = None;
+-                    this.handle_tab_drop(dragged_tab, this.items.len(), false, window, cx)
++                    let target_ix =
++                        if dragged_tab.pane == cx.entity() && dragged_tab.ix < drop_target_index {
++                            drop_target_index.saturating_sub(1)
++                        } else {
++                            drop_target_index
++                        };
++                    this.handle_tab_drop(dragged_tab, target_ix, false, window, cx)
+                 }),
+             )
+             .on_drop(
+@@ -3762,7 +4177,7 @@ impl Pane {
+                     this.drag_split_direction = None;
+                     this.handle_project_entry_drop(
+                         &selection.active_selection.entry_id,
+-                        Some(tab_count),
++                        Some(drop_target_index),
+                         window,
+                         cx,
+                     )
+@@ -3779,9 +4194,16 @@ impl Pane {
+             }))
+     }
+ 
+-    fn render_pinned_tab_bar_drop_target(&self, cx: &mut Context<Pane>) -> impl IntoElement {
++    fn render_pinned_tab_bar_drop_target(
++        &self,
++        window: &mut Window,
++        cx: &mut Context<Pane>,
++    ) -> impl IntoElement {
+         div()
+             .id("pinned_tabs_border")
++            .when(title_bar_in_status_bar(cx), |this| {
++                move_window_on_drag(this, window, cx)
++            })
+             .debug_selector(|| "pinned_tabs_border".into())
+             .min_w_6()
+             .h(Tab::container_height(cx))
+@@ -4466,6 +4888,11 @@ impl Render for Pane {
+             let project = project.read(cx);
+             project.is_local() || project.is_via_wsl(cx)
+         };
++        let has_tab_bar = self.active_item().is_some() && display_tab_bar;
++        // Without a tab bar to hold the traffic-light spacer, the top-left pane gets a tab-bar-high
++        // header of its own so the lights keep off its toolbar and content.
++        let traffic_light_header = (!has_tab_bar && self.holds_traffic_lights(window, cx))
++            .then(|| traffic_light_row(window, cx));
+ 
+         v_flex()
+             .key_context(key_context)
+@@ -4629,9 +5056,10 @@ impl Render for Pane {
+                     cx.propagate();
+                 }
+             }))
+-            .when(self.active_item().is_some() && display_tab_bar, |pane| {
++            .when(has_tab_bar, |pane| {
+                 pane.child((self.render_tab_bar.clone())(self, window, cx))
+             })
++            .children(traffic_light_header)
+             .child({
+                 let has_worktrees = project.read(cx).visible_worktrees(cx).next().is_some();
+                 // main content
+@@ -9662,6 +10090,525 @@ mod tests {
+         );
+     }
+ 
++    fn settle_tab_bar_layout(cx: &mut VisualTestContext) {
++        cx.run_until_parked();
++        cx.update(|window, _cx| window.refresh());
++        cx.run_until_parked();
++    }
++
++    fn tab_debug_bounds(cx: &mut VisualTestContext, ix: usize) -> Option<gpui::Bounds<Pixels>> {
++        let selector: &'static str = Box::leak(format!("TAB-{ix}").into_boxed_str());
++        cx.debug_bounds(selector)
++    }
++
++    fn set_tab_bar_wrapping_settings(
++        cx: &mut VisualTestContext,
++        max_tab_rows: Option<u32>,
++        min_width: Option<f32>,
++        max_width: Option<f32>,
++    ) {
++        cx.update_global(|store: &mut SettingsStore, cx| {
++            store.update_user_settings(cx, |settings| {
++                settings.tab_bar.get_or_insert_default().max_tab_rows = max_tab_rows;
++                let tabs = settings.tabs.get_or_insert_default();
++                tabs.min_width = min_width.map(Into::into);
++                tabs.max_width = max_width.map(Into::into);
++            });
++        });
++        settle_tab_bar_layout(cx);
++    }
++
++    #[gpui::test]
++    async fn test_tab_bar_max_tab_rows_wrapping_and_settings_guards(cx: &mut TestAppContext) {
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs, None, cx).await;
++        let (workspace, cx) =
++            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
++        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
++
++        cx.simulate_resize(size(px(300.), px(300.)));
++
++        for label in ["0", "1", "2", "3", "4", "5"] {
++            add_labeled_item(&pane, label, false, cx);
++        }
++        settle_tab_bar_layout(cx);
++
++        let tab_bounds_all = |cx: &mut VisualTestContext| -> [gpui::Bounds<Pixels>; 6] {
++            std::array::from_fn(|ix| {
++                tab_debug_bounds(cx, ix).unwrap_or_else(|| panic!("TAB-{ix} should be rendered"))
++            })
++        };
++
++        // 1. Default (max_tab_rows = None -> 1): all 6 tabs stay on 1 row.
++        set_tab_bar_wrapping_settings(cx, None, Some(100.), Some(200.));
++        let bounds = tab_bounds_all(cx);
++        for ix in 1..6 {
++            assert_eq!(
++                bounds[ix].origin.y, bounds[0].origin.y,
++                "default max_tab_rows (1) must keep all tabs on a single row"
++            );
++        }
++
++        // 2. max_tab_rows = Some(0) (treated as 1): all 6 tabs stay on 1 row.
++        set_tab_bar_wrapping_settings(cx, Some(0), Some(100.), Some(200.));
++        let bounds = tab_bounds_all(cx);
++        for ix in 1..6 {
++            assert_eq!(
++                bounds[ix].origin.y, bounds[0].origin.y,
++                "max_tab_rows = 0 must behave as 1 (single row)"
++            );
++        }
++
++        // 3. max_tab_rows = Some(3) without both min_width and max_width: stays on 1 row.
++        for (min_w, max_w) in [(None, Some(200.)), (Some(100.), None), (None, None)] {
++            set_tab_bar_wrapping_settings(cx, Some(3), min_w, max_w);
++            let bounds = tab_bounds_all(cx);
++            for ix in 1..6 {
++                assert_eq!(
++                    bounds[ix].origin.y, bounds[0].origin.y,
++                    "max_tab_rows = 3 with min_width={min_w:?}, max_width={max_w:?} must stay single row"
++                );
++            }
++        }
++
++        // 4. max_tab_rows = Some(3) with both min_width = 100 and max_width = 200:
++        //    In a 300px window, row 1 has navigation and action buttons (W1 < 224px -> cap1 = 1),
++        //    row 2 spans the full 300px width (cap2 = floor((300 - 24) / 100) = 2),
++        //    and row 3 takes the remaining 3 tabs ([0..1, 1..3, 3..6]).
++        set_tab_bar_wrapping_settings(cx, Some(3), Some(100.), Some(200.));
++        let bounds = tab_bounds_all(cx);
++        let row_height = cx.update(|_window, cx| Tab::container_height(cx));
++        let (first_w, full_w) = pane.read_with(cx, |pane, _cx| {
++            (
++                pane.tab_rows
++                    .first_row_width
++                    .expect("first_row_width should be measured"),
++                pane.tab_rows
++                    .full_row_width
++                    .expect("full_row_width should be measured"),
++            )
++        });
++        assert!(
++            first_w < full_w,
++            "row 1 available width ({first_w:?}) must be narrower than full row width ({full_w:?})"
++        );
++        let cap1 = ui::tab_row_capacity(first_w, px(100.), ui::TAB_BAR_FILLER_MIN_WIDTH);
++        let cap2 = ui::tab_row_capacity(full_w, px(100.), ui::TAB_BAR_FILLER_MIN_WIDTH);
++        assert_eq!(cap1, 1);
++        assert_eq!(cap2, 2);
++        assert_eq!(ui::tab_row_ranges(6, cap1, cap2, 3), vec![0..1, 1..3, 3..6]);
++
++        let row1_y = bounds[0].origin.y;
++        let row2_y = bounds[1].origin.y;
++        let row3_y = bounds[3].origin.y;
++        assert_eq!(row2_y - row1_y, row_height);
++        assert_eq!(row3_y - row2_y, row_height);
++        assert_eq!(bounds[2].origin.y, row2_y);
++        assert_eq!(bounds[4].origin.y, row3_y);
++        assert_eq!(bounds[5].origin.y, row3_y);
++        assert!(bounds[1].origin.x < bounds[2].origin.x);
++        assert!(bounds[3].origin.x < bounds[4].origin.x);
++        assert!(bounds[4].origin.x < bounds[5].origin.x);
++
++        // Row 1 is inset by navigation buttons, while Rows 2 and 3 start at the pane's left edge.
++        assert!(
++            bounds[0].origin.x > bounds[1].origin.x,
++            "row 1 first tab ({:?}) must start to the right of row 2 first tab ({:?})",
++            bounds[0].origin.x,
++            bounds[1].origin.x
++        );
++        assert_eq!(bounds[1].origin.x, bounds[3].origin.x);
++
++        let plus_button_bounds = cx
++            .debug_bounds("ICON-Plus")
++            .expect("new tab button should be rendered");
++        assert!(
++            plus_button_bounds.center().y >= bounds[0].top()
++                && plus_button_bounds.center().y <= bounds[0].bottom(),
++            "tab bar action buttons must stay in row 1"
++        );
++
++        #[cfg(target_os = "macos")]
++        {
++            let without_traffic_lights_x = bounds[0].origin.x;
++            cx.update_global(|store: &mut SettingsStore, cx| {
++                store.update_user_settings(cx, |settings| {
++                    settings.workspace.title_bar_to_status_bar = Some(true);
++                });
++            });
++            settle_tab_bar_layout(cx);
++            let bounds_tl = tab_bounds_all(cx);
++            assert!(
++                bounds_tl[0].origin.x
++                    >= without_traffic_lights_x + px(ui::utils::TRAFFIC_LIGHT_PADDING),
++                "row 1 must reserve traffic-light space when title_bar_to_status_bar is enabled"
++            );
++            assert_eq!(
++                bounds_tl[1].origin.x, bounds[1].origin.x,
++                "row 2 must start at full pane left edge without traffic-light spacer"
++            );
++        }
++    }
++
++    #[gpui::test]
++    async fn test_tab_bar_max_tab_rows_proportional_shrink_and_last_row_scroll(
++        cx: &mut TestAppContext,
++    ) {
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs, None, cx).await;
++        let (workspace, cx) =
++            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
++        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
++
++        cx.simulate_resize(size(px(220.), px(300.)));
++        set_tab_bar_wrapping_settings(cx, Some(3), Some(30.), Some(120.));
++
++        add_labeled_item(&pane, "0", false, cx);
++        settle_tab_bar_layout(cx);
++
++        let natural_width = cx
++            .debug_bounds("TAB-0")
++            .expect("TAB-0 should be rendered")
++            .size
++            .width;
++        assert!(
++            natural_width > px(30.) && natural_width <= px(120.),
++            "TestItem natural width ({natural_width:?}) should lie strictly between min_width (30px) and max_width (120px)"
++        );
++
++        let (first_w, full_w) = pane.read_with(cx, |pane, _cx| {
++            (
++                pane.tab_rows
++                    .first_row_width
++                    .expect("first_row_width should be measured"),
++                pane.tab_rows
++                    .full_row_width
++                    .expect("full_row_width should be measured"),
++            )
++        });
++        let cap1 = ui::tab_row_capacity(first_w, px(30.), ui::TAB_BAR_FILLER_MIN_WIDTH);
++        let cap2 = ui::tab_row_capacity(full_w, px(30.), ui::TAB_BAR_FILLER_MIN_WIDTH);
++        assert_eq!(cap2, 6);
++
++        // Add tabs so Row 1 has `cap1` tabs and Row 2 has 2 tabs (which fit at natural width ~44px in 220px).
++        for ix in 1..(cap1 + 2) {
++            add_labeled_item(&pane, &ix.to_string(), false, cx);
++        }
++        settle_tab_bar_layout(cx);
++
++        let row1_y = cx.debug_bounds("TAB-0").unwrap().origin.y;
++        let row2_first_bounds =
++            tab_debug_bounds(cx, cap1).expect("first tab in row 2 should be rendered");
++        let row2_y = row2_first_bounds.origin.y;
++        assert!(row2_y > row1_y, "tabs should wrap onto row 2");
++        assert!(
++            (row2_first_bounds.size.width - natural_width).abs() < px(1.),
++            "tabs in non-full row 2 ({:?}) should keep their natural width ({natural_width:?})",
++            row2_first_bounds.size.width
++        );
++
++        // Fill Row 2 to its capacity `cap2 = 6` (6 * 44 + 24 = 288 > 220 >= 6 * 30 + 24 = 204),
++        // so tabs in Row 2 shrink below natural_width but never below min_width (30px).
++        for ix in (cap1 + 2)..(cap1 + cap2) {
++            add_labeled_item(&pane, &ix.to_string(), false, cx);
++        }
++        settle_tab_bar_layout(cx);
++
++        for ix in cap1..(cap1 + cap2) {
++            let bounds = tab_debug_bounds(cx, ix)
++                .unwrap_or_else(|| panic!("TAB-{ix} should be rendered in row 2"));
++            assert_eq!(bounds.origin.y, row2_y, "TAB-{ix} should remain in row 2");
++            assert!(
++                bounds.size.width < natural_width - px(1.)
++                    && bounds.size.width >= px(30.) - px(0.5),
++                "TAB-{ix} in full row 2 should shrink below natural width ({natural_width:?}) and >= min_width (30px), got {:?}",
++                bounds.size.width
++            );
++        }
++
++        // Add more tabs so Row 3 overflows (cap1 + cap2 + cap2 + 5 tabs).
++        let row3_start = cap1 + cap2;
++        let total_tabs = row3_start + cap2 + 5;
++        for ix in row3_start..total_tabs {
++            add_labeled_item(&pane, &ix.to_string(), false, cx);
++        }
++        settle_tab_bar_layout(cx);
++
++        let row3_y = tab_debug_bounds(cx, row3_start)
++            .expect("first tab of row 3 should be rendered")
++            .origin
++            .y;
++        assert!(row3_y > row2_y, "row 3 must be positioned below row 2");
++
++        for ix in row3_start..total_tabs {
++            let bounds = tab_debug_bounds(cx, ix)
++                .unwrap_or_else(|| panic!("TAB-{ix} should be rendered in row 3"));
++            assert_eq!(
++                bounds.origin.y, row3_y,
++                "TAB-{ix} must stay in row 3 (no 4th row allowed when max_tab_rows = 3)"
++            );
++            assert!(
++                (bounds.size.width - px(30.)).abs() < px(1.),
++                "overflowing row 3 tab TAB-{ix} must compress to min_width (30px), got {:?}",
++                bounds.size.width
++            );
++        }
++
++        // Activate tab 0, then activate the last tab in Row 3 and verify Row 3 scrolls it completely into view.
++        pane.update_in(cx, |pane, window, cx| {
++            pane.activate_item(0, true, true, window, cx);
++        });
++        settle_tab_bar_layout(cx);
++
++        let last_ix = total_tabs - 1;
++        pane.update_in(cx, |pane, window, cx| {
++            pane.activate_item(last_ix, true, true, window, cx);
++        });
++        settle_tab_bar_layout(cx);
++
++        let scroll_handle = pane.read_with(cx, |pane, _| pane.tab_bar_scroll_handle.clone());
++        assert!(
++            scroll_handle.max_offset().x > px(0.),
++            "row 3 must overflow horizontally"
++        );
++        assert!(
++            scroll_handle.offset().x < px(0.),
++            "row 3 must scroll horizontally to reveal the active tab"
++        );
++        let scroll_bounds = scroll_handle.bounds();
++        let last_tab_bounds =
++            tab_debug_bounds(cx, last_ix).expect("active last tab in row 3 should be rendered");
++        assert!(
++            last_tab_bounds.left() >= scroll_bounds.left() - px(1.)
++                && last_tab_bounds.right() <= scroll_bounds.right() + px(1.),
++            "active tab in row 3 ({last_tab_bounds:?}) must be scrolled completely into view ({scroll_bounds:?})"
++        );
++    }
++
++    #[gpui::test]
++    async fn test_tab_bar_max_tab_rows_recomputes_on_close_and_keeps_pinned_unaffected(
++        cx: &mut TestAppContext,
++    ) {
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs, None, cx).await;
++        let (workspace, cx) =
++            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
++        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
++
++        cx.simulate_resize(size(px(300.), px(300.)));
++        set_tab_bar_wrapping_settings(cx, Some(3), Some(80.), Some(160.));
++
++        for label in ["P0", "P1", "U0", "U1", "U2", "U3", "U4", "U5", "U6"] {
++            add_labeled_item(&pane, label, false, cx);
++        }
++        pane.update_in(cx, |pane, window, cx| {
++            pane.pin_tab_at(0, window, cx);
++            pane.pin_tab_at(1, window, cx);
++        });
++        settle_tab_bar_layout(cx);
++
++        // 1. With show_pinned_tabs_in_separate_row = false:
++        //    Pinned tabs P0, P1 stay in row 1 alongside U0 (cap1 = 1), while U1..U3 wrap to row 2 (cap2 = 3)
++        //    and U4..U6 wrap to row 3.
++        let p0_y = cx.debug_bounds("TAB-0").unwrap().origin.y;
++        let p1_y = cx.debug_bounds("TAB-1").unwrap().origin.y;
++        let u0_y = cx.debug_bounds("TAB-2").unwrap().origin.y;
++        let u1_y = cx.debug_bounds("TAB-3").unwrap().origin.y;
++        let u4_y = cx.debug_bounds("TAB-6").unwrap().origin.y;
++        assert_eq!(p0_y, p1_y, "pinned tabs must stay on row 1");
++        assert_eq!(
++            u0_y, p0_y,
++            "first unpinned tab shares row 1 with inline pinned tabs"
++        );
++        assert!(u1_y > p0_y, "unpinned tabs overflow onto row 2");
++        assert!(u4_y > u1_y, "unpinned tabs overflow onto row 3");
++
++        // 2. Enable show_pinned_tabs_in_separate_row = true:
++        //    Pinned tabs occupy their own top row (pinned_y), which does NOT count toward max_tab_rows = 3,
++        //    allowing 3 full-width unpinned rows below pinned_y (3 + 3 + 1 = 7 unpinned tabs).
++        set_pinned_tabs_separate_row(cx, true);
++        settle_tab_bar_layout(cx);
++
++        let pinned_y = cx.debug_bounds("TAB-0").unwrap().origin.y;
++        assert_eq!(cx.debug_bounds("TAB-1").unwrap().origin.y, pinned_y);
++        let row1_y = cx.debug_bounds("TAB-2").unwrap().origin.y;
++        let row2_y = cx.debug_bounds("TAB-5").unwrap().origin.y;
++        let row3_y = cx.debug_bounds("TAB-8").unwrap().origin.y;
++        assert!(
++            pinned_y < row1_y && row1_y < row2_y && row2_y < row3_y,
++            "separate pinned row ({pinned_y:?}) must not count toward max_tab_rows = 3 ({row1_y:?}, {row2_y:?}, {row3_y:?})"
++        );
++        for ix in 2..=4 {
++            assert_eq!(tab_debug_bounds(cx, ix).unwrap().origin.y, row1_y);
++        }
++        for ix in 5..=7 {
++            assert_eq!(tab_debug_bounds(cx, ix).unwrap().origin.y, row2_y);
++        }
++        assert_eq!(cx.debug_bounds("TAB-8").unwrap().origin.y, row3_y);
++
++        // 3. Close 1 unpinned tab (U0 at index 2):
++        //    The 6 remaining unpinned tabs fit into 2 rows (3 + 3), so U6 moves up from row 3 to row 2
++        //    and surplus row 3 disappears immediately.
++        pane.update_in(cx, |pane, window, cx| {
++            let item_id = pane.items[2].item_id();
++            pane.close_item_by_id(item_id, SaveIntent::Close, window, cx)
++        })
++        .await
++        .unwrap();
++        settle_tab_bar_layout(cx);
++
++        assert!(cx.debug_bounds("TAB-8").is_none());
++        assert_eq!(
++            cx.debug_bounds("TAB-7").unwrap().origin.y,
++            row2_y,
++            "last unpinned tab must move up from row 3 to row 2 after closing a tab"
++        );
++
++        // 4. Close 3 more unpinned tabs so only 3 unpinned tabs remain:
++        //    All 3 remaining unpinned tabs move into row 1 and surplus row 2 disappears.
++        for _ in 0..3 {
++            pane.update_in(cx, |pane, window, cx| {
++                let item_id = pane.items[2].item_id();
++                pane.close_item_by_id(item_id, SaveIntent::Close, window, cx)
++            })
++            .await
++            .unwrap();
++        }
++        settle_tab_bar_layout(cx);
++
++        assert!(cx.debug_bounds("TAB-5").is_none());
++        for ix in 2..=4 {
++            assert_eq!(
++                tab_debug_bounds(cx, ix).unwrap().origin.y,
++                row1_y,
++                "remaining 3 unpinned tabs must all sit on unpinned row 1"
++            );
++        }
++    }
++
++    #[gpui::test]
++    async fn test_tab_bar_max_tab_rows_drop_in_row_empty_space(cx: &mut TestAppContext) {
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs, None, cx).await;
++        let (workspace, cx) =
++            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
++        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
++
++        // With window width 330px and min_width = max_width = 80px:
++        // Row 1 available width W1 is ~220px -> cap1 = floor((220 - 24) / 80) = 2 tabs ([0, 1]),
++        // leaving ~60px of empty filler space at the right end of Row 1.
++        // Row 2 has tabs [2, 3].
++        cx.simulate_resize(size(px(330.), px(300.)));
++        set_tab_bar_wrapping_settings(cx, Some(3), Some(80.), Some(80.));
++
++        for label in ["A", "B", "C", "D"] {
++            add_labeled_item(&pane, label, false, cx);
++        }
++        assert_item_labels(&pane, ["A", "B", "C", "D*"], cx);
++        settle_tab_bar_layout(cx);
++
++        let tab0 = cx.debug_bounds("TAB-0").unwrap();
++        let tab1 = cx.debug_bounds("TAB-1").unwrap();
++        let tab2 = cx.debug_bounds("TAB-2").unwrap();
++        let tab3 = cx.debug_bounds("TAB-3").unwrap();
++        assert_eq!(tab0.origin.y, tab1.origin.y, "A and B should be on row 1");
++        assert_eq!(tab2.origin.y, tab3.origin.y, "C and D should be on row 2");
++        assert!(
++            tab0.origin.y < tab2.origin.y,
++            "row 1 must be above row 2 when max_tab_rows = 3"
++        );
++
++        // 1. Drag tab D (index 3, in row 2) onto row 1's empty space filler (immediately right of TAB-1):
++        //    It must be placed right after row 1's last tab B (at index 2, before C).
++        let row1_empty_pos = gpui::point(tab1.right() + px(12.), tab1.center().y);
++        cx.simulate_event(MouseDownEvent {
++            position: tab3.center(),
++            button: MouseButton::Left,
++            modifiers: Modifiers::default(),
++            click_count: 1,
++            first_mouse: false,
++        });
++        cx.run_until_parked();
++        cx.simulate_event(MouseMoveEvent {
++            position: row1_empty_pos,
++            pressed_button: Some(MouseButton::Left),
++            modifiers: Modifiers::default(),
++        });
++        cx.run_until_parked();
++        cx.simulate_event(MouseUpEvent {
++            position: row1_empty_pos,
++            button: MouseButton::Left,
++            modifiers: Modifiers::default(),
++            click_count: 1,
++        });
++        settle_tab_bar_layout(cx);
++
++        assert_item_labels(&pane, ["A", "B", "D*", "C"], cx);
++
++        // 2. Drag tab A (index 0, first tab in row 1) onto row 1's empty space filler:
++        //    It must land immediately after row 1's last tab B (at index 1, before D).
++        let tab0 = cx.debug_bounds("TAB-0").unwrap();
++        let tab1 = cx.debug_bounds("TAB-1").unwrap();
++        let row1_empty_pos = gpui::point(tab1.right() + px(12.), tab1.center().y);
++        cx.simulate_event(MouseDownEvent {
++            position: tab0.center(),
++            button: MouseButton::Left,
++            modifiers: Modifiers::default(),
++            click_count: 1,
++            first_mouse: false,
++        });
++        cx.run_until_parked();
++        cx.simulate_event(MouseMoveEvent {
++            position: row1_empty_pos,
++            pressed_button: Some(MouseButton::Left),
++            modifiers: Modifiers::default(),
++        });
++        cx.run_until_parked();
++        cx.simulate_event(MouseUpEvent {
++            position: row1_empty_pos,
++            button: MouseButton::Left,
++            modifiers: Modifiers::default(),
++            click_count: 1,
++        });
++        settle_tab_bar_layout(cx);
++
++        assert_item_labels(&pane, ["B", "A*", "D", "C"], cx);
++
++        // 3. Double-clicking the empty space at the end of row 2 dispatches the double-click action (NewFile).
++        let new_file_dispatched = Rc::new(Cell::new(false));
++        cx.update(|_window, cx| {
++            let new_file_dispatched = new_file_dispatched.clone();
++            cx.on_action(move |_: &NewFile, _cx| {
++                new_file_dispatched.set(true);
++            });
++        });
++        let tab3 = cx.debug_bounds("TAB-3").unwrap();
++        let row2_empty_pos = gpui::point(tab3.right() + px(12.), tab3.center().y);
++        cx.simulate_event(MouseDownEvent {
++            position: row2_empty_pos,
++            button: MouseButton::Left,
++            modifiers: Modifiers::default(),
++            click_count: 2,
++            first_mouse: false,
++        });
++        cx.run_until_parked();
++        cx.simulate_event(MouseUpEvent {
++            position: row2_empty_pos,
++            button: MouseButton::Left,
++            modifiers: Modifiers::default(),
++            click_count: 2,
++        });
++        cx.run_until_parked();
++        assert!(
++            new_file_dispatched.get(),
++            "double-clicking row 2 empty space filler must dispatch the new file action"
++        );
++    }
++
+     mod property_test {
+         use super::*;
+         use proptest::prelude::*;
+diff --git a/crates/workspace/src/status_bar.rs b/crates/workspace/src/status_bar.rs
+index 0cf9e97b1360710e0eea288460797dbe785d5bba..c028e77cdbd1eaa10da6c3c3058a923e32dbb231 100644
+--- a/crates/workspace/src/status_bar.rs
++++ b/crates/workspace/src/status_bar.rs
+@@ -1,6 +1,6 @@
+ use crate::{
+     ItemHandle, MultiWorkspace, Pane, SidebarSide, ToggleWorkspaceSidebar,
+-    sidebar_side_context_menu,
++    sidebar_side_context_menu, title_bar_in_status_bar,
+ };
+ use gpui::{
+     Anchor, AnyView, App, Context, Decorations, Entity, FocusHandle, Focusable, IntoElement,
+@@ -100,6 +100,7 @@ impl SidebarStatus {
+ pub struct StatusBar {
+     left_items: Vec<Box<dyn StatusItemViewHandle>>,
+     right_items: Vec<Box<dyn StatusItemViewHandle>>,
++    titlebar_item: Option<(AnyView, FocusHandle)>,
+     active_pane: Entity<Pane>,
+     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
+     focus_handle: FocusHandle,
+@@ -182,6 +183,20 @@ impl Render for StatusBar {
+                     .border_color(cx.theme().colors().status_bar_background),
+             })
+             .child(self.render_left_tools(&sidebar, cx))
++            .children(
++                self.titlebar_item
++                    .clone()
++                    .filter(|_| title_bar_in_status_bar(cx))
++                    .map(|(item, focus_handle)| {
++                        div()
++                            .id("titlebar-in-status-bar")
++                            .track_focus(&focus_handle)
++                            .flex_1()
++                            .min_w_0()
++                            .overflow_x_hidden()
++                            .child(item)
++                    }),
++            )
+             .child(self.render_right_tools(&sidebar, cx))
+     }
+ }
+@@ -333,6 +348,7 @@ impl StatusBar {
+         let mut this = Self {
+             left_items: Default::default(),
+             right_items: Default::default(),
++            titlebar_item: None,
+             active_pane: active_pane.clone(),
+             multi_workspace,
+             focus_handle: cx.focus_handle(),
+@@ -344,6 +360,15 @@ impl StatusBar {
+         this
+     }
+ 
++    pub(crate) fn set_titlebar_item(
++        &mut self,
++        item: Option<(AnyView, FocusHandle)>,
++        cx: &mut Context<Self>,
++    ) {
++        self.titlebar_item = item;
++        cx.notify();
++    }
++
+     pub fn set_multi_workspace(
+         &mut self,
+         multi_workspace: WeakEntity<MultiWorkspace>,
+diff --git a/crates/workspace/src/toolbar.rs b/crates/workspace/src/toolbar.rs
+index b14775f289d27d31e57ef554478a8ddfcd5cfe86..c7213d027532c1e79a73301a03f63ce0cb969456 100644
+--- a/crates/workspace/src/toolbar.rs
++++ b/crates/workspace/src/toolbar.rs
+@@ -1,9 +1,10 @@
+-use crate::ItemHandle;
++use crate::{ItemHandle, WorkspaceSettings};
+ use gpui::{
+     AnyView, App, Context, Div, Entity, EntityId, EventEmitter, Global, KeyContext,
+     ParentElement as _, Render, Styled, Window,
+ };
+ use language::LanguageRegistry;
++use settings::Settings as _;
+ use std::sync::Arc;
+ use ui::prelude::*;
+ use ui::{h_flex, v_flex};
+@@ -69,6 +70,23 @@ pub struct Toolbar {
+ }
+ 
+ impl Toolbar {
++    /// Height of one toolbar row under `toolbar.compact`, `None` when the setting is off. A tab's
++    /// content height plus the toolbar's 1px bottom border equals the tab bar height, so a
++    /// single-row toolbar is exactly as tall as the tab bar; every row nested in the toolbar
++    /// (search inputs, breadcrumbs) derives its height from here.
++    pub fn compact_row_height(cx: &App) -> Option<Pixels> {
++        WorkspaceSettings::get_global(cx)
++            .compact_toolbar
++            .then(|| ui::Tab::content_height(cx))
++    }
++
++    pub fn row_height(cx: &App) -> gpui::DefiniteLength {
++        match Self::compact_row_height(cx) {
++            Some(height) => height.into(),
++            None => rems(2.0).into(),
++        }
++    }
++
+     fn has_any_visible_items(&self) -> bool {
+         self.items
+             .iter()
+@@ -116,15 +134,19 @@ impl Render for Toolbar {
+ 
+         let has_left_items = self.left_items().count() > 0;
+         let has_right_items = self.right_items().count() > 0;
++        let compact_height = Self::compact_row_height(cx);
+ 
+         v_flex()
+             .group("toolbar")
+             .relative()
+-            .py(DynamicSpacing::Base06.rems(cx))
+-            .px(DynamicSpacing::Base08.rems(cx))
+-            .when(has_left_items || has_right_items, |this| {
+-                this.gap(DynamicSpacing::Base06.rems(cx))
++            .when(compact_height.is_none(), |this| {
++                this.py(DynamicSpacing::Base06.rems(cx))
+             })
++            .px(DynamicSpacing::Base08.rems(cx))
++            .when(
++                (has_left_items || has_right_items) && compact_height.is_none(),
++                |this| this.gap(DynamicSpacing::Base06.rems(cx)),
++            )
+             .border_b_1()
+             .border_color(cx.theme().colors().border_variant)
+             .bg(cx.theme().colors().toolbar_background)
+@@ -137,7 +159,7 @@ impl Render for Toolbar {
+                         .when(has_left_items, |this| {
+                             this.child(
+                                 h_flex()
+-                                    .min_h_8()
++                                    .min_h(Self::row_height(cx))
+                                     .flex_auto()
+                                     .justify_start()
+                                     .overflow_x_hidden()
+@@ -147,7 +169,7 @@ impl Render for Toolbar {
+                         .when(has_right_items, |this| {
+                             this.child(
+                                 h_flex()
+-                                    .h_8()
++                                    .h(Self::row_height(cx))
+                                     .flex_row_reverse()
+                                     .when(has_left_items, |this| this.flex_none())
+                                     .justify_end()
+@@ -156,7 +178,18 @@ impl Render for Toolbar {
+                         }),
+                 )
+             })
+-            .children(secondary_items)
++            // Without the wrapper a content-sized notice would be taller or shorter than the
++            // search rows, which are whole compact rows.
++            .children(secondary_items.map(|item| {
++                match compact_height {
++                    Some(height) => v_flex()
++                        .min_h(height)
++                        .justify_center()
++                        .child(item)
++                        .into_any_element(),
++                    None => item.into_any_element(),
++                }
++            }))
+     }
+ }
+ 
+diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
+index 0dbfd52ceb5a96d52fcd79caf6359a6c54ff006f..855b64a06156ab233df67dec1b1aba77f7c2037c 100644
+--- a/crates/workspace/src/workspace.rs
++++ b/crates/workspace/src/workspace.rs
+@@ -324,6 +324,114 @@ static ZED_WINDOW_POSITION: LazyLock<Option<Point<Pixels>>> = LazyLock::new(|| {
+         .and_then(parse_pixel_position_env_var)
+ });
+ 
++/// Whether the title bar's contents live in the status bar. Only macOS supports this: Windows and
++/// Linux draw their window controls in the title bar, so it has to stay there.
++pub fn title_bar_in_status_bar(cx: &App) -> bool {
++    cfg!(target_os = "macos")
++        && WorkspaceSettings::get_global(cx).title_bar_to_status_bar
++        && StatusBarSettings::get_global(cx).show
++}
++
++/// Where stock Zed puts the traffic lights; the title bar is centred on them.
++pub const TRAFFIC_LIGHT_INSET: Pixels = px(9.);
++
++pub fn panel_row_height(cx: &App) -> Option<Pixels> {
++    ThemeSettings::get_global(cx)
++        .panel_rows_tab_height
++        .then(|| ui::Tab::container_height(cx))
++}
++
++/// Without the title bar the traffic lights are centred between the window's top edge and the
++/// bottom border of the tab-height header beside them, as far from the left edge as from the top.
++/// The button size depends on the macOS SDK, so it is only known once the window exists; until
++/// then (and with the title bar in place) they keep the stock inset. The headers' reserved width
++/// (`TRAFFIC_LIGHT_PADDING`) assumes that stock inset, so the centred lights leave up to ~2.5px
++/// more room before the first tab (compact density): not worth reading the live size every frame.
++#[cfg(target_os = "macos")]
++fn update_traffic_light_position(window: &Window, cx: &App) {
++    let inset = match window.traffic_light_size() {
++        Some(button) if title_bar_in_status_bar(cx) => {
++            // A header shorter than the buttons (tiny UI font) would push them off the window.
++            ((ui::Tab::content_height(cx) - button.height) / 2.).max(px(0.))
++        }
++        _ => TRAFFIC_LIGHT_INSET,
++    };
++    window.set_traffic_light_position(point(inset, inset));
++}
++
++/// Without the title bar the traffic lights overlay the workspace's top-left corner,
++/// unless the sidebar beside them holds them in its header.
++pub fn traffic_lights_overlay_workspace(window: &Window, cx: &App) -> bool {
++    if !title_bar_in_status_bar(cx)
++        || window.is_fullscreen()
++        || window.is_simple_fullscreen()
++        || matches!(
++            WorkspaceSettings::get_global(cx).title_bar_visibility,
++            settings::TitleBarVisibility::Never
++        )
++    {
++        return false;
++    }
++    let sidebar = window
++        .root::<MultiWorkspace>()
++        .flatten()
++        .map(|multi_workspace| multi_workspace.read(cx).sidebar_render_state(cx))
++        .unwrap_or_default();
++    !(sidebar.open && sidebar.side == SidebarSide::Left)
++}
++
++/// Lets a drag that starts on `element` move the window, as the title bar does.
++#[track_caller]
++pub fn move_window_on_drag(
++    element: Stateful<Div>,
++    window: &mut Window,
++    cx: &mut App,
++) -> Stateful<Div> {
++    let drag_started = window.use_state(cx, |_, _| false);
++    element
++        .on_mouse_down(MouseButton::Left, {
++            let drag_started = drag_started.clone();
++            move |_, _, cx| drag_started.update(cx, |started, _| *started = true)
++        })
++        .on_mouse_up(MouseButton::Left, {
++            let drag_started = drag_started.clone();
++            move |_, _, cx| drag_started.update(cx, |started, _| *started = false)
++        })
++        .on_mouse_down_out({
++            let drag_started = drag_started.clone();
++            move |_, _, cx| drag_started.update(cx, |started, _| *started = false)
++        })
++        .on_mouse_move(move |event, window, cx| {
++            if drag_started.update(cx, |started, _| std::mem::take(started)) && event.dragging() {
++                window.start_window_move();
++            }
++        })
++}
++
++/// Makes `element` an empty stretch of the title bar again: a drag moves the window and a
++/// double-click zooms it. Not for areas whose double-click already does something else.
++#[track_caller]
++pub fn title_bar_area(element: Stateful<Div>, window: &mut Window, cx: &mut App) -> Stateful<Div> {
++    move_window_on_drag(element, window, cx).on_click(|event, window, _| {
++        if event.click_count() == 2 {
++            window.titlebar_double_click();
++        }
++    })
++}
++
++/// A tab-bar-high strip that keeps the traffic lights off the content below it, for headers that
++/// have no tab bar of their own to hold the spacer: the left dock, zoomed panels and a top-left
++/// pane that shows no tab bar.
++#[track_caller]
++pub(crate) fn traffic_light_row(window: &mut Window, cx: &mut App) -> Stateful<Div> {
++    title_bar_area(div().id("traffic-light-spacer"), window, cx)
++        .flex_none()
++        .h(ui::Tab::container_height(cx))
++        .bg(cx.theme().colors().tab_bar_background)
++        .border_b_1()
++        .border_color(cx.theme().colors().border)
++}
++
+ pub trait TerminalProvider {
+     fn spawn(
+         &self,
+@@ -1687,6 +1795,12 @@ pub struct Workspace {
+     /// the window, used to skip title recomputation when unrelated settings
+     /// change.
+     last_window_title_settings: Option<(String, String)>,
++    /// Last seen `title_bar_in_status_bar`, to notice when it is toggled.
++    title_bar_to_status_bar: bool,
++    /// The header height the traffic lights were last centred in. UI font size shortcuts change
++    /// it without touching the settings.
++    #[cfg(target_os = "macos")]
++    traffic_light_header_height: Pixels,
+     dirty_items: HashMap<EntityId, Subscription>,
+     active_call: Option<(GlobalAnyActiveCall, Vec<Subscription>)>,
+     leader_updates_tx: mpsc::UnboundedSender<(PeerId, proto::UpdateFollowers)>,
+@@ -2092,6 +2206,21 @@ impl Workspace {
+                 if last_title_settings != Some(title_settings) {
+                     this.update_window_title(window, cx);
+                 }
++
++                let title_bar_to_status_bar = title_bar_in_status_bar(cx);
++                let title_bar_toggled = this.title_bar_to_status_bar != title_bar_to_status_bar;
++                this.title_bar_to_status_bar = title_bar_to_status_bar;
++                // The header the buttons are centred in follows the UI font size and density.
++                #[cfg(target_os = "macos")]
++                {
++                    if title_bar_toggled || title_bar_to_status_bar {
++                        this.traffic_light_header_height = ui::Tab::content_height(cx);
++                        update_traffic_light_position(window, cx);
++                    }
++                }
++                if title_bar_toggled {
++                    cx.notify();
++                }
+             }),
+             cx.subscribe_in(
+                 &project.read(cx).git_store().clone(),
+@@ -2152,6 +2281,13 @@ impl Workspace {
+             this.show_initial_notifications(cx);
+         });
+ 
++        #[cfg(target_os = "macos")]
++        {
++            if title_bar_in_status_bar(cx) {
++                update_traffic_light_position(window, cx);
++            }
++        }
++
+         let mut center = PaneGroup::new(center_pane.clone());
+         center.set_is_center(true);
+         center.mark_positions(cx);
+@@ -2189,6 +2325,9 @@ impl Workspace {
+             window_edited: false,
+             last_window_title: None,
+             last_window_title_settings: None,
++            title_bar_to_status_bar: title_bar_in_status_bar(cx),
++            #[cfg(target_os = "macos")]
++            traffic_light_header_height: ui::Tab::content_height(cx),
+             dirty_items: Default::default(),
+             active_call,
+             database_id: workspace_id,
+@@ -3516,12 +3655,18 @@ impl Workspace {
+     }
+ 
+     pub fn set_titlebar_item(&mut self, item: AnyView, _: &mut Window, cx: &mut Context<Self>) {
++        self.status_bar.update(cx, |status_bar, cx| {
++            status_bar
++                .set_titlebar_item(Some((item.clone(), self.titlebar_focus_handle.clone())), cx);
++        });
+         self.titlebar_item = Some(item);
+         cx.notify();
+     }
+ 
+     pub fn clear_titlebar_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+         if self.titlebar_item.take().is_some() {
++            self.status_bar
++                .update(cx, |status_bar, cx| status_bar.set_titlebar_item(None, cx));
+             if self.titlebar_focus_handle.contains_focused(window, cx) {
+                 window.focus(&self.fallback_focus_handle(window, cx), cx);
+             }
+@@ -9209,7 +9354,7 @@ impl Workspace {
+         };
+ 
+         let mut parts = Vec::new();
+-        if self.titlebar_item.is_some() {
++        if self.titlebar_item.is_some() && !self.title_bar_to_status_bar {
+             // The title bar is an ARIA toolbar, so region navigation lands on
+             // its first control rather than the toolbar container.
+             parts.push(FocusablePart::toolbar(self.titlebar_focus_handle.clone()));
+@@ -10155,6 +10300,10 @@ impl Render for Workspace {
+             && self.active_item(cx).is_some();
+         let pad_zoomed_pane =
+             self.centered_layout && self.zoomed.is_some() && self.zoomed_position.is_none();
++        let titlebar_item = self
++            .titlebar_item
++            .clone()
++            .filter(|_| !self.title_bar_to_status_bar);
+         let render_padding = |size| {
+             (size > 0.0).then(|| {
+                 div()
+@@ -10181,6 +10330,18 @@ impl Render for Workspace {
+         };
+         let centered_paddings = render_centered_paddings(pad_center_pane);
+         let zoomed_paddings = render_centered_paddings(pad_zoomed_pane);
++        // The zoom shortcuts change the UI font size without touching the settings, so the
++        // settings observer cannot see the header (and the buttons' centre) move.
++        #[cfg(target_os = "macos")]
++        {
++            if title_bar_in_status_bar(cx) {
++                let header_height = ui::Tab::content_height(cx);
++                if self.traffic_light_header_height != header_height {
++                    self.traffic_light_header_height = header_height;
++                    update_traffic_light_position(window, cx);
++                }
++            }
++        }
+         let ui_font = theme_settings::setup_ui_font(window, cx);
+ 
+         let theme = cx.theme().clone();
+@@ -10218,7 +10379,7 @@ impl Render for Workspace {
+             // a tab group: region navigation lands on the first control (per
+             // the ARIA toolbar pattern), Tab steps through them, and arrow keys
+             // move between them once focus is inside.
+-            .when_some(self.titlebar_item.clone(), |this, item| {
++            .when_some(titlebar_item, |this, item| {
+                 this.child(
+                     div()
+                         .id("titlebar-region")
+@@ -10271,7 +10432,7 @@ impl Render for Workspace {
+                             .flex()
+                             .flex_col()
+                             .overflow_hidden()
+-                            .border_t_1()
++                            .when(!self.title_bar_to_status_bar, |this| this.border_t_1())
+                             .border_b_1()
+                             .border_color(colors.border)
+                             .child({
+@@ -10622,6 +10783,17 @@ impl Render for Workspace {
+                                         })
+                                         .into_any_element(),
+                                 };
++                                let traffic_lights = traffic_lights_overlay_workspace(window, cx);
++                                let zoomed_element =
++                                    if traffic_lights && self.zoomed_position.is_some() {
++                                        v_flex()
++                                            .size_full()
++                                            .child(traffic_light_row(window, cx))
++                                            .child(div().flex_1().min_h_0().child(zoomed_element))
++                                            .into_any_element()
++                                    } else {
++                                        zoomed_element
++                                    };
+                                 let overlay = div()
+                                     .occlude()
+                                     .absolute()
+@@ -10636,13 +10808,20 @@ impl Render for Workspace {
+                                     return Some(overlay);
+                                 }
+ 
+-                                Some(match self.zoomed_position {
++                                let overlay = match self.zoomed_position {
+                                     Some(DockPosition::Left) => overlay.right_2().border_r_1(),
+                                     Some(DockPosition::Right) => overlay.left_2().border_l_1(),
+                                     Some(DockPosition::Bottom) => overlay.top_2().border_t_1(),
+                                     None => {
+                                         overlay.top_2().bottom_2().left_2().right_2().border_1()
+                                     }
++                                };
++                                // The traffic lights are centred in a header that starts at the
++                                // window's top edge, as it does unzoomed.
++                                Some(if traffic_lights {
++                                    overlay.top_0().border_t_0()
++                                } else {
++                                    overlay
+                                 })
+                             }))
+                             .children(self.render_notifications(window, cx)),
+@@ -13818,6 +13997,178 @@ mod tests {
+         );
+     }
+ 
++    #[cfg(target_os = "macos")]
++    fn set_title_bar_to_status_bar(enabled: bool, cx: &mut VisualTestContext) {
++        cx.update(|_, cx| {
++            SettingsStore::update_global(cx, |store, cx| {
++                store.update_user_settings(cx, |settings| {
++                    settings.workspace.title_bar_to_status_bar = Some(enabled);
++                })
++            });
++        });
++        cx.run_until_parked();
++    }
++
++    #[cfg(target_os = "macos")]
++    #[gpui::test]
++    async fn test_title_bar_to_status_bar(cx: &mut TestAppContext) {
++        struct TestTitleBar;
++        impl Render for TestTitleBar {
++            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
++                div().size_4().debug_selector(|| "test_title_bar".into())
++            }
++        }
++
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs, None, cx).await;
++        let (workspace, cx) =
++            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
++        workspace.update_in(cx, |workspace, window, cx| {
++            workspace.set_titlebar_item(cx.new(|_| TestTitleBar).into(), window, cx);
++        });
++
++        let title_bar_top = |enabled, cx: &mut VisualTestContext| {
++            set_title_bar_to_status_bar(enabled, cx);
++            cx.debug_bounds("test_title_bar")
++                .expect("title bar contents should be rendered")
++                .top()
++        };
++        let in_title_bar = title_bar_top(false, cx);
++        assert!(title_bar_top(true, cx) > in_title_bar + px(100.));
++        assert_eq!(title_bar_top(false, cx), in_title_bar);
++
++        set_title_bar_to_status_bar(true, cx);
++        workspace.update_in(cx, |workspace, window, cx| {
++            window.focus(&workspace.titlebar_focus_handle, cx);
++            assert!(workspace.titlebar_focus_handle.contains_focused(window, cx));
++            workspace.clear_titlebar_item(window, cx);
++            assert!(workspace.active_pane.focus_handle(cx).is_focused(window));
++        });
++        cx.run_until_parked();
++        assert!(cx.debug_bounds("test_title_bar").is_none());
++    }
++
++    #[cfg(target_os = "macos")]
++    #[gpui::test]
++    async fn test_title_bar_to_status_bar_keeps_title_when_status_bar_hidden(
++        cx: &mut TestAppContext,
++    ) {
++        struct TestTitleBar;
++        impl Render for TestTitleBar {
++            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
++                div().size_4().debug_selector(|| "test_title_bar".into())
++            }
++        }
++
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs, None, cx).await;
++        let (workspace, cx) =
++            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
++        workspace.update_in(cx, |workspace, window, cx| {
++            workspace.set_titlebar_item(cx.new(|_| TestTitleBar).into(), window, cx);
++        });
++        cx.run_until_parked();
++
++        set_title_bar_to_status_bar(false, cx);
++        let title_bar_top = cx
++            .debug_bounds("test_title_bar")
++            .expect("title bar contents should be rendered")
++            .top();
++        set_title_bar_to_status_bar(true, cx);
++        cx.update(|_, cx| {
++            SettingsStore::update_global(cx, |store, cx| {
++                store.update_user_settings(cx, |settings| {
++                    settings.status_bar.get_or_insert_default().show = Some(false);
++                })
++            });
++        });
++        cx.run_until_parked();
++
++        assert_eq!(
++            cx.debug_bounds("test_title_bar")
++                .expect("hidden status bar must retain title bar contents")
++                .top(),
++            title_bar_top
++        );
++    }
++
++    #[cfg(target_os = "macos")]
++    #[gpui::test]
++    async fn test_title_bar_to_status_bar_reserves_traffic_lights(cx: &mut TestAppContext) {
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs, None, cx).await;
++        let (workspace, cx) =
++            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
++        add_an_item_to_active_pane(cx, &workspace, 1);
++
++        let first_tab_left = |enabled, cx: &mut VisualTestContext| {
++            set_title_bar_to_status_bar(enabled, cx);
++            cx.debug_bounds("TAB-0")
++                .expect("the tab should be rendered")
++                .left()
++        };
++        let without_spacer = first_tab_left(false, cx);
++        assert!(first_tab_left(true, cx) >= without_spacer + px(ui::utils::TRAFFIC_LIGHT_PADDING));
++
++        cx.update(|_, cx| {
++            SettingsStore::update_global(cx, |store, cx| {
++                store.update_user_settings(cx, |settings| {
++                    settings.title_bar.get_or_insert_default().show =
++                        Some(settings::TitleBarVisibility::Never);
++                })
++            });
++        });
++        cx.run_until_parked();
++        assert_eq!(
++            cx.debug_bounds("TAB-0")
++                .expect("the tab should be rendered")
++                .left(),
++            without_spacer
++        );
++    }
++
++    #[gpui::test]
++    async fn test_tab_width_bounds(cx: &mut TestAppContext) {
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs, None, cx).await;
++        let (workspace, cx) =
++            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
++        add_an_item_to_active_pane(cx, &workspace, 1);
++        add_an_item_to_active_pane(cx, &workspace, 2);
++
++        let tab_width =
++            |min_width: Option<f32>, max_width: Option<f32>, cx: &mut VisualTestContext| {
++                cx.update(|_, cx| {
++                    SettingsStore::update_global(cx, |store, cx| {
++                        store.update_user_settings(cx, |settings| {
++                            let tabs = settings.tabs.get_or_insert_default();
++                            tabs.min_width = min_width.map(Into::into);
++                            tabs.max_width = max_width.map(Into::into);
++                        })
++                    });
++                });
++                cx.run_until_parked();
++                cx.debug_bounds("TAB-0")
++                    .expect("the tab should be rendered")
++                    .size
++                    .width
++            };
++        let natural = tab_width(None, None, cx);
++        assert_eq!(
++            tab_width(Some(natural.as_f32() + 100.), None, cx),
++            natural + px(100.)
++        );
++        assert_eq!(
++            tab_width(None, Some(natural.as_f32() - 10.), cx),
++            natural - px(10.)
++        );
++        assert_eq!(tab_width(None, None, cx), natural);
++    }
++
+     #[gpui::test]
+     async fn test_window_title_format_empty_project(cx: &mut TestAppContext) {
+         init_test(cx);
+diff --git a/crates/workspace/src/workspace_settings.rs b/crates/workspace/src/workspace_settings.rs
+index 7bb4189d9908972f07911286712d786781d2e075..5ffdc24d2e056b38cc24ce73965767c680e49bc3 100644
+--- a/crates/workspace/src/workspace_settings.rs
++++ b/crates/workspace/src/workspace_settings.rs
+@@ -46,7 +46,10 @@ pub struct WorkspaceSettings {
+     pub fullscreen_mode: settings::FullscreenMode,
+     pub zoomed_padding: bool,
+     pub window_decorations: settings::WindowDecorations,
++    pub title_bar_to_status_bar: bool,
++    pub(crate) title_bar_visibility: settings::TitleBarVisibility,
+     pub focus_follows_mouse: FocusFollowsMouse,
++    pub compact_toolbar: bool,
+ }
+ 
+ #[cfg(target_os = "macos")]
+@@ -92,6 +95,9 @@ pub struct TabBarSettings {
+     pub show_nav_history_buttons: bool,
+     pub show_tab_bar_buttons: bool,
+     pub show_pinned_tabs_in_separate_row: bool,
++    pub pinned_tab_chips: bool,
++    pub unpinned_tab_chips: bool,
++    pub max_tab_rows: usize,
+ }
+ 
+ impl Settings for WorkspaceSettings {
+@@ -152,6 +158,8 @@ impl Settings for WorkspaceSettings {
+             fullscreen_mode: workspace.fullscreen_mode.unwrap(),
+             zoomed_padding: workspace.zoomed_padding.unwrap(),
+             window_decorations: workspace.window_decorations.unwrap(),
++            title_bar_to_status_bar: workspace.title_bar_to_status_bar.unwrap_or(false),
++            title_bar_visibility: content.title_bar.clone().unwrap().show.unwrap(),
+             focus_follows_mouse: FocusFollowsMouse {
+                 enabled: workspace
+                     .focus_follows_mouse
+@@ -166,6 +174,12 @@ impl Settings for WorkspaceSettings {
+                         .unwrap_or(250),
+                 ),
+             },
++            compact_toolbar: content
++                .editor
++                .toolbar
++                .as_ref()
++                .and_then(|toolbar| toolbar.compact)
++                .unwrap_or(false),
+         }
+     }
+ }
+@@ -211,6 +225,9 @@ impl Settings for TabBarSettings {
+             show_nav_history_buttons: tab_bar.show_nav_history_buttons.unwrap(),
+             show_tab_bar_buttons: tab_bar.show_tab_bar_buttons.unwrap(),
+             show_pinned_tabs_in_separate_row: tab_bar.show_pinned_tabs_in_separate_row.unwrap(),
++            pinned_tab_chips: tab_bar.pinned_tab_chips.unwrap_or(false),
++            unpinned_tab_chips: tab_bar.unpinned_tab_chips.unwrap_or(false),
++            max_tab_rows: tab_bar.max_tab_rows.unwrap_or(1).max(1) as usize,
+         }
+     }
+ }
+@@ -240,3 +257,39 @@ impl Settings for StatusBarSettings {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn test_workspace_settings_defaults_when_fields_none() {
++        let mut raw: settings::SettingsContent =
++            settings::parse_json_with_comments(&settings::default_settings()).unwrap();
++        raw.workspace.title_bar_to_status_bar = None;
++        raw.editor.toolbar = None;
++        if let Some(tab_bar) = raw.tab_bar.as_mut() {
++            tab_bar.pinned_tab_chips = None;
++            tab_bar.unpinned_tab_chips = None;
++            tab_bar.max_tab_rows = None;
++        }
++
++        let settings = WorkspaceSettings::from_settings(&raw);
++        assert!(!settings.title_bar_to_status_bar);
++        assert!(!settings.compact_toolbar);
++        let tab_settings = TabBarSettings::from_settings(&raw);
++        assert!(!tab_settings.pinned_tab_chips);
++        assert!(!tab_settings.unpinned_tab_chips);
++        assert_eq!(tab_settings.max_tab_rows, 1);
++
++        if let Some(tab_bar) = raw.tab_bar.as_mut() {
++            tab_bar.max_tab_rows = Some(0);
++        }
++        assert_eq!(TabBarSettings::from_settings(&raw).max_tab_rows, 1);
++
++        if let Some(tab_bar) = raw.tab_bar.as_mut() {
++            tab_bar.max_tab_rows = Some(3);
++        }
++        assert_eq!(TabBarSettings::from_settings(&raw).max_tab_rows, 3);
++    }
++}
+diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
+index 4f6f54711b2d09c9ecdf69a60a10d53e0af36e76..5e6c45254d2f6feedd97356bd07e4be008c3f288 100644
+--- a/crates/zed/src/zed.rs
++++ b/crates/zed/src/zed.rs
+@@ -394,7 +394,10 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
+         titlebar: Some(TitlebarOptions {
+             title: None,
+             appears_transparent: true,
+-            traffic_light_position: Some(point(px(9.0), px(9.0))),
++            traffic_light_position: Some(point(
++                workspace::TRAFFIC_LIGHT_INSET,
++                workspace::TRAFFIC_LIGHT_INSET,
++            )),
+         }),
+         window_bounds: None,
+         focus: false,
+diff --git a/docs/src/reference/all-settings.md b/docs/src/reference/all-settings.md
+index 818ddaee97dd54230e2f6b29110f3978dd8114e6..972b878705bbc7f6c8fe3c71634272b9b61d02d2 100644
+--- a/docs/src/reference/all-settings.md
++++ b/docs/src/reference/all-settings.md
+@@ -175,7 +175,7 @@ Open the Settings Editor and search for “Threads Sidebar Position”. Or add t
+ 
+ **Options**
+ 
+-Numbers from `200` to `800` pixels (inclusive). Values outside this range are clamped to the nearest limit.
++Numbers from `100` to `800` pixels (inclusive). Values outside this range are clamped to the nearest limit.
+ 
+ Open the Settings Editor and search for “Threads Sidebar Default Width”. Or add this to your `settings.json`:
+ 
+@@ -193,6 +193,29 @@ Changing this setting immediately updates the sidebar width, even if you previou
+ 
+ Widths saved by older versions of Zed are preserved if they differ from the previous default of 300 pixels. A saved width of 300 pixels uses this setting instead.
+ 
++### Threads Sidebar Compact
++
++- Description: Whether each thread uses a single row at tab-bar height, with details shown on hover.
++- Setting: `agent.threads_sidebar.compact`
++- Default: `false`
++
++**Options**
++
++`boolean` values
++
++Open the Settings Editor and choose **Edit in settings.json**. This option is
++configured in JSON:
++
++```json [settings]
++{
++  "agent": {
++    "threads_sidebar": {
++      "compact": true
++    }
++  }
++}
++```
++
+ ### Threads Sidebar Auto Open {#agent-threads-sidebar-auto-open}
+ 
+ - Description: Whether opening a folder in an existing window automatically opens the [Threads Sidebar](../ai/parallel-agents.md#threads-sidebar).
+@@ -1981,7 +2004,10 @@ or
+     "show": true,
+     "show_nav_history_buttons": true,
+     "show_tab_bar_buttons": true,
+-    "show_pinned_tabs_in_separate_row": false
++    "show_pinned_tabs_in_separate_row": false,
++    "pinned_tab_chips": false,
++    "unpinned_tab_chips": false,
++    "max_tab_rows": 1
+   }
+ }
+ ```
+@@ -2018,7 +2044,7 @@ or
+ 
+ ### Pinned Tabs in a Separate Row {#tab-bar-pinned-tabs}
+ 
+-- Description: Show pinned tabs in a top row and unpinned tabs in a bottom row, instead of keeping all tabs in one row.
++- Description: Give pinned tabs their own row above unpinned tabs. By default, pinned and unpinned tabs share the first row.
+ - Setting: `show_pinned_tabs_in_separate_row`
+ - Default: `false`
+ 
+@@ -2026,6 +2052,73 @@ or
+ 
+ `boolean` values
+ 
++### Pinned Tab Chips
++
++- Description: Whether pinned tabs are rendered as compact, borderless chips that hug their contents.
++- Setting: `pinned_tab_chips`
++- Default: `false`
++
++**Options**
++
++`boolean` values
++
++Open the Settings Editor and choose **Edit in settings.json**. This option is
++configured in JSON:
++
++```json [settings]
++{
++  "tab_bar": {
++    "pinned_tab_chips": true
++  }
++}
++```
++
++### Unpinned Tab Chips
++
++- Description: Whether unpinned tabs are rendered as compact, borderless chips that hug their contents.
++- Setting: `unpinned_tab_chips`
++- Default: `false`
++
++**Options**
++
++`boolean` values
++
++Open the Settings Editor and choose **Edit in settings.json**. This option is
++configured in JSON:
++
++```json [settings]
++{
++  "tab_bar": {
++    "unpinned_tab_chips": true
++  }
++}
++```
++
++### Maximum Tab Rows
++
++- Description: Maximum number of rows for unpinned editor and terminal tabs. Wrapping is active only when both `tabs.min_width` and `tabs.max_width` are set; tabs fill up to `max_tab_rows` rows at `min_width` before the last row scrolls horizontally. A separate pinned row does not count toward this limit. `0` behaves as `1`.
++- Setting: `max_tab_rows`
++- Default: `1`
++
++**Options**
++
++Positive integer values (`1` or greater; `0` behaves as `1`).
++
++Open the Settings Editor and choose **Edit in settings.json**. This option is
++configured in JSON:
++
++```json [settings]
++{
++  "tabs": {
++    "min_width": 120,
++    "max_width": 200
++  },
++  "tab_bar": {
++    "max_tab_rows": 3
++  }
++}
++```
++
+ ## Tab Switcher {#tab-switcher}
+ 
+ - Description: Whether to preview files while cycling through the tab switcher.
+@@ -2057,7 +2150,51 @@ See [Tab Switcher](../tab-switcher.md).
+     "git_status": false,
+     "activate_on_close": "history",
+     "show_close_button": "hover",
+-    "show_diagnostics": "off"
++    "show_diagnostics": "off",
++    "min_width": null,
++    "max_width": null
++  }
++}
++```
++
++### Minimum Width
++
++- Description: Minimum width of an editor tab in pixels. `null` keeps tabs as wide as their title.
++- Setting: `min_width`
++- Default: `null`
++
++**Options**
++
++A pixel value or `null`.
++
++Open the Settings Editor and choose **Edit in settings.json**. This option is
++configured in JSON:
++
++```json [settings]
++{
++  "tabs": {
++    "min_width": 120
++  }
++}
++```
++
++### Maximum Width
++
++- Description: Maximum width of an editor tab in pixels. Longer titles are truncated in the middle. `null` keeps tabs as wide as their title.
++- Setting: `max_width`
++- Default: `null`
++
++**Options**
++
++A pixel value or `null`.
++
++Open the Settings Editor and choose **Edit in settings.json**. This option is
++configured in JSON:
++
++```json [settings]
++{
++  "tabs": {
++    "max_width": 240
+   }
+ }
+ ```
+@@ -2295,14 +2432,28 @@ When trusted, project settings are synchronized automatically, language and MCP
+     "quick_actions": true,
+     "selections_menu": true,
+     "agent_review": true,
+-    "code_actions": false
++    "code_actions": false,
++    "compact": false
+   }
+ }
+ ```
+ 
+ **Options**
+ 
+-Each option controls displaying of a particular toolbar element. If all elements are hidden, the editor toolbar is not displayed.
++Each display option controls a particular toolbar element. If all elements are hidden, the editor toolbar is not displayed.
++
++- `compact`: Whether to shrink pane toolbars to the height of the tab bar. The default is `false`.
++
++Open the Settings Editor and choose **Edit in settings.json**. This option is
++configured in JSON:
++
++```json [settings]
++{
++  "toolbar": {
++    "compact": true
++  }
++}
++```
+ 
+ ## Use System Tabs
+ 
+@@ -6337,6 +6488,48 @@ Where subpixel rendering is unavailable, Zed renders text in grayscale.
+ 
+ `boolean` values
+ 
++## Panel Rows Tab Height
++
++- Description: Whether rows in the project, Git, and outline panels use the tab-bar height, aligning them with the tab bar and project panel sticky rows.
++- Setting: `panel_rows_tab_height`
++- Default: `false`
++
++**Options**
++
++`boolean` values
++
++Open the Settings Editor and choose **Edit in settings.json**. This option is
++configured in JSON:
++
++```json [settings]
++{
++  "panel_rows_tab_height": true
++}
++```
++
++## Shadows
++
++- Description: Controls individual shadows in the user interface.
++- Setting: `shadows`
++Open the Settings Editor and choose **Edit in settings.json**. Configure these
++shadow options in JSON.
++
++- Default:
++
++```json [settings]
++{
++  "shadows": {
++    "project_panel": true,
++    "minimap": true
++  }
++}
++```
++
++**Options**
++
++- `project_panel`: Whether to paint the shadow below sticky folder rows in the project panel.
++- `minimap`: Whether to paint the shadow around the minimap.
++
+ ## Theme
+ 
+ - Description: The theme setting can be specified in two forms - either as the name of a theme or as an object containing the `mode`, `dark`, and `light` themes for the Zed UI.
+@@ -6473,6 +6666,25 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a
+ - `open_menus_on_hover`: Whether to open title-bar menus on hover. Once a menu is open, hovering always switches between menus.
+ - `button_layout`: The layout of window control buttons in the title bar (Linux only). Can be set to `"platform_default"` to follow the system setting, `"standard"` to use Zed's built-in layout, or a custom format like `"close:minimize,maximize"`
+ 
++## Title Bar to Status Bar
++
++- Description: Whether to hide the title bar and show its contents in the status bar instead (macOS only). Other platforms ignore it, as their window controls are drawn in the title bar
++- Setting: `title_bar_to_status_bar`
++- Default: `false`
++
++**Options**
++
++`boolean` values
++
++Open the Settings Editor and choose **Edit in settings.json**. This option is
++configured in JSON:
++
++```json [settings]
++{
++  "title_bar_to_status_bar": true
++}
++```
++
+ ## Window Title Format
+ 
+ - Description: Template for the window title. Use `${separator}` to insert a
+diff --git a/docs/src/visual-customization.md b/docs/src/visual-customization.md
+index c6be9dd5c4fe6e314f0c057ed3b914e48ea63701..ded8a40e06dbfed2c3f71dabcaf9efc481c61107 100644
+--- a/docs/src/visual-customization.md
++++ b/docs/src/visual-customization.md
+@@ -139,7 +139,13 @@ To disable this behavior use:
+ 
+ ### Titlebar
+ 
++To configure `title_bar_to_status_bar` (macOS only), open the Settings Editor and
++choose **Edit in settings.json**, then add it to your settings:
++
+ ```json [settings]
++{
++  // Hide the title bar and show its contents in the status bar instead (macOS only)
++  "title_bar_to_status_bar": false,
+   // Control which items are shown/hidden in the title bar
+   "title_bar": {
+     "show": "always",                // When to show: always | never | hide_in_full_screen
+@@ -153,7 +159,8 @@ To disable this behavior use:
+     "show_sign_in": true,             // Show/hide sign-in button
+     "show_menus": false,              // Show/hide menus
+     "open_menus_on_hover": false      // Automatically open menus on hover
+-  },
++  }
++}
+ ```
+ 
+ ## Workspace

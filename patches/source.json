@@ -441,6 +441,10 @@
     ],
     [
       "agent_ui",
+      "test_terminal_remote_identity_preserves_docker_name"
+    ],
+    [
+      "agent_ui",
       "test_terminal_restore_working_directory_does_not_read_leased_workspace"
     ],
     [
@@ -581,6 +585,10 @@
     ],
     [
       "sidebar",
+      "test_archive_mixed_workspace_closes_only_archived_worktree_items"
+    ],
+    [
+      "sidebar",
       "test_archive_removes_worktree_even_when_workspace_paths_diverge"
     ],
     [
@@ -649,7 +657,15 @@
     ],
     [
       "sidebar",
+      "test_discard_mixed_workspace_draft_closes_only_archived_worktree_items"
+    ],
+    [
+      "sidebar",
       "test_draft_title_updates_from_editor_text"
+    ],
+    [
+      "sidebar",
+      "test_elicitation_marks_sidebar_thread_waiting_until_responded"
     ],
     [
       "sidebar",
@@ -698,6 +714,10 @@
     [
       "sidebar",
       "test_project_tab_opens_panel_only_after_closed_target_workspace_loads"
+    ],
+    [
+      "sidebar",
+      "test_remote_archive_thread_with_active_connection"
     ],
     [
       "sidebar",
@@ -797,6 +817,26 @@
     ],
     [
       "sidebar",
+      "test_terminal_close_event_activates_neighbor"
+    ],
+    [
+      "sidebar",
+      "test_terminal_close_event_closes_sidebar_terminal"
+    ],
+    [
+      "sidebar",
+      "test_terminal_close_event_deletes_empty_draft_when_linked_worktree_has_no_archive_root"
+    ],
+    [
+      "sidebar",
+      "test_terminal_close_event_keeps_linked_worktree_workspace_with_live_editor_draft"
+    ],
+    [
+      "sidebar",
+      "test_terminal_close_event_on_archived_linked_worktree_removes_workspace"
+    ],
+    [
+      "sidebar",
       "test_terminal_close_preserves_conflicting_live_daemon_owners"
     ],
     [
@@ -834,6 +874,18 @@
     [
       "sidebar",
       "test_unavailable_saved_root_keeps_terminal_metadata_and_session"
+    ],
+    [
+      "sidebar",
+      "test_worktree_info_branch_names_for_linked_worktrees"
+    ],
+    [
+      "sidebar",
+      "test_worktree_info_branch_names_for_main_worktrees"
+    ],
+    [
+      "sidebar",
+      "test_worktree_info_missing_branch_returns_none"
     ],
     [
       "terminal",

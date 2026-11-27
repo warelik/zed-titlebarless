@@ -5,6 +5,7 @@ import os
 import plistlib
 from pathlib import Path
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -2008,7 +2009,7 @@ class RustRegressionRunnerTests(unittest.TestCase):
 
 
 class MacBundleInspectionTests(unittest.TestCase):
-    def build_attempt(self, scenario):
+    def build_attempt(self, scenario, remote_outputs=("remote_server", "remote_server.dwarf")):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             app = root / "app"
@@ -2060,11 +2061,14 @@ class MacBundleInspectionTests(unittest.TestCase):
                     return f"Zed: v1.24.2+stable.{sha} build\n"
                 if args[:2] == ("dwarfdump", "--uuid"):
                     path = Path(args[2])
+                    self.assertTrue(path.is_file(), f"Missing UUID input: {path}")
                     uuid = binary_uuid
-                    if path.name in {"remote_server", "remote_server.dwarf"}:
+                    if path.name in remote_outputs:
                         uuid = remote_uuid
                     if path.name == "zed.dwarf" and scenario == "symbol_uuid":
                         uuid = remote_uuid
+                    if path.name == "remote-server" and scenario == "remote_symbol_uuid":
+                        uuid = binary_uuid
                     return f"UUID: {uuid} (arm64) {path.name}\n"
                 if args[:2] in {("hdiutil", "verify"), ("hdiutil", "detach")}:
                     return ""
@@ -2073,8 +2077,8 @@ class MacBundleInspectionTests(unittest.TestCase):
             def bundle_command(args, *, cwd, env, check):
                 bundle_environments.append(env.copy())
                 target.mkdir(parents=True, exist_ok=True)
-                for name in ("Zed-aarch64.dmg", "zed.dwarf", "remote_server.dwarf", "remote_server"):
-                    (target / name).write_bytes(b"tiny stub artifact")
+                for name in ("Zed-aarch64.dmg", "zed.dwarf", *remote_outputs):
+                    (target / name).write_bytes(name.encode())
                 return SimpleNamespace(returncode=0)
 
             class DebugInfoProcess:
@@ -2127,6 +2131,10 @@ class MacBundleInspectionTests(unittest.TestCase):
                     self.last_recipe_calls = recipe.call_args_list
                     self.last_bundle_environments = list(bundle_environments)
             release_directory = workspace / "release"
+            self.last_provenance = json.loads((release_directory / "provenance.json").read_text())
+            with tarfile.open(release_directory / self.last_provenance["symbols_archive"]) as archive:
+                self.last_symbols = {member.name: archive.extractfile(member).read()
+                                     for member in archive.getmembers()}
             return {path.name for path in release_directory.iterdir()}, bundle_environments
 
     def test_build_passes_only_the_exact_fork_identity_to_the_bundle(self):
@@ -2170,6 +2178,28 @@ class MacBundleInspectionTests(unittest.TestCase):
         for scenario in ("source", "version", "architecture", "binary_sha", "symbol_uuid"):
             with self.subTest(scenario=scenario), self.assertRaises(ValueError):
                 self.build_attempt(scenario)
+
+    def test_remote_server_outputs_preserve_archive_names_and_match_uuids(self):
+        for name in ("remote_server", "remote-server"):
+            with self.subTest(name=name):
+                self.build_attempt("valid", (name, f"{name}.dwarf"))
+                remote_uuid = "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"
+                self.assertEqual(self.last_provenance["remote_server_uuid"], remote_uuid)
+                self.assertEqual(self.last_symbols, {
+                    "zed.dwarf": b"zed.dwarf",
+                    "remote_server.dwarf": f"{name}.dwarf".encode(),
+                    "UUIDS.txt": (f"UUID: {self.last_provenance['binary_uuid']} (arm64) zed.dwarf\n"
+                                  f"UUID: {remote_uuid} (arm64) remote_server.dwarf\n").encode(),
+                })
+        with self.assertRaisesRegex(ValueError, "Remote debug symbols do not match"):
+            self.build_attempt("remote_symbol_uuid", ("remote-server", "remote-server.dwarf"))
+
+    def test_inspector_rejects_missing_mixed_and_ambiguous_remote_outputs(self):
+        for outputs in ((), ("remote-server",), ("remote-server", "remote_server.dwarf"),
+                        ("remote-server", "remote-server.dwarf", "remote_server"),
+                        ("remote-server", "remote-server.dwarf", "remote_server", "remote_server.dwarf")):
+            with self.subTest(outputs=outputs), self.assertRaisesRegex(ValueError, "exactly one"):
+                self.build_attempt("valid", outputs)
 
 
 class RegressionManifestAdoptionTests(unittest.TestCase):

@@ -107,6 +107,49 @@ See [Known limitations](RELEASE_NOTES.md#known-limitations).
 - Publication is not live installation. This workflow does not restart an editor or remote session; installation and validation of a running version are separate steps.
 - [AGENTS.md](AGENTS.md) defines the maintenance, verification, recovery, and cleanup contract. The presence of a workflow does not by itself prove that the entire cycle is automated.
 
+### Local development on macOS
+
+Use a native Rust toolchain via `rustup`, Xcode with its macOS components and command line tools, and `cmake`. Run these commands in Bash from a clone of this fork. For a published build, take `config_sha`, `upstream_sha` and `candidate_sha` from that release's `provenance.json`. For an unpublished candidate, use the recorded configuration, upstream and application SHAs. If the configuration commit is missing locally, fetch its recorded ref with `git fetch origin <ref>` first.
+
+```bash
+config_sha=FULL_CONFIGURATION_SHA
+upstream_sha=FULL_UPSTREAM_SHA
+candidate_sha=FULL_APPLICATION_SHA
+work="$HOME/Developer/zed-titlebarless-dev/$candidate_sha"
+(
+  set -euo pipefail
+  export LC_ALL=C
+  mkdir -p "${work%/*}"
+  mkdir "$work"
+  git archive "$config_sha" patches | tar -xf - -C "$work"
+  git init -q "$work/app"
+  cd "$work/app"
+  git remote add upstream https://github.com/zed-industries/zed.git
+  git fetch --filter=blob:none --depth=1 upstream "$upstream_sha"
+  git checkout --detach "$upstream_sha"
+  git -c 'user.name=github-actions[bot]' \
+      -c 'user.email=41898282+github-actions[bot]@users.noreply.github.com' \
+      -c core.hooksPath=/dev/null -c commit.gpgSign=false \
+      am --committer-date-is-author-date "$work"/patches/*.patch
+  test "$(git rev-parse HEAD)" = "$candidate_sha" ||
+    { echo "Replayed application SHA does not match $candidate_sha" >&2; exit 1; }
+) && cd "$work/app"
+```
+
+Keep this checkout at its original path for repeated edits. Build only the editor using upstream's incremental `dev` profile. The command times the build separately from launch; `cargo fetch` prepares the toolchain and dependency cache first. For a cold compile, use the default target directory on the first build or point `CARGO_TARGET_DIR` at a new empty directory, leaving the existing cache in place. For a warm compile, repeat the timed command in the same checkout and target directory after a representative edit. Record the Mac model, Rust toolchain and the edit used for the warm run.
+
+```bash
+export CARGO_TARGET_DIR="$HOME/Library/Caches/zed-titlebarless-dev/target/$candidate_sha"
+dev_data="$HOME/Library/Application Support/Zed-titlebarless-dev"
+cargo fetch --locked &&
+  /usr/bin/time -p env ZED_RELEASE_CHANNEL=dev cargo build --locked -p zed --bin zed &&
+  ZED_RELEASE_CHANNEL=dev "$CARGO_TARGET_DIR/debug/zed" --user-data-dir "$dev_data"
+```
+
+The Dev channel runs alongside the installed editor and does not check for updates. Use a scratch project and put any test settings in `$dev_data/config/settings.json`; the database, extensions and logs also use the custom directory. The cache and test data stay in place when you remove the source checkout. The Dev instance still uses the same macOS account and Keychain.
+
+For SSH checks, use a disposable remote account or host. A debug client normally builds and uploads a separate Dev server, which can require a cross compiler. Set `ZED_BUILD_REMOTE_SERVER=never` at launch only to reuse an already provisioned matching Dev server; the Dev channel cannot download one from a release. Use the CI workflow for release validation and packaging.
+
 ### Debug symbols
 
 Each release attaches `zed-<version>-titlebarless-debug-symbols-macos-aarch64.tar.gz` containing flat DWARF symbols (`zed.dwarf`, `remote_server.dwarf`) and `UUIDS.txt`. Builds inherit the selected upstream release debug-information settings without a downstream override. The final artifact inspection requires compilation-unit debug information and matches each symbol UUID to its binary.

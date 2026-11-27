@@ -1,19 +1,14 @@
-From 28cb1665b6f4bb0256f15f3e028c35aba29f3950 Mon Sep 17 00:00:00 2001
+From 19abd7b4acbb7eed3ee1b7bd074ebd1d87e7cba4 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 11:28:27 +0300
-Subject: [PATCH 5/9] Verify immutable fork releases for in-app updates
+Subject: [PATCH 6/7] Verify and install immutable fork updates
 
-Read app updates from a compile-time manifest URL, verify immutable
-fork releases and accept same-version fixes through the GitHub
-release.id. Bound manifest responses and update downloads by size, bind
-update assets to the candidate SHA, keep an installed pending relaunch
-across polling errors and retain manual updater errors until success.
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 1e0942cf22..19989b55f5 100644
+index 6fe21e0dc24b0aee8720c0ae56308e537672b027..f1ce0d5181e50903084d3d2d9530dc3cee9fd960 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -1403,6 +1403,7 @@ dependencies = [
+@@ -1395,6 +1395,7 @@ dependencies = [
   "serde",
   "serde_json",
   "settings",
@@ -22,7 +17,7 @@ index 1e0942cf22..19989b55f5 100644
   "tempfile",
   "util",
 diff --git a/crates/auto_update/Cargo.toml b/crates/auto_update/Cargo.toml
-index 47b4f7a038..cf92e47b52 100644
+index 47b4f7a0380e1036c5a12189e4d83ab998226b7d..cf92e47b52c9f52a0d5c9bf8c28a77192b6f91ea 100644
 --- a/crates/auto_update/Cargo.toml
 +++ b/crates/auto_update/Cargo.toml
 @@ -26,6 +26,7 @@ semver.workspace = true
@@ -34,7 +29,7 @@ index 47b4f7a038..cf92e47b52 100644
  tempfile.workspace = true
  util.workspace = true
 diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs
-index 38324d5348..33f0c43a1b 100644
+index 38324d5348152b7bd1bd68fa063a3228f9f1b8e6..33f0c43a1bc1b01f7ca37cb7b80dfa794d5a3d7d 100644
 --- a/crates/auto_update/src/auto_update.rs
 +++ b/crates/auto_update/src/auto_update.rs
 @@ -10,8 +10,9 @@ use http_client::{HttpClient, HttpClientWithUrl};
