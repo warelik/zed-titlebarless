@@ -1,4 +1,4 @@
-From a02f18e8244827a330283507e50b5c9bbc359a97 Mon Sep 17 00:00:00 2001
+From 7c3c3a232cb60e10bd01f6e9f42f52f5d01a8c41 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 11:28:27 +0300
 Subject: [PATCH 6/7] Verify and install immutable fork updates

@@ -1,4 +1,4 @@
-From 178a74af9a5fe5caae9f30af99e462a78753bd3c Mon Sep 17 00:00:00 2001
+From 10ef5d91cebfe8bfb2c87299b3aedf182f3489d8 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 11:03:26 +0300
 Subject: [PATCH 5/7] Integrate project, thread and terminal views in the agent
@@ -15437,7 +15437,7 @@ index c028e77cdbd1eaa10da6c3c3058a923e32dbb231..882c546a8d0b38a51ab32472885b67e7
              })
              .unwrap_or_default()
 diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
-index 04ec05787e9ddd78957c58b17b1429c925fd7342..7c84993d4f9660f71203b46f7a95ad021140ba5c 100644
+index acb21cccc002e7b22dacfc9122cbd3cb550704d9..73ef841c579e627f910f8e3dd98cd85344bcdc43 100644
 --- a/crates/workspace/src/workspace.rs
 +++ b/crates/workspace/src/workspace.rs
 @@ -31,11 +31,12 @@ mod workspace_settings;
