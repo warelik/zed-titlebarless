@@ -1,4 +1,4 @@
-From d21e70f3f7e30777195a0407eeef82b34f29b5f0 Mon Sep 17 00:00:00 2001
+From d2952e619212e49d3071ef68b487f7c829892c95 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 13:09:08 +0300
 Subject: [PATCH 4/7] Manage the persistent terminal lifecycle and shpool

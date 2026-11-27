@@ -977,6 +977,10 @@
     ],
     [
       "workspace",
+      "test_remove_workspace_clears_session_binding"
+    ],
+    [
+      "workspace",
       "test_restore_preserves_rootless_remote_project_groups"
     ],
     [

@@ -1,4 +1,4 @@
-From 50cd0bd11a9fed44d74c9a15e16358d3692a45ca Mon Sep 17 00:00:00 2001
+From 178a74af9a5fe5caae9f30af99e462a78753bd3c Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 11:03:26 +0300
 Subject: [PATCH 5/7] Integrate project, thread and terminal views in the agent
@@ -15117,10 +15117,10 @@ index 77991edef183c7321d8594ac9eac01c8274f81a2..377a8d1c766c8bb9d906719d46dd0b7d
              let has_top_spacer = top_spacer.is_some();
              let create_resize_handle = || {
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 71b06431ba8e6bc79642051dafd80212831e9c9f..15e19f10549f81ab13aa902b749ed2693ea010b7 100644
+index 9abe2edaf0299accc5e4c92414f8100aeec33840..35b91627d2c77350276ed4263c0ab96c35ebf526 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
-@@ -157,6 +157,29 @@ pub trait Sidebar: Focusable + Render + EventEmitter<SidebarEvent> + Sized {
+@@ -158,6 +158,29 @@ pub trait Sidebar: Focusable + Render + EventEmitter<SidebarEvent> + Sized {
          _cx: &mut Context<Self>,
      ) {
      }
@@ -15150,7 +15150,7 @@ index 71b06431ba8e6bc79642051dafd80212831e9c9f..15e19f10549f81ab13aa902b749ed269
  }
  
  pub trait SidebarHandle: 'static + Send + Sync {
-@@ -177,6 +200,10 @@ pub trait SidebarHandle: 'static + Send + Sync {
+@@ -178,6 +201,10 @@ pub trait SidebarHandle: 'static + Send + Sync {
      fn side(&self, cx: &App) -> SidebarSide;
      fn serialized_state(&self, cx: &App) -> Option<String>;
      fn restore_serialized_state(&self, state: &str, window: &mut Window, cx: &mut App);
@@ -15161,7 +15161,7 @@ index 71b06431ba8e6bc79642051dafd80212831e9c9f..15e19f10549f81ab13aa902b749ed269
  }
  
  #[derive(Clone)]
-@@ -266,6 +293,28 @@ impl<T: Sidebar> SidebarHandle for Entity<T> {
+@@ -267,6 +294,28 @@ impl<T: Sidebar> SidebarHandle for Entity<T> {
              this.restore_serialized_state(state, window, cx)
          })
      }
@@ -15190,7 +15190,7 @@ index 71b06431ba8e6bc79642051dafd80212831e9c9f..15e19f10549f81ab13aa902b749ed269
  }
  
  #[derive(Clone)]
-@@ -334,7 +383,9 @@ impl MultiWorkspace {
+@@ -349,7 +398,9 @@ impl MultiWorkspace {
  
      pub fn sidebar_render_state(&self, cx: &App) -> SidebarRenderState {
          SidebarRenderState {
@@ -15201,7 +15201,7 @@ index 71b06431ba8e6bc79642051dafd80212831e9c9f..15e19f10549f81ab13aa902b749ed269
              side: self.sidebar_side(cx),
          }
      }
-@@ -352,12 +403,32 @@ impl MultiWorkspace {
+@@ -367,12 +418,32 @@ impl MultiWorkspace {
              let mut previous_multi_workspace_enabled = !DisableAiSettings::get_global(cx)
                  .disable_ai
                  && AgentSettings::get_global(cx).enabled;
@@ -15234,7 +15234,7 @@ index 71b06431ba8e6bc79642051dafd80212831e9c9f..15e19f10549f81ab13aa902b749ed269
              }
          });
          Self::subscribe_to_workspace(&workspace, window, cx);
-@@ -366,7 +437,7 @@ impl MultiWorkspace {
+@@ -381,7 +452,7 @@ impl MultiWorkspace {
          workspace.update(cx, |workspace, cx| {
              workspace.set_multi_workspace(weak_self, active_workspace_id.clone(), cx);
          });
@@ -15243,7 +15243,7 @@ index 71b06431ba8e6bc79642051dafd80212831e9c9f..15e19f10549f81ab13aa902b749ed269
              window_id: window.window_handle().window_id(),
              held: vec![HeldWorkspace {
                  workspace,
-@@ -383,7 +454,14 @@ impl MultiWorkspace {
+@@ -398,7 +469,14 @@ impl MultiWorkspace {
              _serialize_task: None,
              _subscriptions: vec![release_subscription, settings_subscription],
              previous_focus_handle: None,
@@ -15258,7 +15258,7 @@ index 71b06431ba8e6bc79642051dafd80212831e9c9f..15e19f10549f81ab13aa902b749ed269
      }
  
      pub fn register_sidebar<T: Sidebar>(&mut self, sidebar: Entity<T>, cx: &mut Context<Self>) {
-@@ -449,6 +527,10 @@ impl MultiWorkspace {
+@@ -464,6 +542,10 @@ impl MultiWorkspace {
          if !self.multi_workspace_enabled(cx) {
              return;
          }
@@ -15269,7 +15269,7 @@ index 71b06431ba8e6bc79642051dafd80212831e9c9f..15e19f10549f81ab13aa902b749ed269
  
          if self.sidebar_open() {
              self.close_sidebar(window, cx);
-@@ -463,7 +545,7 @@ impl MultiWorkspace {
+@@ -478,7 +560,7 @@ impl MultiWorkspace {
      }
  
      pub fn close_sidebar_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -15278,7 +15278,7 @@ index 71b06431ba8e6bc79642051dafd80212831e9c9f..15e19f10549f81ab13aa902b749ed269
              return;
          }
  
-@@ -476,6 +558,10 @@ impl MultiWorkspace {
+@@ -491,6 +573,10 @@ impl MultiWorkspace {
          if !self.multi_workspace_enabled(cx) {
              return;
          }
@@ -15289,7 +15289,7 @@ index 71b06431ba8e6bc79642051dafd80212831e9c9f..15e19f10549f81ab13aa902b749ed269
  
          if self.sidebar_open() {
              let sidebar_is_focused = self
-@@ -520,7 +606,12 @@ impl MultiWorkspace {
+@@ -535,7 +621,12 @@ impl MultiWorkspace {
      fn apply_open_sidebar(&mut self, cx: &mut Context<Self>) {
          self.sidebar_open = true;
          self.retain_active_workspace(cx);
@@ -15303,7 +15303,7 @@ index 71b06431ba8e6bc79642051dafd80212831e9c9f..15e19f10549f81ab13aa902b749ed269
          for workspace in self.workspaces().cloned().collect::<Vec<_>>() {
              workspace.update(cx, |workspace, _cx| {
                  workspace.set_sidebar_focus_handle(sidebar_focus_handle.clone());
-@@ -1498,7 +1589,7 @@ impl MultiWorkspace {
+@@ -1529,7 +1620,7 @@ impl MultiWorkspace {
      }
  
      fn sync_sidebar_to_workspace(&self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
@@ -15312,7 +15312,7 @@ index 71b06431ba8e6bc79642051dafd80212831e9c9f..15e19f10549f81ab13aa902b749ed269
              let sidebar_focus_handle = self.sidebar.as_ref().map(|s| s.focus_handle(cx));
              workspace.update(cx, |workspace, _| {
                  workspace.set_sidebar_focus_handle(sidebar_focus_handle);
-@@ -2188,7 +2279,10 @@ impl Render for MultiWorkspace {
+@@ -2235,7 +2326,10 @@ impl Render for MultiWorkspace {
          let sidebar_side = self.sidebar_side(cx);
          let sidebar_on_right = sidebar_side == SidebarSide::Right;
  
@@ -15437,7 +15437,7 @@ index c028e77cdbd1eaa10da6c3c3058a923e32dbb231..882c546a8d0b38a51ab32472885b67e7
              })
              .unwrap_or_default()
 diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
-index c10311e35d3d32e1252eb9b619501586903d0c4d..6001068e12593294ef3c7958f3854fd777829216 100644
+index 04ec05787e9ddd78957c58b17b1429c925fd7342..7c84993d4f9660f71203b46f7a95ad021140ba5c 100644
 --- a/crates/workspace/src/workspace.rs
 +++ b/crates/workspace/src/workspace.rs
 @@ -31,11 +31,12 @@ mod workspace_settings;
@@ -15492,7 +15492,7 @@ index c10311e35d3d32e1252eb9b619501586903d0c4d..6001068e12593294ef3c7958f3854fd7
      window.set_traffic_light_position(point(inset, inset));
  }
  
-@@ -10802,7 +10814,15 @@ impl Render for Workspace {
+@@ -10828,7 +10840,15 @@ impl Render for Workspace {
                                          })
                                          .into_any_element(),
                                  };
