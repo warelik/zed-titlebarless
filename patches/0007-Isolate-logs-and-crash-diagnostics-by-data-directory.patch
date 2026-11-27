@@ -1,4 +1,4 @@
-From fd5c980d225468de8dcbe1c1aad20b11bba94142 Mon Sep 17 00:00:00 2001
+From 7dcf5cb371e740d149e015394a9ec68fa957b9be Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 10:36:47 +0300
 Subject: [PATCH 7/7] Isolate logs and crash diagnostics by data directory

@@ -1,4 +1,4 @@
-From 2518458a5dcecf11168f3d629b8455cc689ec1b5 Mon Sep 17 00:00:00 2001
+From af202111e7ff0eb4b0aa674079793fdc8f04177d Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 13:09:08 +0300
 Subject: [PATCH 2/7] Handle SSH authentication, reconnect and feedback
@@ -1007,10 +1007,18 @@ index 14b5684ed38d7f53a8da1f854aa96897292aea39..7755fc476fd9a111a824eba91c49f0c4
 +    }
 +}
 diff --git a/crates/recent_projects/src/remote_connections.rs b/crates/recent_projects/src/remote_connections.rs
-index 627687a322fec36496481622fc2c10d8dacccaa4..39dee5e06e655ed52e4cb8f513d84f976c9f7ba0 100644
+index 627687a322fec36496481622fc2c10d8dacccaa4..f9a65e393127816b0580c57c25c18a3a5314b934 100644
 --- a/crates/recent_projects/src/remote_connections.rs
 +++ b/crates/recent_projects/src/remote_connections.rs
-@@ -525,15 +525,20 @@ async fn path_exists(connection: &Arc<dyn RemoteConnection>, path: &Path) -> boo
+@@ -49,6 +49,7 @@ impl RemoteSettings {
+                 options.upload_binary_over_ssh = conn.upload_binary_over_ssh.unwrap_or_default();
+                 options.args = Some(conn.args);
+                 options.port_forwards = conn.port_forwards;
++                options.connection_timeout = options.connection_timeout.or(conn.connection_timeout);
+                 break;
+             }
+         }
+@@ -525,15 +526,20 @@ async fn path_exists(connection: &Arc<dyn RemoteConnection>, path: &Path) -> boo
  async fn wait_while_reconnecting(remote_client: &Entity<RemoteClient>, cx: &mut AsyncApp) {
      let (reconnect_ended_tx, reconnect_ended_rx) = oneshot::channel();
      let mut reconnect_ended_tx = Some(reconnect_ended_tx);
@@ -1039,7 +1047,52 @@ index 627687a322fec36496481622fc2c10d8dacccaa4..39dee5e06e655ed52e4cb8f513d84f97
      reconnect_ended_rx.await.ok();
  }
  
-@@ -1416,6 +1421,59 @@ mod tests {
+@@ -553,6 +559,44 @@ mod tests {
+     use util::path;
+     use workspace::find_existing_workspace;
+ 
++    #[test]
++    fn test_restore_ssh_connection_timeout_from_matching_settings() {
++        let settings = RemoteSettings {
++            ssh_connections: ExtendingVec(vec![SshConnection {
++                host: "example.com".into(),
++                username: Some("dev".into()),
++                port: Some(2222),
++                connection_timeout: Some(30),
++                ..Default::default()
++            }]),
++            wsl_connections: ExtendingVec::default(),
++            read_ssh_config: false,
++        };
++        let record = json!({
++            "host": {"Hostname": "example.com"},
++            "username": "dev",
++            "port": 2222,
++            "upload_binary_over_ssh": false
++        });
++        let mut legacy: SshConnectionOptions = serde_json::from_value(record.clone()).unwrap();
++        assert_eq!(legacy.connection_timeout, None);
++        settings.fill_connection_options_from_settings(&mut legacy);
++        assert_eq!(legacy.connection_timeout, Some(30));
++
++        let mut explicit = record.clone();
++        explicit["connection_timeout"] = json!(60);
++        let mut explicit: SshConnectionOptions = serde_json::from_value(explicit).unwrap();
++        settings.fill_connection_options_from_settings(&mut explicit);
++        assert_eq!(explicit.connection_timeout, Some(60));
++
++        let mut unmatched = record;
++        unmatched["port"] = json!(2223);
++        let mut unmatched: SshConnectionOptions = serde_json::from_value(unmatched).unwrap();
++        let original = unmatched.clone();
++        settings.fill_connection_options_from_settings(&mut unmatched);
++        assert_eq!(unmatched, original);
++    }
++
+     // Each remote path style is set explicitly, so the client and remote styles differ on every
+     // platform the tests run on.
+     #[gpui::test]
+@@ -1416,6 +1460,59 @@ mod tests {
          );
      }
  

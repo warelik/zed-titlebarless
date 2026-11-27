@@ -568,6 +568,10 @@
       "test_remove_project_group_waits_for_close_consent"
     ],
     [
+      "recent_projects",
+      "test_restore_ssh_connection_timeout_from_matching_settings"
+    ],
+    [
       "sidebar",
       "test_agent_panel_retains_rootless_remote_workspace"
     ],
