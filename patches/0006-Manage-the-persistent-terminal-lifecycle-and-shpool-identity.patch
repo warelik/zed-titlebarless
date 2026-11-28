@@ -1,4 +1,4 @@
-From 6bec24cb4e9d02b4dcb509b38c3f79f740f8f3d1 Mon Sep 17 00:00:00 2001
+From a5693b8334272028fb5d7992e4c3eb8b593b49c0 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 13:09:08 +0300
 Subject: [PATCH 06/10] Manage the persistent terminal lifecycle and shpool
@@ -70,7 +70,7 @@ index f59e6ff2c93e0651b5548e150001da1d0c4b13a3..c9cabad8d4239344baa9313978655171
  
          panel.update_in(&mut cx, |panel, window, cx| {
 diff --git a/crates/agent_ui/src/terminal_thread_metadata_store.rs b/crates/agent_ui/src/terminal_thread_metadata_store.rs
-index 06ba365b6ee65b20fc7704a1075c9a6aa9eafbaa..3171b10fc0f778a4c0130a6adf5dd5f30bdaf6a9 100644
+index 06ba365b6ee65b20fc7704a1075c9a6aa9eafbaa..58214e875d101d4ced47a5dfac71e02fbbc863f4 100644
 --- a/crates/agent_ui/src/terminal_thread_metadata_store.rs
 +++ b/crates/agent_ui/src/terminal_thread_metadata_store.rs
 @@ -14,7 +14,7 @@ use futures::{FutureExt, future::Shared};
@@ -179,7 +179,7 @@ index 06ba365b6ee65b20fc7704a1075c9a6aa9eafbaa..3171b10fc0f778a4c0130a6adf5dd5f3
              })
      }
  
-@@ -249,8 +295,10 @@ impl TerminalThreadMetadataStore {
+@@ -249,11 +295,15 @@ impl TerminalThreadMetadataStore {
              .flatten()
              .filter_map(|id| self.terminals.get(id))
              .filter(move |terminal| {
@@ -192,19 +192,11 @@ index 06ba365b6ee65b20fc7704a1075c9a6aa9eafbaa..3171b10fc0f778a4c0130a6adf5dd5f3
              })
      }
  
-@@ -262,8 +310,10 @@ impl TerminalThreadMetadataStore {
-     ) -> bool {
-         self.entries().any(|terminal| {
-             Some(terminal.terminal_id) != terminal_id
--                && terminal.remote_connection.as_ref().map(|o| o.identity())
--                    == remote_connection.map(|o| o.identity())
-+                && same_terminal_remote_connection(
-+                    terminal.remote_connection.as_ref(),
-+                    remote_connection,
-+                )
-                 && terminal
-                     .folder_paths()
-                     .paths()
++    /// Match archive root planning, which can remove a worktree from projects
++    /// using different transport options for the same remote identity.
+     pub fn path_is_referenced_by_terminal(
+         &self,
+         terminal_id: Option<TerminalId>,
 @@ -273,10 +323,57 @@ impl TerminalThreadMetadataStore {
      }
  
@@ -996,7 +988,7 @@ index 06ba365b6ee65b20fc7704a1075c9a6aa9eafbaa..3171b10fc0f778a4c0130a6adf5dd5f3
      #[test]
      fn test_terminal_title_prefix_preserves_non_alphanumeric_prefixes() {
          assert_eq!(terminal_title_prefix("✳ Thinking"), Some("✳ "));
-@@ -792,4 +1445,560 @@ mod tests {
+@@ -792,4 +1445,577 @@ mod tests {
              );
          });
      }
@@ -1401,17 +1393,17 @@ index 06ba365b6ee65b20fc7704a1075c9a6aa9eafbaa..3171b10fc0f778a4c0130a6adf5dd5f3
 +    ) {
 +        init_test(cx);
 +
-+        let connection = |configuration: &str| {
++        let connection = |host: &str, args: &[&str]| {
 +            RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
-+                host: "same-host".into(),
++                host: host.into(),
 +                username: Some("developer".into()),
 +                port: Some(22),
-+                args: Some(vec!["-F".into(), configuration.into()]),
++                args: Some(args.iter().map(|arg| (*arg).to_string()).collect()),
 +                ..Default::default()
 +            })
 +        };
-+        let project_connection = connection("work.conf");
-+        let other_connection = connection("personal.conf");
++        let project_connection = connection("same-host", &["-F", "work.conf"]);
++        let other_connection = connection("same-host", &["-F", "personal.conf"]);
 +        let project_paths = PathList::new(&[Path::new("/repo")]);
 +        let project_worktree_paths = WorktreePaths::from_folder_paths(&project_paths);
 +
@@ -1425,10 +1417,19 @@ index 06ba365b6ee65b20fc7704a1075c9a6aa9eafbaa..3171b10fc0f778a4c0130a6adf5dd5f3
 +        other_destination.remote_connection = Some(other_connection.clone());
 +        let other_destination_id = other_destination.terminal_id;
 +
++        let linked_path = Path::new("/repo-linked");
++        let mut archive_reference = metadata(
++            "Archive reference",
++            WorktreePaths::from_folder_paths(&PathList::new(&[linked_path])),
++        );
++        archive_reference.remote_connection =
++            Some(connection("same-host", &["-o", "ServerAliveInterval=10"]));
++
 +        cx.update(|cx| {
 +            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
 +                store.save(matching, cx);
 +                store.save(other_destination, cx);
++                store.save(archive_reference, cx);
 +                store.update_worktree_paths_for_project(
 +                    &project_worktree_paths,
 +                    PathStyle::local(),
@@ -1462,12 +1463,20 @@ index 06ba365b6ee65b20fc7704a1075c9a6aa9eafbaa..3171b10fc0f778a4c0130a6adf5dd5f3
 +                "grouping and activation lookups must exclude the other SSH destination"
 +            );
 +            assert!(
++                store.path_is_referenced_by_terminal(
++                    None,
++                    linked_path,
++                    Some(&connection("same-host", &["-o", "ServerAliveInterval=20"])),
++                ),
++                "archive cleanup must keep a worktree in use through different keepalive options"
++            );
++            assert!(
 +                !store.path_is_referenced_by_terminal(
 +                    None,
-+                    Path::new("/repo"),
-+                    Some(&other_connection),
++                    linked_path,
++                    Some(&connection("other-host", &["-o", "ServerAliveInterval=10"])),
 +                ),
-+                "archive cleanup must not treat another SSH destination as a path reference"
++                "archive cleanup must not treat the same path on another SSH host as a reference"
 +            );
 +        });
 +    }
@@ -5291,10 +5300,10 @@ index 3b862dbc40600e814622096413981238bc0c5ab0..437010273a067ecf56e22f68c2eebb12
                  Event::SelectionsChanged => {
                      window.invalidate_character_coordinates();
 diff --git a/crates/workspace/src/pane.rs b/crates/workspace/src/pane.rs
-index 78646a7dd28eed8607b737d4203f41b615365017..b9d11ebcb663c980f4941ff009683b1884fd33be 100644
+index f566432cc4d11ca1dc609d143bba328b97da2d72..f89db277f563854c74e7cb53ea105bd25e7504f9 100644
 --- a/crates/workspace/src/pane.rs
 +++ b/crates/workspace/src/pane.rs
-@@ -866,6 +866,10 @@ impl Pane {
+@@ -873,6 +873,10 @@ impl Pane {
          cx.notify();
      }
  

@@ -1,4 +1,4 @@
-From a2aa82b588d49f66a3fcee150dd763fa898a5204 Mon Sep 17 00:00:00 2001
+From 25233cad331b4734eb9278c22bb6fab1ea0c7f24 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 11:03:26 +0300
 Subject: [PATCH 08/10] Show project, thread and terminal tabs in the agent
@@ -108,7 +108,7 @@ index 93d6c99bd9984550204b173c355107664185f5a6..945497922230edcfbf0e46bfbba7f4fd
      fn test_threads_sidebar_compact_defaults_to_false_when_none(cx: &mut gpui::App) {
          let store = SettingsStore::test(cx);
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 0f5a043fe5d90d454533d7a49424c2081d306ecd..40314d785b1ab12f1f3f971803cc657224f82ba0 100644
+index 76e30f3705c4842f9a71a74f48da3f68268cc9e8..84b7202eb8283b69ea0333471bc5be4f77ddd989 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
 @@ -96,7 +96,7 @@ use text::OffsetRangeExt;
@@ -142,7 +142,7 @@ index 0f5a043fe5d90d454533d7a49424c2081d306ecd..40314d785b1ab12f1f3f971803cc6572
      fn hide_button_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
          Some(workspace::HideStatusItem::new(|settings| {
              settings.agent.get_or_insert_default().button = Some(false);
-@@ -6555,6 +6561,7 @@ impl AgentPanel {
+@@ -6556,6 +6562,7 @@ impl AgentPanel {
              .is_some();
  
          let workspace = self.workspace.clone();
@@ -150,7 +150,7 @@ index 0f5a043fe5d90d454533d7a49424c2081d306ecd..40314d785b1ab12f1f3f971803cc6572
  
          PopoverMenu::new("agent-options-menu")
              .trigger_with_tooltip(
-@@ -6698,10 +6705,22 @@ impl AgentPanel {
+@@ -6699,10 +6706,22 @@ impl AgentPanel {
                                  .action("Profiles", Box::new(ManageProfiles::default()));
                          }
  
@@ -177,7 +177,7 @@ index 0f5a043fe5d90d454533d7a49424c2081d306ecd..40314d785b1ab12f1f3f971803cc6572
  
                          if has_auth_methods || supports_logout {
                              menu = menu.separator()
-@@ -6748,8 +6767,49 @@ impl AgentPanel {
+@@ -6749,8 +6768,49 @@ impl AgentPanel {
          })
      }
  
@@ -228,7 +228,7 @@ index 0f5a043fe5d90d454533d7a49424c2081d306ecd..40314d785b1ab12f1f3f971803cc6572
  
          let focus_handle = self.focus_handle(cx);
  
-@@ -7082,6 +7142,42 @@ impl AgentPanel {
+@@ -7083,6 +7143,42 @@ impl AgentPanel {
                      thread_view.update(cx, |thread_view, cx| thread_view.render_sandbox_status(cx))
                  });
  
@@ -271,7 +271,7 @@ index 0f5a043fe5d90d454533d7a49424c2081d306ecd..40314d785b1ab12f1f3f971803cc6572
              base_container
                  .child(
                      h_flex()
-@@ -7123,6 +7219,7 @@ impl AgentPanel {
+@@ -7124,6 +7220,7 @@ impl AgentPanel {
              .border_b_1()
              .border_color(cx.theme().colors().border)
              .child(toolbar_content)
@@ -279,7 +279,7 @@ index 0f5a043fe5d90d454533d7a49424c2081d306ecd..40314d785b1ab12f1f3f971803cc6572
      }
  
      fn should_render_trial_end_upsell(&self, cx: &mut Context<Self>) -> bool {
-@@ -7489,6 +7586,13 @@ impl AgentPanel {
+@@ -7490,6 +7587,13 @@ impl AgentPanel {
  
  impl Render for AgentPanel {
      fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -293,7 +293,7 @@ index 0f5a043fe5d90d454533d7a49424c2081d306ecd..40314d785b1ab12f1f3f971803cc6572
          // WARNING: Changes to this element hierarchy can have
          // non-obvious implications to the layout of children.
          //
-@@ -7544,8 +7648,21 @@ impl Render for AgentPanel {
+@@ -7545,8 +7649,21 @@ impl Render for AgentPanel {
                  }
              }))
              .child(self.render_toolbar(window, cx))
@@ -315,7 +315,7 @@ index 0f5a043fe5d90d454533d7a49424c2081d306ecd..40314d785b1ab12f1f3f971803cc6572
                  VisibleSurface::Uninitialized if !self.has_open_project(cx) => {
                      parent.child(self.render_no_project_state(cx))
                  }
-@@ -10870,6 +10987,55 @@ mod tests {
+@@ -10891,6 +11008,55 @@ mod tests {
          assert_eq!(pasted, "file.rs:2-3 ");
      }
  
@@ -371,7 +371,7 @@ index 0f5a043fe5d90d454533d7a49424c2081d306ecd..40314d785b1ab12f1f3f971803cc6572
      async fn setup_panel(cx: &mut TestAppContext) -> (Entity<AgentPanel>, VisualTestContext) {
          init_test(cx);
          cx.update(|cx| {
-@@ -16423,6 +16589,144 @@ mod tests {
+@@ -16444,6 +16610,144 @@ mod tests {
          });
      }
  
@@ -585,7 +585,7 @@ index 6519343b36b794067ac4dd571257977363dae3ae..d66b8bc14ba1895120f26f86a38f65f7
  
  #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index b4c54ca602b76b31d45dc9affaee1299625e8bae..7c6fe4df2af19bf216b37e3daf92679e74dce5e1 100644
+index 86d7f01d1108edf911ca5b0e7278ccc3d7282716..1bb8254e3771ece4a078ffa7e2486557587e08e2 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -1,4 +1,5 @@
@@ -817,7 +817,7 @@ index b4c54ca602b76b31d45dc9affaee1299625e8bae..7c6fe4df2af19bf216b37e3daf92679e
          self.update_entries(cx);
          true
      }
-@@ -7341,7 +7417,6 @@ impl Sidebar {
+@@ -7382,7 +7458,6 @@ impl Sidebar {
                  )
              })
              .on_click({
@@ -825,7 +825,7 @@ index b4c54ca602b76b31d45dc9affaee1299625e8bae..7c6fe4df2af19bf216b37e3daf92679e
                  cx.listener(move |this, _, window, cx| {
                      this.selection = None;
                      match &thread_workspace {
-@@ -7364,15 +7439,28 @@ impl Sidebar {
+@@ -7405,15 +7480,28 @@ impl Sidebar {
                  })
              });
  
@@ -860,7 +860,7 @@ index b4c54ca602b76b31d45dc9affaee1299625e8bae..7c6fe4df2af19bf216b37e3daf92679e
          let sidebar = cx.weak_entity();
  
          let active_workspace = self.active_workspace(cx);
-@@ -7385,113 +7473,108 @@ impl Sidebar {
+@@ -7426,113 +7514,108 @@ impl Sidebar {
          let can_open_as_markdown = thread.is_live || is_zed_thread;
          let folder_paths = thread.metadata.folder_paths().clone();
  
@@ -1059,7 +1059,7 @@ index b4c54ca602b76b31d45dc9affaee1299625e8bae..7c6fe4df2af19bf216b37e3daf92679e
      }
  
      fn render_terminal(
-@@ -7590,33 +7673,41 @@ impl Sidebar {
+@@ -7631,33 +7714,41 @@ impl Sidebar {
                  }
              }));
  
@@ -1122,7 +1122,7 @@ index b4c54ca602b76b31d45dc9affaee1299625e8bae..7c6fe4df2af19bf216b37e3daf92679e
      }
  
      fn render_filter_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
-@@ -7631,7 +7722,11 @@ impl Sidebar {
+@@ -7672,7 +7763,11 @@ impl Sidebar {
              .child(self.filter_editor.clone())
      }
  
@@ -1135,7 +1135,7 @@ index b4c54ca602b76b31d45dc9affaee1299625e8bae..7c6fe4df2af19bf216b37e3daf92679e
          let multi_workspace = self.multi_workspace.upgrade();
  
          let workspace = multi_workspace
-@@ -7670,11 +7765,18 @@ impl Sidebar {
+@@ -7711,11 +7806,18 @@ impl Sidebar {
                      .selected_style(ButtonStyle::Tinted(TintColor::Accent)),
                  |_window, cx| Tooltip::for_action("Add Project", &OpenRecent::default(), cx),
              )
@@ -1158,7 +1158,7 @@ index b4c54ca602b76b31d45dc9affaee1299625e8bae..7c6fe4df2af19bf216b37e3daf92679e
      }
  
      fn new_thread_in_group(
-@@ -8041,6 +8143,25 @@ impl Sidebar {
+@@ -8082,6 +8184,25 @@ impl Sidebar {
          key: &ProjectGroupKey,
          window: &mut Window,
          cx: &mut Context<Self>,
@@ -1184,7 +1184,7 @@ index b4c54ca602b76b31d45dc9affaee1299625e8bae..7c6fe4df2af19bf216b37e3daf92679e
      ) {
          let workspace = self
              .multi_workspace
-@@ -8048,12 +8169,20 @@ impl Sidebar {
+@@ -8089,12 +8210,20 @@ impl Sidebar {
              .and_then(|mw| mw.read(cx).last_active_workspace_for_group(key, cx))
              .or_else(|| self.workspace_for_group(key, cx));
          if let Some(workspace) = workspace {
@@ -1208,7 +1208,7 @@ index b4c54ca602b76b31d45dc9affaee1299625e8bae..7c6fe4df2af19bf216b37e3daf92679e
          }
          self.selection = None;
          self.active_entry = None;
-@@ -8120,7 +8249,7 @@ impl Sidebar {
+@@ -8161,7 +8290,7 @@ impl Sidebar {
                  multi_workspace.retain_active_workspace(cx);
              });
          } else {
@@ -1217,7 +1217,7 @@ index b4c54ca602b76b31d45dc9affaee1299625e8bae..7c6fe4df2af19bf216b37e3daf92679e
          }
      }
  
-@@ -8464,7 +8593,7 @@ impl Sidebar {
+@@ -8505,7 +8634,7 @@ impl Sidebar {
                      })),
              )
              .child(div().flex_1())
@@ -1226,7 +1226,7 @@ index b4c54ca602b76b31d45dc9affaee1299625e8bae..7c6fe4df2af19bf216b37e3daf92679e
      }
  
      fn active_workspace(&self, cx: &App) -> Option<Entity<Workspace>> {
-@@ -8698,8 +8827,11 @@ impl Sidebar {
+@@ -8739,8 +8868,11 @@ impl Sidebar {
      fn show_thread_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
          self.view = SidebarView::ThreadList;
          self._subscriptions.clear();
@@ -1240,7 +1240,7 @@ index b4c54ca602b76b31d45dc9affaee1299625e8bae..7c6fe4df2af19bf216b37e3daf92679e
          self.serialize(cx);
          cx.notify();
      }
-@@ -8818,6 +8950,45 @@ impl WorkspaceSidebar for Sidebar {
+@@ -8859,6 +8991,45 @@ impl WorkspaceSidebar for Sidebar {
          self.cycle_thread_impl(forward, window, cx);
      }
  
@@ -1287,7 +1287,7 @@ index b4c54ca602b76b31d45dc9affaee1299625e8bae..7c6fe4df2af19bf216b37e3daf92679e
          let serialized = SerializedSidebar {
              width: self.width_set_by_user.then(|| f32::from(self.width)),
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 4268e50a0ed12a1a5ef6d900821c32d778196f61..f40aca97c2227c31ac133765f65dfb5a125f14f8 100644
+index 063557d000376f4fd264eb251bdcf88fe5ff1c01..6a19fd4694f5361f626f5183752566e4acc8d244 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
 @@ -1185,6 +1185,31 @@ async fn test_restored_width_preserves_legacy_resizes(cx: &mut TestAppContext) {
@@ -1322,7 +1322,7 @@ index 4268e50a0ed12a1a5ef6d900821c32d778196f61..f40aca97c2227c31ac133765f65dfb5a
  #[gpui::test]
  async fn test_configured_width_is_clamped_into_range(cx: &mut TestAppContext) {
      let project = init_test_project("/my-project", cx).await;
-@@ -19312,6 +19337,123 @@ fn header_search_offsets(
+@@ -19390,6 +19415,123 @@ fn header_search_offsets(
      }
  }
  
@@ -1446,7 +1446,7 @@ index 4268e50a0ed12a1a5ef6d900821c32d778196f61..f40aca97c2227c31ac133765f65dfb5a
  #[gpui::test]
  async fn test_rootless_remote_history_is_visible_without_open_project(cx: &mut TestAppContext) {
      init_test(cx);
-@@ -19345,6 +19487,290 @@ async fn test_rootless_remote_history_is_visible_without_open_project(cx: &mut T
+@@ -19423,6 +19565,290 @@ async fn test_rootless_remote_history_is_visible_without_open_project(cx: &mut T
      });
  }
  
@@ -1737,7 +1737,7 @@ index 4268e50a0ed12a1a5ef6d900821c32d778196f61..f40aca97c2227c31ac133765f65dfb5a
  #[test]
  fn test_terminal_remote_connection_match_distinguishes_ssh_arguments() {
      use remote::SshConnectionOptions;
-@@ -19378,6 +19804,75 @@ fn test_terminal_remote_connection_match_distinguishes_ssh_arguments() {
+@@ -19456,6 +19882,75 @@ fn test_terminal_remote_connection_match_distinguishes_ssh_arguments() {
  }
  
  
@@ -1813,7 +1813,7 @@ index 4268e50a0ed12a1a5ef6d900821c32d778196f61..f40aca97c2227c31ac133765f65dfb5a
  #[gpui::test]
  async fn test_sidebar_close_waits_for_pending_terminal_startup(cx: &mut TestAppContext) {
      let project = init_test_project_with_agent_panel("/project", cx).await;
-@@ -19443,3 +19938,254 @@ fn test_restored_ssh_group_rehydrates_execution_options_before_terminal_matching
+@@ -19521,3 +20016,254 @@ fn test_restored_ssh_group_rehydrates_execution_options_before_terminal_matching
          assert!(same_terminal_remote_connection(Some(&hydrated), Some(&metadata)));
      });
  }
@@ -3076,7 +3076,7 @@ index 77991edef183c7321d8594ac9eac01c8274f81a2..377a8d1c766c8bb9d906719d46dd0b7d
              let has_top_spacer = top_spacer.is_some();
              let create_resize_handle = || {
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 9a1ba36a75ce21d7a45db10df798280b5b938acf..6384ffbaf079087ae83b0323a551c9fd7f960c0e 100644
+index 50b6097771b39f10c9845d49525e5c8b8ffa345b..e86c3b64097df34ce6ee85c016f6966c510b77ae 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -158,6 +158,29 @@ pub trait Sidebar: Focusable + Render + EventEmitter<SidebarEvent> + Sized {
@@ -3262,7 +3262,7 @@ index 9a1ba36a75ce21d7a45db10df798280b5b938acf..6384ffbaf079087ae83b0323a551c9fd
          for workspace in self.workspaces().cloned().collect::<Vec<_>>() {
              workspace.update(cx, |workspace, _cx| {
                  workspace.set_sidebar_focus_handle(sidebar_focus_handle.clone());
-@@ -1529,7 +1620,7 @@ impl MultiWorkspace {
+@@ -1533,7 +1624,7 @@ impl MultiWorkspace {
      }
  
      fn sync_sidebar_to_workspace(&self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
@@ -3271,7 +3271,7 @@ index 9a1ba36a75ce21d7a45db10df798280b5b938acf..6384ffbaf079087ae83b0323a551c9fd
              let sidebar_focus_handle = self.sidebar.as_ref().map(|s| s.focus_handle(cx));
              workspace.update(cx, |workspace, _| {
                  workspace.set_sidebar_focus_handle(sidebar_focus_handle);
-@@ -2323,7 +2414,10 @@ impl Render for MultiWorkspace {
+@@ -2352,7 +2443,10 @@ impl Render for MultiWorkspace {
          let sidebar_side = self.sidebar_side(cx);
          let sidebar_on_right = sidebar_side == SidebarSide::Right;
  
@@ -3284,7 +3284,7 @@ index 9a1ba36a75ce21d7a45db10df798280b5b938acf..6384ffbaf079087ae83b0323a551c9fd
                  let weak = cx.weak_entity();
  
 diff --git a/crates/workspace/src/multi_workspace_tests.rs b/crates/workspace/src/multi_workspace_tests.rs
-index 23afd0b55ed5665c31a1818db75685de353ea2ca..0622e48975746951b2a34a41fd43126e34b32ec8 100644
+index c41ca297823da63f00bf198e7113b6ba6c3d26bf..1fb0c1cf53b9624ad954fa5d5021ef1676423e3e 100644
 --- a/crates/workspace/src/multi_workspace_tests.rs
 +++ b/crates/workspace/src/multi_workspace_tests.rs
 @@ -117,6 +117,90 @@ async fn test_sidebar_disabled_when_disable_ai_is_enabled(cx: &mut TestAppContex
@@ -3396,7 +3396,7 @@ index c028e77cdbd1eaa10da6c3c3058a923e32dbb231..882c546a8d0b38a51ab32472885b67e7
              })
              .unwrap_or_default()
 diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
-index acb21cccc002e7b22dacfc9122cbd3cb550704d9..73ef841c579e627f910f8e3dd98cd85344bcdc43 100644
+index 5932178bc7fcc95c1e47cd98d17b0c2ff7467616..c503ee64440d251a491a661442394ab1c84c39d8 100644
 --- a/crates/workspace/src/workspace.rs
 +++ b/crates/workspace/src/workspace.rs
 @@ -31,11 +31,12 @@ mod workspace_settings;
@@ -3451,7 +3451,7 @@ index acb21cccc002e7b22dacfc9122cbd3cb550704d9..73ef841c579e627f910f8e3dd98cd853
      window.set_traffic_light_position(point(inset, inset));
  }
  
-@@ -10828,7 +10840,15 @@ impl Render for Workspace {
+@@ -10907,7 +10919,15 @@ impl Render for Workspace {
                                          })
                                          .into_any_element(),
                                  };
