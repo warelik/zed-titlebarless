@@ -1757,23 +1757,28 @@ gh() {
     test ! -s "$GITHUB_OUTPUT" || return 90
     printf '%s\\n' "$*" >> "$CALLS"
     if [[ "$2" == get ]]; then
-        printf '%s\\n' "$READBACK"
+        if [[ "$*" == *' --json value --jq .value | @json' ]]; then
+            printf '%s\\n' "$ENCODED_READBACK"
+        else
+            printf '%s\\n' "$READBACK"
+        fi
         return "$READBACK_STATUS"
     fi
 }
 """
         expected = "a" * 40
-        for value, status in ((expected, 0), ("b" * 40, 0), (expected, 1)):
+        for value, status in ((expected, 0), ("b" * 40, 0), (expected + "\n", 0), (expected, 1)):
             with self.subTest(value=value, status=status), tempfile.TemporaryDirectory() as temporary:
                 output, calls = (Path(temporary) / name for name in ("output", "calls"))
                 result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", fake_gh + script],
                     env={**os.environ, "GITHUB_OUTPUT": str(output), "CALLS": str(calls),
                          "GITHUB_REPOSITORY": "owner/zed", "POLICY_REF": expected, "REPAIR_PR": "",
-                         "READBACK": value, "READBACK_STATUS": str(status)},
+                         "READBACK": value, "ENCODED_READBACK": json.dumps(value),
+                         "READBACK_STATUS": str(status)},
                     capture_output=True, text=True)
                 self.assertEqual(calls.read_text().splitlines(), [
                     f"variable set ZED_TRUSTED_POLICY --repo owner/zed --body {expected}",
-                    "variable get ZED_TRUSTED_POLICY --repo owner/zed",
+                    "variable get ZED_TRUSTED_POLICY --repo owner/zed --json value --jq .value | @json",
                 ])
                 if value == expected and status == 0:
                     self.assertEqual(result.returncode, 0, result.stderr)

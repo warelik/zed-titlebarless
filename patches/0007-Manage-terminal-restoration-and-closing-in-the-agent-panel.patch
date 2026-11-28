@@ -1,4 +1,4 @@
-From 7568521bc308681ebb141ac354400ab15db60061 Mon Sep 17 00:00:00 2001
+From 73070e2690ec0321f08a6c95fba9c5108b08e54a Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 11:03:26 +0300
 Subject: [PATCH 07/10] Manage terminal restoration and closing in the agent
@@ -5218,7 +5218,7 @@ index 6d4b5b8e320ca2c55f1ff27ef90879c89df1049a..bfc663120e4ea6145729adaa96452051
 +terminal_view.workspace = true
  workspace = { workspace = true, features = ["test-support"] }
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..78a49a245a2056ad9be9a99ec68a607c8fd80b10 100644
+index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..14ddc541f09c817b94ab8aa367bdc5427883f16b 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -6,7 +6,8 @@ use agent::{ThreadStore, ZED_AGENT_ID};
@@ -5754,7 +5754,37 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..78a49a245a2056ad9be9a99ec68a607c
          let provisional_key = Some(project_group_key.clone());
          let active_workspace = multi_workspace.read(cx).workspace().clone();
          let modal_workspace = active_workspace.clone();
-@@ -5014,7 +5146,7 @@ impl Sidebar {
+@@ -4880,21 +5012,16 @@ impl Sidebar {
+         }
+ 
+         if !roots_to_archive.is_empty() {
+-            let archive_paths: HashSet<&Path> = roots_to_archive
+-                .iter()
+-                .map(|root| root.root_path.as_path())
+-                .collect();
+-            let project = workspace.read(cx).project().clone();
+-            let visible_worktree_paths = project
++            let project = workspace.read(cx).project();
++            let archived_worktrees = Self::archived_worktree_ids(project, roots_to_archive);
++            let mut visible_worktrees = project
+                 .read(cx)
+                 .visible_worktrees(cx)
+-                .map(|worktree| worktree.read(cx).abs_path())
+-                .collect::<Vec<_>>();
+-            return (!visible_worktree_paths.is_empty()
+-                && visible_worktree_paths
+-                    .iter()
+-                    .all(|path| archive_paths.contains(path.as_ref())))
+-            .then_some(workspace);
++                .map(|worktree| worktree.read(cx).id())
++                .peekable();
++            let all_archived = visible_worktrees.peek().is_some()
++                && visible_worktrees.all(|id| archived_worktrees.contains(&id));
++            return all_archived.then_some(workspace);
+         }
+ 
+         let group_key = workspace.read(cx).project_group_key(cx);
+@@ -5014,7 +5141,7 @@ impl Sidebar {
              return;
          };
  
@@ -5763,7 +5793,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..78a49a245a2056ad9be9a99ec68a607c
          let active_workspace = multi_workspace.read(cx).workspace().clone();
          let modal_workspace = active_workspace.clone();
  
-@@ -5082,7 +5214,325 @@ impl Sidebar {
+@@ -5082,7 +5209,325 @@ impl Sidebar {
              return;
          }
  
@@ -6089,7 +6119,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..78a49a245a2056ad9be9a99ec68a607c
          let is_active = self
              .active_entry
              .as_ref()
-@@ -5100,6 +5550,7 @@ impl Sidebar {
+@@ -5100,6 +5545,7 @@ impl Sidebar {
              })
              .and_then(|position| self.neighboring_activatable_entry(position));
  
@@ -6097,7 +6127,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..78a49a245a2056ad9be9a99ec68a607c
          let terminal_folder_paths = metadata.folder_paths().clone();
          let roots_to_archive = self.roots_to_archive_for_paths(
              metadata.folder_paths(),
-@@ -5108,7 +5559,6 @@ impl Sidebar {
+@@ -5108,7 +5554,6 @@ impl Sidebar {
              Some(terminal_id),
              cx,
          );
@@ -6105,7 +6135,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..78a49a245a2056ad9be9a99ec68a607c
          let workspace_to_remove = self.linked_worktree_workspace_to_remove(
              &terminal_folder_paths,
              metadata.remote_connection.as_ref(),
-@@ -5117,52 +5567,275 @@ impl Sidebar {
+@@ -5117,52 +5562,275 @@ impl Sidebar {
              &roots_to_archive,
              cx,
          );
@@ -6413,7 +6443,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..78a49a245a2056ad9be9a99ec68a607c
      fn close_terminal_entry(
          &mut self,
          metadata: &TerminalThreadMetadata,
-@@ -5177,24 +5850,16 @@ impl Sidebar {
+@@ -5177,24 +5845,16 @@ impl Sidebar {
          let terminal_id = metadata.terminal_id;
          let defer_draft_activation = activate_panel_draft && is_active && neighbor.is_some();
  
@@ -6448,7 +6478,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..78a49a245a2056ad9be9a99ec68a607c
              });
          }
  
-@@ -5264,13 +5929,12 @@ impl Sidebar {
+@@ -5264,22 +5924,16 @@ impl Sidebar {
          .detach_and_log_err(cx);
      }
  
@@ -6465,11 +6495,59 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..78a49a245a2056ad9be9a99ec68a607c
          if roots_to_archive.is_empty() {
              return Vec::new();
          }
-@@ -5314,6 +5978,116 @@ impl Sidebar {
+ 
+-        let archive_paths: HashSet<&Path> = roots_to_archive
+-            .iter()
+-            .map(|root| root.root_path.as_path())
+-            .collect();
+-
+         let mut mixed_workspaces: Vec<(Entity<Workspace>, Vec<WorktreeId>)> = Vec::new();
+ 
+         if let Some(multi_workspace) = self.multi_workspace.upgrade() {
+@@ -5290,16 +5944,22 @@ impl Sidebar {
+                     continue;
+                 }
+ 
+-                let project = workspace.read(cx).project().read(cx);
++                let project = workspace.read(cx).project();
++                let archived_worktrees = Self::archived_worktree_ids(project, roots_to_archive);
++                if archived_worktrees.is_empty() {
++                    continue;
++                }
++
+                 let visible_worktrees: Vec<_> = project
++                    .read(cx)
+                     .visible_worktrees(cx)
+-                    .map(|worktree| (worktree.read(cx).id(), worktree.read(cx).abs_path()))
++                    .map(|worktree| worktree.read(cx).id())
+                     .collect();
+ 
+                 let archived_worktree_ids: Vec<WorktreeId> = visible_worktrees
+                     .iter()
+-                    .filter(|(_, path)| archive_paths.contains(path.as_ref()))
+-                    .map(|(id, _)| *id)
++                    .copied()
++                    .filter(|id| archived_worktrees.contains(id))
+                     .collect();
+ 
+                 if archived_worktree_ids.is_empty() {
+@@ -5314,6 +5974,128 @@ impl Sidebar {
              }
          }
  
 +        mixed_workspaces
++    }
++
++    fn archived_worktree_ids(
++        project: &Entity<project::Project>,
++        roots_to_archive: &[thread_worktree_archive::RootPlan],
++    ) -> HashSet<WorktreeId> {
++        roots_to_archive
++            .iter()
++            .flat_map(|root| &root.affected_projects)
++            .filter(|affected| &affected.project == project)
++            .map(|affected| affected.worktree_id)
++            .collect()
 +    }
 +
 +    fn archived_worktree_item_targets(
@@ -6582,7 +6660,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..78a49a245a2056ad9be9a99ec68a607c
          let mut close_item_tasks = Vec::new();
          for (workspace, archived_worktree_ids) in &mixed_workspaces {
              let panes: Vec<_> = workspace.read(cx).panes().to_vec();
-@@ -5502,12 +6276,10 @@ impl Sidebar {
+@@ -5502,12 +6284,10 @@ impl Sidebar {
          // dropped without destroying the user's workspace layout.
          let mut workspaces_to_remove: Vec<Entity<Workspace>> =
              workspace_to_remove.into_iter().collect();
@@ -6599,7 +6677,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..78a49a245a2056ad9be9a99ec68a607c
  
          let removed_workspace = !workspaces_to_remove.is_empty();
          let session_id = session_id.clone();
-@@ -6931,12 +7703,10 @@ impl Sidebar {
+@@ -6931,12 +7711,10 @@ impl Sidebar {
          });
          let mut workspaces_to_remove: Vec<Entity<Workspace>> =
              workspace_to_remove.into_iter().collect();
@@ -6616,7 +6694,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..78a49a245a2056ad9be9a99ec68a607c
  
          let draft_workspace_removed = matches!(
              workspace,
-@@ -7993,6 +8763,8 @@ impl Render for Sidebar {
+@@ -7993,6 +8771,8 @@ impl Render for Sidebar {
  
          let no_open_projects = !self.contents.has_open_projects;
          let no_search_results = self.contents.entries.is_empty();
@@ -6625,7 +6703,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..78a49a245a2056ad9be9a99ec68a607c
  
          v_flex()
              .id("workspace-sidebar")
-@@ -8075,6 +8847,15 @@ impl Render for Sidebar {
+@@ -8075,6 +8855,15 @@ impl Render for Sidebar {
              .map(|this| match &self.view {
                  SidebarView::ThreadList => this
                      .child(self.render_sidebar_header(no_open_projects, window, cx))
@@ -6642,11 +6720,14 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..78a49a245a2056ad9be9a99ec68a607c
                          if no_open_projects {
                              this.child(self.render_empty_state(cx))
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437db0c7cc71 100644
+index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eebc7c8b02f 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
-@@ -29,13 +29,59 @@ use settings::{
+@@ -27,15 +27,62 @@ use settings::{
+     FontSize, Settings, SettingsStore, SidebarDockPosition, TitleBarVisibility, UiDensity,
+ };
  use std::{
++    cell::RefCell,
      path::{Path, PathBuf},
      sync::Arc,
 +    time::Duration,
@@ -6706,7 +6787,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
  fn use_unique_metadata_databases(cx: &mut TestAppContext) {
      use std::sync::atomic::{AtomicUsize, Ordering};
  
-@@ -2609,6 +2655,286 @@ async fn test_agent_panel_terminals_appear_in_sidebar_and_search(cx: &mut TestAp
+@@ -2609,6 +2656,286 @@ async fn test_agent_panel_terminals_appear_in_sidebar_and_search(cx: &mut TestAp
      );
  }
  
@@ -6993,7 +7074,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
  #[gpui::test]
  async fn test_closing_last_agent_panel_terminal_restores_empty_header(cx: &mut TestAppContext) {
      let project = init_test_project_with_agent_panel("/my-project", cx).await;
-@@ -2759,6 +3085,7 @@ async fn test_terminal_metadata_is_deduped_across_project_groups(cx: &mut TestAp
+@@ -2759,6 +3086,7 @@ async fn test_terminal_metadata_is_deduped_across_project_groups(cx: &mut TestAp
      });
      let now = Utc::now();
      let metadata = TerminalThreadMetadata {
@@ -7001,7 +7082,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
          terminal_id,
          title: "Dev Server".into(),
          custom_title: None,
-@@ -2770,7 +3097,6 @@ async fn test_terminal_metadata_is_deduped_across_project_groups(cx: &mut TestAp
+@@ -2770,7 +3098,6 @@ async fn test_terminal_metadata_is_deduped_across_project_groups(cx: &mut TestAp
          .unwrap(),
          remote_connection: None,
          working_directory: None,
@@ -7009,7 +7090,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
      };
  
      cx.update(|_, cx| {
-@@ -2865,9 +3191,23 @@ async fn test_agent_panel_terminal_shows_project_and_linked_worktree(cx: &mut Te
+@@ -2865,9 +3192,23 @@ async fn test_agent_panel_terminal_shows_project_and_linked_worktree(cx: &mut Te
      );
  }
  
@@ -7033,7 +7114,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
  ) {
      init_test(cx);
  
-@@ -2992,6 +3332,14 @@ async fn test_terminal_close_event_on_archived_linked_worktree_removes_workspace
+@@ -2992,6 +3333,14 @@ async fn test_terminal_close_event_on_archived_linked_worktree_removes_workspace
          })
          .expect("test terminal should be inserted");
      cx.run_until_parked();
@@ -7048,7 +7129,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
  
      assert_eq!(
          multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace
-@@ -3008,9 +3356,77 @@ async fn test_terminal_close_event_on_archived_linked_worktree_removes_workspace
+@@ -3008,9 +3357,77 @@ async fn test_terminal_close_event_on_archived_linked_worktree_removes_workspace
          "expected linked worktree terminal before closing, got: {entries_before:?}"
      );
  
@@ -7128,7 +7209,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
      for _ in 0..4 {
          cx.run_until_parked();
      }
-@@ -3064,9 +3480,23 @@ async fn test_terminal_close_event_on_archived_linked_worktree_removes_workspace
+@@ -3064,9 +3481,23 @@ async fn test_terminal_close_event_on_archived_linked_worktree_removes_workspace
      );
  }
  
@@ -7152,7 +7233,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
  ) {
      init_test(cx);
  
-@@ -3108,7 +3538,7 @@ async fn test_terminal_close_event_deletes_empty_draft_when_linked_worktree_has_
+@@ -3108,7 +3539,7 @@ async fn test_terminal_close_event_deletes_empty_draft_when_linked_worktree_has_
  
      let (multi_workspace, cx) =
          cx.add_window_view(|window, cx| MultiWorkspace::test_new(main_project.clone(), window, cx));
@@ -7161,7 +7242,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
      let worktree_workspace = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
          multi_workspace.test_add_workspace(worktree_project.clone(), window, cx)
      });
-@@ -3140,9 +3570,7 @@ async fn test_terminal_close_event_deletes_empty_draft_when_linked_worktree_has_
+@@ -3140,9 +3571,7 @@ async fn test_terminal_close_event_deletes_empty_draft_when_linked_worktree_has_
          .expect("test terminal should be inserted");
      cx.run_until_parked();
  
@@ -7172,7 +7253,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
      for _ in 0..4 {
          cx.run_until_parked();
      }
-@@ -3171,9 +3599,23 @@ async fn test_terminal_close_event_deletes_empty_draft_when_linked_worktree_has_
+@@ -3171,9 +3600,23 @@ async fn test_terminal_close_event_deletes_empty_draft_when_linked_worktree_has_
      );
  }
  
@@ -7196,7 +7277,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
  ) {
      init_test(cx);
  
-@@ -3232,7 +3674,7 @@ async fn test_terminal_close_event_keeps_linked_worktree_workspace_with_live_edi
+@@ -3232,7 +3675,7 @@ async fn test_terminal_close_event_keeps_linked_worktree_workspace_with_live_edi
  
      let (multi_workspace, cx) =
          cx.add_window_view(|window, cx| MultiWorkspace::test_new(main_project.clone(), window, cx));
@@ -7205,7 +7286,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
      let worktree_workspace = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
          multi_workspace.test_add_workspace(worktree_project.clone(), window, cx)
      });
-@@ -3316,9 +3758,7 @@ async fn test_terminal_close_event_keeps_linked_worktree_workspace_with_live_edi
+@@ -3316,9 +3759,7 @@ async fn test_terminal_close_event_keeps_linked_worktree_workspace_with_live_edi
          "should start with main and linked worktree workspaces"
      );
  
@@ -7216,7 +7297,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
      for _ in 0..4 {
          cx.run_until_parked();
      }
-@@ -3763,9 +4203,7 @@ async fn test_terminal_close_event_closes_sidebar_terminal(cx: &mut TestAppConte
+@@ -3763,9 +4204,7 @@ async fn test_terminal_close_event_closes_sidebar_terminal(cx: &mut TestAppConte
          vec!["v [my-project]", "  Dev Server"]
      );
  
@@ -7227,7 +7308,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
      cx.run_until_parked();
  
      panel.read_with(cx, |panel, _cx| {
-@@ -3805,9 +4243,7 @@ async fn test_terminal_close_event_activates_neighbor(cx: &mut TestAppContext) {
+@@ -3805,9 +4244,7 @@ async fn test_terminal_close_event_activates_neighbor(cx: &mut TestAppContext) {
          .expect("server test terminal should be inserted");
      cx.run_until_parked();
  
@@ -7238,7 +7319,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
      cx.run_until_parked();
  
      panel.read_with(cx, |panel, _cx| {
-@@ -3827,6 +4263,44 @@ async fn test_terminal_close_event_activates_neighbor(cx: &mut TestAppContext) {
+@@ -3827,6 +4264,44 @@ async fn test_terminal_close_event_activates_neighbor(cx: &mut TestAppContext) {
      );
  }
  
@@ -7283,7 +7364,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
  #[gpui::test]
  async fn test_agent_panel_terminal_notifications_update_sidebar(cx: &mut TestAppContext) {
      let project = init_test_project_with_agent_panel("/my-project", cx).await;
-@@ -3991,6 +4465,7 @@ async fn test_thread_switcher_includes_terminal_metadata_for_open_project_group(
+@@ -3991,6 +4466,7 @@ async fn test_thread_switcher_includes_terminal_metadata_for_open_project_group(
  
      let created_at = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap();
      let metadata = TerminalThreadMetadata {
@@ -7291,7 +7372,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
          terminal_id,
          title: "Feature Terminal".into(),
          custom_title: None,
-@@ -4002,7 +4477,6 @@ async fn test_thread_switcher_includes_terminal_metadata_for_open_project_group(
+@@ -4002,7 +4478,6 @@ async fn test_thread_switcher_includes_terminal_metadata_for_open_project_group(
          .unwrap(),
          remote_connection: None,
          working_directory: None,
@@ -7299,7 +7380,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
      };
      cx.update(|_, cx| {
          TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
-@@ -4099,6 +4573,7 @@ async fn test_thread_switcher_preserves_closed_terminal_linked_worktree_workspac
+@@ -4099,6 +4574,7 @@ async fn test_thread_switcher_preserves_closed_terminal_linked_worktree_workspac
      let worktree_folder_paths =
          PathList::new(&[PathBuf::from("/worktrees/project/feature-a/project")]);
      let metadata = TerminalThreadMetadata {
@@ -7307,7 +7388,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
          terminal_id,
          title: "Feature Terminal".into(),
          custom_title: None,
-@@ -4110,7 +4585,6 @@ async fn test_thread_switcher_preserves_closed_terminal_linked_worktree_workspac
+@@ -4110,7 +4586,6 @@ async fn test_thread_switcher_preserves_closed_terminal_linked_worktree_workspac
          .unwrap(),
          remote_connection: None,
          working_directory: None,
@@ -7315,7 +7396,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
      };
      cx.update(|_, cx| {
          TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
-@@ -4248,6 +4722,7 @@ async fn test_archive_selected_terminal_archives_closed_linked_worktree(cx: &mut
+@@ -4248,6 +4723,7 @@ async fn test_archive_selected_terminal_archives_closed_linked_worktree(cx: &mut
      let worktree_folder_paths =
          PathList::new(&[PathBuf::from("/worktrees/project/feature-a/project")]);
      let metadata = TerminalThreadMetadata {
@@ -7323,7 +7404,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
          terminal_id,
          title: "Feature Terminal".into(),
          custom_title: None,
-@@ -4259,7 +4734,6 @@ async fn test_archive_selected_terminal_archives_closed_linked_worktree(cx: &mut
+@@ -4259,7 +4735,6 @@ async fn test_archive_selected_terminal_archives_closed_linked_worktree(cx: &mut
          .unwrap(),
          remote_connection: None,
          working_directory: None,
@@ -7331,7 +7412,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
      };
      cx.update(|_, cx| {
          TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
-@@ -4848,6 +5322,1233 @@ async fn test_closing_active_agent_panel_terminal_activates_neighbor(cx: &mut Te
+@@ -4848,6 +5323,1233 @@ async fn test_closing_active_agent_panel_terminal_activates_neighbor(cx: &mut Te
      );
  }
  
@@ -8565,7 +8646,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
  #[gpui::test]
  async fn test_parallel_threads_shown_with_live_status(cx: &mut TestAppContext) {
      let project = init_test_project_with_agent_panel("/my-project", cx).await;
-@@ -9105,14 +10806,26 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window(cx: &m
+@@ -9105,14 +10807,26 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window(cx: &m
      cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
  
      let project_a = project::Project::test(fs.clone(), ["/project-a".as_ref()], cx).await;
@@ -8596,7 +8677,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
      let multi_workspace_b_entity = multi_workspace_b.root(cx).unwrap();
  
      let cx_b = &mut gpui::VisualTestContext::from_window(multi_workspace_b.into(), cx);
-@@ -9185,14 +10898,26 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window_with_t
+@@ -9185,14 +10899,26 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window_with_t
      cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
  
      let project_a = project::Project::test(fs.clone(), ["/project-a".as_ref()], cx).await;
@@ -8627,7 +8708,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
      let multi_workspace_b_entity = multi_workspace_b.root(cx).unwrap();
  
      let cx_a = &mut gpui::VisualTestContext::from_window(multi_workspace_a.into(), cx);
-@@ -15173,6 +16898,526 @@ async fn test_archive_removes_worktree_even_when_workspace_paths_diverge(cx: &mu
+@@ -15173,6 +16899,526 @@ async fn test_archive_removes_worktree_even_when_workspace_paths_diverge(cx: &mu
      );
  }
  
@@ -9154,7 +9235,159 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..285f545a67c534f8701764a33b3f437d
  #[gpui::test]
  async fn test_archive_mixed_workspace_closes_only_archived_worktree_items(cx: &mut TestAppContext) {
      // When a workspace contains both a worktree being archived and other
-@@ -16691,3 +18936,135 @@ fn header_search_offsets(
+@@ -15677,6 +17923,7 @@ fn test_worktree_info_missing_branch_returns_none() {
+ async fn test_remote_archive_thread_with_active_connection(
+     cx: &mut TestAppContext,
+     server_cx: &mut TestAppContext,
++    other_server_cx: &mut TestAppContext,
+ ) {
+     // End-to-end test of archiving a remote thread tied to a linked git
+     // worktree. Archival should:
+@@ -15708,8 +17955,12 @@ async fn test_remote_archive_thread_with_active_connection(
+     server_cx.update(|cx| {
+         release_channel::init(semver::Version::new(0, 0, 0), cx);
+     });
++    other_server_cx.update(|cx| {
++        release_channel::init(semver::Version::new(0, 0, 0), cx);
++    });
+ 
+     // Set up the remote filesystem with a main repo and one linked worktree.
++    let linked_path = Path::new("/worktrees/project/feature-a/project");
+     let server_fs = FakeFs::new(server_cx.executor());
+     server_fs
+         .insert_tree(
+@@ -15759,14 +18010,13 @@ async fn test_remote_archive_thread_with_active_connection(
+     // Open a single remote project with both the main repo and the linked
+     // worktree as visible worktrees. The mock transport doesn't multiplex
+     // multiple `RemoteClient`s over one pooled connection cleanly (each
+-    // client's `start_proxy` clobbers the previous one's server channel),
+-    // so we can't build two separate `Project::remote` instances in this
+-    // test. Folding both worktrees into one project still exercises the
+-    // archive flow's interesting paths: `build_root_plan` classifies the
++    // client's `start_proxy` clobbers the previous one's server channel).
++    // Keeping both worktrees of the host being archived in one project lets
++    // `build_root_plan` classify the
+     // linked worktree correctly, and `find_or_create_repository` finds
+     // the main repo live on that same project — avoiding the temp-project
+     // fallback that would also run into the multiplexing limitation.
+-    let (project, _headless, _opts) = start_remote_project(
++    let (project, _headless, opts) = start_remote_project(
+         &server_fs,
+         Path::new("/project"),
+         &app_state,
+@@ -15788,11 +18038,34 @@ async fn test_remote_archive_thread_with_active_connection(
+     project.update(cx, |p, cx| p.git_scans_complete(cx)).await;
+     cx.run_until_parked();
+ 
++    let other_fs = FakeFs::new(other_server_cx.executor());
++    other_fs
++        .insert_tree(linked_path, serde_json::json!({"keep.txt": "other host"}))
++        .await;
++    let (other_project, _other_headless, other_opts) = start_remote_project(
++        &other_fs,
++        linked_path,
++        &app_state,
++        None,
++        cx,
++        other_server_cx,
++    )
++    .await;
++    assert_ne!(opts.identity(), other_opts.identity());
++
+     cx.update(|cx| <dyn fs::Fs>::set_global(app_state.fs.clone(), cx));
+ 
+     let (multi_workspace, cx) =
+         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+     let sidebar = setup_sidebar(&multi_workspace, cx);
++    let other_workspace = multi_workspace.update_in(cx, |mw, window, cx| {
++        let active_workspace = mw.workspace().clone();
++        mw.retain_active_workspace(cx);
++        let other = mw.test_add_workspace(other_project.clone(), window, cx);
++        mw.retain_active_workspace(cx);
++        mw.activate(active_workspace, None, window, cx);
++        other
++    });
+ 
+     // The worktree thread's (main_worktree_path, folder_path) pair points
+     // the folder at the linked worktree checkout and the main at the
+@@ -15811,6 +18084,54 @@ async fn test_remote_archive_thread_with_active_connection(
+     )
+     .await;
+ 
++    sidebar.read_with(cx, |sidebar, cx| {
++        let workspaces = sidebar.archive_workspaces(cx);
++        assert!(workspaces.contains(&other_workspace));
++        let plan = thread_worktree_archive::build_root_plan(
++            linked_path,
++            remote_connection.as_ref(),
++            &workspaces,
++            cx,
++        )
++        .expect("the approved linked root must have an archive plan");
++        assert_eq!(plan.affected_projects.len(), 1);
++        assert_eq!(plan.affected_projects[0].project, project);
++        let mut removed = Vec::new();
++        sidebar.plan_archived_worktree_cleanup(&[plan], &mut removed, cx);
++        assert!(
++            !removed.contains(&other_workspace),
++            "a same-path workspace on another host must not be detached"
++        );
++    });
++
++    let other_worktree_id = other_project.read_with(cx, |project, cx| {
++        project.visible_worktrees(cx).next().unwrap().read(cx).id()
++    });
++    other_fs
++        .insert_tree("/other-root", serde_json::json!({}))
++        .await;
++    other_project
++        .update(cx, |project, cx| {
++            project.find_or_create_worktree(Path::new("/other-root"), true, cx)
++        })
++        .await
++        .expect("should make the other remote workspace mixed");
++    let item = other_workspace
++        .update_in(cx, |workspace, window, cx| {
++            workspace.open_path(
++                project::ProjectPath {
++                    worktree_id: other_worktree_id,
++                    path: Arc::from(rel_path("keep.txt")),
++                },
++                None,
++                true,
++                window,
++                cx,
++            )
++        })
++        .await
++        .expect("should open the same-path item on the other remote");
++
+     let wt_thread_id = acp::SessionId::new(Arc::from("worktree-thread"));
+     cx.update(|_window, cx| {
+         let metadata = ThreadMetadata {
+@@ -15856,6 +18177,21 @@ async fn test_remote_archive_thread_with_active_connection(
+             .unwrap_or(false)
+     });
+     assert!(is_archived, "worktree thread should be archived");
++    assert!(
++        multi_workspace.read_with(cx, |mw, _| {
++            mw.workspaces()
++                .any(|workspace| workspace == &other_workspace)
++        }),
++        "archiving a remote worktree must retain another host's workspace"
++    );
++    assert!(
++        other_workspace.read_with(cx, |workspace, cx| {
++            workspace
++                .items(cx)
++                .any(|open| open.item_id() == item.item_id())
++        }),
++        "archiving a remote worktree must retain another host's editor at the same path"
++    );
+ 
+     assert!(
+         !server_fs
+@@ -16691,3 +19027,135 @@ fn header_search_offsets(
          fullscreen,
      }
  }
