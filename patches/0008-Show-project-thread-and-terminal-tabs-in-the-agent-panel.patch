@@ -1,4 +1,4 @@
-From f4a622d82dcf45c7e37ef5bda866add6e1e15b5e Mon Sep 17 00:00:00 2001
+From 7b4a29137c14121c66152d5a80890de3d8fd2ed6 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 11:03:26 +0300
 Subject: [PATCH 08/10] Show project, thread and terminal tabs in the agent
@@ -585,7 +585,7 @@ index 6519343b36b794067ac4dd571257977363dae3ae..d66b8bc14ba1895120f26f86a38f65f7
  
  #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 14ddc541f09c817b94ab8aa367bdc5427883f16b..267a9babe1e7ed47895cdffe1cf6b61b1dac88f4 100644
+index 431077301817e38e0e8373c741cf28f92bd55f23..57ad6d6de355cf349596c72a9eaa27b33501a6f6 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -1,4 +1,5 @@
@@ -817,7 +817,7 @@ index 14ddc541f09c817b94ab8aa367bdc5427883f16b..267a9babe1e7ed47895cdffe1cf6b61b
          self.update_entries(cx);
          true
      }
-@@ -7238,7 +7314,6 @@ impl Sidebar {
+@@ -7255,7 +7331,6 @@ impl Sidebar {
                  )
              })
              .on_click({
@@ -825,7 +825,7 @@ index 14ddc541f09c817b94ab8aa367bdc5427883f16b..267a9babe1e7ed47895cdffe1cf6b61b
                  cx.listener(move |this, _, window, cx| {
                      this.selection = None;
                      match &thread_workspace {
-@@ -7261,15 +7336,28 @@ impl Sidebar {
+@@ -7278,15 +7353,28 @@ impl Sidebar {
                  })
              });
  
@@ -860,7 +860,7 @@ index 14ddc541f09c817b94ab8aa367bdc5427883f16b..267a9babe1e7ed47895cdffe1cf6b61b
          let sidebar = cx.weak_entity();
  
          let active_workspace = self.active_workspace(cx);
-@@ -7282,113 +7370,108 @@ impl Sidebar {
+@@ -7299,113 +7387,108 @@ impl Sidebar {
          let can_open_as_markdown = thread.is_live || is_zed_thread;
          let folder_paths = thread.metadata.folder_paths().clone();
  
@@ -1059,7 +1059,7 @@ index 14ddc541f09c817b94ab8aa367bdc5427883f16b..267a9babe1e7ed47895cdffe1cf6b61b
      }
  
      fn render_terminal(
-@@ -7487,33 +7570,41 @@ impl Sidebar {
+@@ -7504,33 +7587,41 @@ impl Sidebar {
                  }
              }));
  
@@ -1122,7 +1122,7 @@ index 14ddc541f09c817b94ab8aa367bdc5427883f16b..267a9babe1e7ed47895cdffe1cf6b61b
      }
  
      fn render_filter_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
-@@ -7528,7 +7619,11 @@ impl Sidebar {
+@@ -7545,7 +7636,11 @@ impl Sidebar {
              .child(self.filter_editor.clone())
      }
  
@@ -1135,7 +1135,7 @@ index 14ddc541f09c817b94ab8aa367bdc5427883f16b..267a9babe1e7ed47895cdffe1cf6b61b
          let multi_workspace = self.multi_workspace.upgrade();
  
          let workspace = multi_workspace
-@@ -7567,11 +7662,18 @@ impl Sidebar {
+@@ -7584,11 +7679,18 @@ impl Sidebar {
                      .selected_style(ButtonStyle::Tinted(TintColor::Accent)),
                  |_window, cx| Tooltip::for_action("Add Project", &OpenRecent::default(), cx),
              )
@@ -1158,7 +1158,7 @@ index 14ddc541f09c817b94ab8aa367bdc5427883f16b..267a9babe1e7ed47895cdffe1cf6b61b
      }
  
      fn new_thread_in_group(
-@@ -7938,6 +8040,25 @@ impl Sidebar {
+@@ -7955,6 +8057,25 @@ impl Sidebar {
          key: &ProjectGroupKey,
          window: &mut Window,
          cx: &mut Context<Self>,
@@ -1184,7 +1184,7 @@ index 14ddc541f09c817b94ab8aa367bdc5427883f16b..267a9babe1e7ed47895cdffe1cf6b61b
      ) {
          let workspace = self
              .multi_workspace
-@@ -7945,12 +8066,20 @@ impl Sidebar {
+@@ -7962,12 +8083,20 @@ impl Sidebar {
              .and_then(|mw| mw.read(cx).last_active_workspace_for_group(key, cx))
              .or_else(|| self.workspace_for_group(key, cx));
          if let Some(workspace) = workspace {
@@ -1208,7 +1208,7 @@ index 14ddc541f09c817b94ab8aa367bdc5427883f16b..267a9babe1e7ed47895cdffe1cf6b61b
          }
          self.selection = None;
          self.active_entry = None;
-@@ -8017,7 +8146,7 @@ impl Sidebar {
+@@ -8034,7 +8163,7 @@ impl Sidebar {
                  multi_workspace.retain_active_workspace(cx);
              });
          } else {
@@ -1217,7 +1217,7 @@ index 14ddc541f09c817b94ab8aa367bdc5427883f16b..267a9babe1e7ed47895cdffe1cf6b61b
          }
      }
  
-@@ -8361,7 +8490,7 @@ impl Sidebar {
+@@ -8378,7 +8507,7 @@ impl Sidebar {
                      })),
              )
              .child(div().flex_1())
@@ -1226,7 +1226,7 @@ index 14ddc541f09c817b94ab8aa367bdc5427883f16b..267a9babe1e7ed47895cdffe1cf6b61b
      }
  
      fn active_workspace(&self, cx: &App) -> Option<Entity<Workspace>> {
-@@ -8595,8 +8724,11 @@ impl Sidebar {
+@@ -8612,8 +8741,11 @@ impl Sidebar {
      fn show_thread_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
          self.view = SidebarView::ThreadList;
          self._subscriptions.clear();
@@ -1240,7 +1240,7 @@ index 14ddc541f09c817b94ab8aa367bdc5427883f16b..267a9babe1e7ed47895cdffe1cf6b61b
          self.serialize(cx);
          cx.notify();
      }
-@@ -8715,6 +8847,45 @@ impl WorkspaceSidebar for Sidebar {
+@@ -8732,6 +8864,45 @@ impl WorkspaceSidebar for Sidebar {
          self.cycle_thread_impl(forward, window, cx);
      }
  
@@ -1287,7 +1287,7 @@ index 14ddc541f09c817b94ab8aa367bdc5427883f16b..267a9babe1e7ed47895cdffe1cf6b61b
          let serialized = SerializedSidebar {
              width: self.width_set_by_user.then(|| f32::from(self.width)),
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index d768009e132db505f9303f9155da8eebc7c8b02f..7687b686408315cbdd8a37816a9a7a72dbf08c23 100644
+index c7a6e2d2460c47c203f9fb292cb119f94423dd5d..021572604ccc3aef7b1652301a766e227fc5d989 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
 @@ -1185,6 +1185,31 @@ async fn test_restored_width_preserves_legacy_resizes(cx: &mut TestAppContext) {
@@ -1322,7 +1322,7 @@ index d768009e132db505f9303f9155da8eebc7c8b02f..7687b686408315cbdd8a37816a9a7a72
  #[gpui::test]
  async fn test_configured_width_is_clamped_into_range(cx: &mut TestAppContext) {
      let project = init_test_project("/my-project", cx).await;
-@@ -19028,6 +19053,123 @@ fn header_search_offsets(
+@@ -19164,6 +19189,123 @@ fn header_search_offsets(
      }
  }
  
@@ -1446,7 +1446,7 @@ index d768009e132db505f9303f9155da8eebc7c8b02f..7687b686408315cbdd8a37816a9a7a72
  #[gpui::test]
  async fn test_rootless_remote_history_is_visible_without_open_project(cx: &mut TestAppContext) {
      init_test(cx);
-@@ -19061,6 +19203,290 @@ async fn test_rootless_remote_history_is_visible_without_open_project(cx: &mut T
+@@ -19197,6 +19339,290 @@ async fn test_rootless_remote_history_is_visible_without_open_project(cx: &mut T
      });
  }
  
@@ -1737,7 +1737,7 @@ index d768009e132db505f9303f9155da8eebc7c8b02f..7687b686408315cbdd8a37816a9a7a72
  #[test]
  fn test_terminal_remote_connection_match_distinguishes_ssh_arguments() {
      use remote::SshConnectionOptions;
-@@ -19094,6 +19520,75 @@ fn test_terminal_remote_connection_match_distinguishes_ssh_arguments() {
+@@ -19230,6 +19656,75 @@ fn test_terminal_remote_connection_match_distinguishes_ssh_arguments() {
  }
  
  
@@ -1813,7 +1813,7 @@ index d768009e132db505f9303f9155da8eebc7c8b02f..7687b686408315cbdd8a37816a9a7a72
  #[gpui::test]
  async fn test_sidebar_close_waits_for_pending_terminal_startup(cx: &mut TestAppContext) {
      let project = init_test_project_with_agent_panel("/project", cx).await;
-@@ -19159,3 +19654,251 @@ fn test_restored_ssh_group_rehydrates_execution_options_before_terminal_matching
+@@ -19295,3 +19790,254 @@ fn test_restored_ssh_group_rehydrates_execution_options_before_terminal_matching
          assert!(same_terminal_remote_connection(Some(&hydrated), Some(&metadata)));
      });
  }
@@ -1977,6 +1977,18 @@ index d768009e132db505f9303f9155da8eebc7c8b02f..7687b686408315cbdd8a37816a9a7a72
 +        dock.resize_panel_sizes(Some(px(330.)), None, window, cx);
 +    });
 +    cx.run_until_parked();
++    let tab_row_ys = |cx: &mut VisualTestContext| {
++        (0..8)
++            .map(|ix| {
++                let kind = if ix < 6 { "thread" } else { "terminal" };
++                debug_bounds(cx, format!("TAB-{kind}-tab-{ix}"))
++                    .unwrap()
++                    .origin
++                    .y
++            })
++            .collect::<Vec<_>>()
++    };
++    let wide_row_ys = tab_row_ys(cx);
 +    let active_terminal =
 +        |cx: &mut VisualTestContext| cx.debug_bounds("TAB-terminal-tab-7").unwrap();
 +    let wide_tab = active_terminal(cx);
@@ -2002,23 +2014,14 @@ index d768009e132db505f9303f9155da8eebc7c8b02f..7687b686408315cbdd8a37816a9a7a72
 +    // Both widths fit the same number of tabs on the earlier rows, so the active index
 +    // and the last row's start stay the same even though that row is now narrower.
 +    dock.update_in(cx, |dock, window, cx| {
-+        dock.resize_panel_sizes(Some(px(300.)), None, window, cx);
++        dock.resize_panel_sizes(Some(px(315.)), None, window, cx);
 +    });
 +    cx.run_until_parked();
 +    let resized_last_terminal = active_terminal(cx);
-+    assert_eq!(resized_last_terminal.origin.y, row3_y);
-+    for (ix, bounds) in thread_tab_bounds.iter().take(6).enumerate() {
-+        assert_eq!(
-+            debug_bounds(cx, format!("TAB-thread-tab-{ix}"))
-+                .unwrap()
-+                .origin
-+                .y,
-+            bounds.origin.y,
-+        );
-+    }
++    assert_eq!(tab_row_ys(cx), wide_row_ys);
 +    assert!(
 +        resized_last_terminal.left() >= row2_first_x - px(1.)
-+            && resized_last_terminal.right() <= row2_first_x + px(302.),
++            && resized_last_terminal.right() <= row2_first_x + px(317.),
 +        "the active terminal tab must be revealed after a width-only resize: {resized_last_terminal:?}"
 +    );
 +
@@ -3073,7 +3076,7 @@ index 77991edef183c7321d8594ac9eac01c8274f81a2..377a8d1c766c8bb9d906719d46dd0b7d
              let has_top_spacer = top_spacer.is_some();
              let create_resize_handle = || {
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 073ba2c1477f492ba7c31fbe06bb18fad6a6bcc5..0e97fe709388499668a697005be5dd0704385016 100644
+index c370953ee02cfb8b97d7c7c3a8052e58ca6615b5..08da897da9d0421faef9d8a55b16d824006ce5eb 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -158,6 +158,29 @@ pub trait Sidebar: Focusable + Render + EventEmitter<SidebarEvent> + Sized {
@@ -3268,7 +3271,7 @@ index 073ba2c1477f492ba7c31fbe06bb18fad6a6bcc5..0e97fe709388499668a697005be5dd07
              let sidebar_focus_handle = self.sidebar.as_ref().map(|s| s.focus_handle(cx));
              workspace.update(cx, |workspace, _| {
                  workspace.set_sidebar_focus_handle(sidebar_focus_handle);
-@@ -2239,7 +2330,10 @@ impl Render for MultiWorkspace {
+@@ -2268,7 +2359,10 @@ impl Render for MultiWorkspace {
          let sidebar_side = self.sidebar_side(cx);
          let sidebar_on_right = sidebar_side == SidebarSide::Right;
  

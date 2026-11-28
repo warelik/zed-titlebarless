@@ -1,4 +1,4 @@
-From 991e8b66efcf296cba901472dd435cc97e434ec5 Mon Sep 17 00:00:00 2001
+From b15633e3f04b8ac9484bb7f0de622e1f7f41511f Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Thu, 15 Oct 2026 00:00:00 +0000
 Subject: [PATCH 05/10] Preserve workspace groups and close consent
@@ -144,7 +144,7 @@ index 846c01288c1ef3bba57c1e450795ad312151703a..c809944a98198322ed90a38ec9bab23d
      fn item_focus_handle(&self, cx: &App) -> FocusHandle;
      fn subscribe_to_item_events(
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 01d8e217f006479765b75b4732aa7232df04b1c3..073ba2c1477f492ba7c31fbe06bb18fad6a6bcc5 100644
+index 01d8e217f006479765b75b4732aa7232df04b1c3..c370953ee02cfb8b97d7c7c3a8052e58ca6615b5 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -1,5 +1,6 @@
@@ -439,7 +439,29 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..073ba2c1477f492ba7c31fbe06bb18fa
      ) -> Task<Result<bool>> {
          let workspaces: Vec<_> = workspaces.into_iter().collect();
  
-@@ -1817,9 +1904,8 @@ impl MultiWorkspace {
+@@ -1814,12 +1901,30 @@ impl MultiWorkspace {
+             return Task::ready(Ok(false));
+         }
+ 
++        let visible_worktrees = |project: &Entity<Project>, cx: &App| {
++            project
++                .read(cx)
++                .visible_worktrees(cx)
++                .map(|worktree| {
++                    let worktree = worktree.read(cx);
++                    (worktree.id(), worktree.abs_path())
++                })
++                .collect::<collections::HashSet<_>>()
++        };
++        let projects = workspaces
++            .iter()
++            .map(|workspace| {
++                let project = workspace.read(cx).project().clone();
++                let worktrees = visible_worktrees(&project, cx);
++                (workspace.clone(), project, worktrees)
++            })
++            .collect::<Vec<_>>();
++
          let original_active = self.workspace().clone();
          let group_key = original_active.read(cx).project_group_key(cx);
  
@@ -451,7 +473,7 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..073ba2c1477f492ba7c31fbe06bb18fa
          let group_index = self
              .project_groups
              .iter()
-@@ -1837,12 +1923,42 @@ impl MultiWorkspace {
+@@ -1837,12 +1942,42 @@ impl MultiWorkspace {
          });
  
          cx.spawn_in(window, async move |this, cx| {
@@ -497,7 +519,7 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..073ba2c1477f492ba7c31fbe06bb18fa
                      })?
                      .await?;
  
-@@ -1851,21 +1967,44 @@ impl MultiWorkspace {
+@@ -1851,21 +1986,54 @@ impl MultiWorkspace {
                  }
              }
  
@@ -507,8 +529,14 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..073ba2c1477f492ba7c31fbe06bb18fa
 +                return Ok(false);
 +            }
 +
-+            let workspaces_unchanged: Rc<dyn Fn(&App) -> bool> =
-+                Rc::new(move |cx| !guard.changed(cx) && item_membership_matches(cx));
++            let workspaces_unchanged: Rc<dyn Fn(&App) -> bool> = Rc::new(move |cx| {
++                !guard.changed(cx)
++                    && item_membership_matches(cx)
++                    && projects.iter().all(|(workspace, project, worktrees)| {
++                        workspace.read(cx).project() == project
++                            && visible_worktrees(project, cx) == *worktrees
++                    })
++            });
 +            if !before_remove(cx, workspaces_unchanged.clone()).await? {
 +                return Ok(false);
 +            }
@@ -517,7 +545,11 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..073ba2c1477f492ba7c31fbe06bb18fa
              // the replacement from the rows that actually remain.
 -            let (removed_any, reopen_key) = this.update_in(cx, |this, window, cx| {
 +            let (removed_any, reopen_key, snapshots) = this.update_in(cx, |this, window, cx| {
-+                if !workspaces_unchanged(cx) {
++                if !workspaces_unchanged(cx)
++                    || workspaces
++                        .iter()
++                        .any(|workspace| this.held_index(workspace).is_none())
++                {
 +                    return (false, None, Vec::new());
 +                }
                  let mut removed_any = false;
@@ -547,7 +579,7 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..073ba2c1477f492ba7c31fbe06bb18fa
                      cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
                  }
  
-@@ -1874,7 +2013,14 @@ impl MultiWorkspace {
+@@ -1874,7 +2042,14 @@ impl MultiWorkspace {
                          continue;
                      }
                      if this.held_index(workspace).is_some() {
@@ -563,7 +595,7 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..073ba2c1477f492ba7c31fbe06bb18fa
                          removed_any = true;
                      }
                  }
-@@ -1923,8 +2069,15 @@ impl MultiWorkspace {
+@@ -1923,8 +2098,15 @@ impl MultiWorkspace {
                              cx.new(|cx| Workspace::new(None, project, app_state, window, cx))
                          });
  
@@ -581,7 +613,7 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..073ba2c1477f492ba7c31fbe06bb18fa
                      removed_any = true;
                  } else if *this.workspace() != original_active
                      && !workspaces.contains(&original_active)
-@@ -1939,9 +2092,10 @@ impl MultiWorkspace {
+@@ -1939,9 +2121,10 @@ impl MultiWorkspace {
                      cx.notify();
                  }
  

@@ -1,4 +1,4 @@
-From 73070e2690ec0321f08a6c95fba9c5108b08e54a Mon Sep 17 00:00:00 2001
+From ba41a9b446d4968981e16dae35de5c5edf6cb135 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 11:03:26 +0300
 Subject: [PATCH 07/10] Manage terminal restoration and closing in the agent
@@ -5218,7 +5218,7 @@ index 6d4b5b8e320ca2c55f1ff27ef90879c89df1049a..bfc663120e4ea6145729adaa96452051
 +terminal_view.workspace = true
  workspace = { workspace = true, features = ["test-support"] }
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..14ddc541f09c817b94ab8aa367bdc5427883f16b 100644
+index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..431077301817e38e0e8373c741cf28f92bd55f23 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -6,7 +6,8 @@ use agent::{ThreadStore, ZED_AGENT_ID};
@@ -5793,7 +5793,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..14ddc541f09c817b94ab8aa367bdc542
          let active_workspace = multi_workspace.read(cx).workspace().clone();
          let modal_workspace = active_workspace.clone();
  
-@@ -5082,7 +5209,325 @@ impl Sidebar {
+@@ -5082,11 +5209,325 @@ impl Sidebar {
              return;
          }
  
@@ -6107,19 +6107,22 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..14ddc541f09c817b94ab8aa367bdc542
 +        cx: &mut Context<Self>,
 +    ) {
          let terminal_id = metadata.terminal_id;
+-        let is_active = self
+-            .active_entry
 +        let terminal_panel = match workspace {
 +            ThreadEntryWorkspace::Open(workspace) => workspace.read(cx).panel::<AgentPanel>(cx),
 +            ThreadEntryWorkspace::Closed { .. } => None,
 +        };
 +        let should_kill_persistent_session = terminal_panel
-+            .as_ref()
+             .as_ref()
+-            .is_some_and(|entry| entry.is_active_terminal(terminal_id));
 +            .and_then(|panel| panel.read(cx).terminal_session_may_exist(terminal_id, cx))
 +            .unwrap_or(true);
 +        let close_window_id = window.window_handle().window_id();
-         let is_active = self
-             .active_entry
-             .as_ref()
-@@ -5100,6 +5545,7 @@ impl Sidebar {
+         let neighbor = self
+             .contents
+             .entries
+@@ -5100,6 +5541,7 @@ impl Sidebar {
              })
              .and_then(|position| self.neighboring_activatable_entry(position));
  
@@ -6127,7 +6130,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..14ddc541f09c817b94ab8aa367bdc542
          let terminal_folder_paths = metadata.folder_paths().clone();
          let roots_to_archive = self.roots_to_archive_for_paths(
              metadata.folder_paths(),
-@@ -5108,7 +5554,6 @@ impl Sidebar {
+@@ -5108,7 +5550,6 @@ impl Sidebar {
              Some(terminal_id),
              cx,
          );
@@ -6135,7 +6138,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..14ddc541f09c817b94ab8aa367bdc542
          let workspace_to_remove = self.linked_worktree_workspace_to_remove(
              &terminal_folder_paths,
              metadata.remote_connection.as_ref(),
-@@ -5117,52 +5562,275 @@ impl Sidebar {
+@@ -5117,57 +5558,276 @@ impl Sidebar {
              &roots_to_archive,
              cx,
          );
@@ -6249,7 +6252,6 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..14ddc541f09c817b94ab8aa367bdc542
 +            this.complete_terminal_close(
 +                &metadata,
 +                &workspace,
-+                is_active,
 +                neighbor.as_ref(),
 +                removal_succeeded && terminal_workspace_removed,
 +                if cleanup_is_safe {
@@ -6320,7 +6322,6 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..14ddc541f09c817b94ab8aa367bdc542
 +        &mut self,
 +        metadata: &TerminalThreadMetadata,
 +        workspace: &ThreadEntryWorkspace,
-+        is_active: bool,
 +        neighbor: Option<&ActivatableEntry>,
 +        terminal_workspace_removed: bool,
 +        roots_to_archive: Vec<thread_worktree_archive::RootPlan>,
@@ -6339,7 +6340,6 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..14ddc541f09c817b94ab8aa367bdc542
 +        self.close_terminal_entry(
 +            metadata,
 +            workspace,
-+            is_active,
 +            neighbor,
 +            !terminal_workspace_removed,
 +            roots_to_archive,
@@ -6443,8 +6443,40 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..14ddc541f09c817b94ab8aa367bdc542
      fn close_terminal_entry(
          &mut self,
          metadata: &TerminalThreadMetadata,
-@@ -5177,24 +5845,16 @@ impl Sidebar {
+         workspace: &ThreadEntryWorkspace,
+-        is_active: bool,
+         neighbor: Option<&ActivatableEntry>,
+         activate_panel_draft: bool,
+         roots_to_archive: Vec<thread_worktree_archive::RootPlan>,
+@@ -5175,26 +5835,43 @@ impl Sidebar {
+         cx: &mut Context<Self>,
+     ) {
          let terminal_id = metadata.terminal_id;
++        let is_active = self.active_entry.as_ref().is_some_and(|entry| {
++            entry.is_active_terminal(terminal_id)
++                && matches!(
++                    workspace,
++                    ThreadEntryWorkspace::Open(workspace)
++                        if workspace == entry.workspace()
++                            && workspace
++                                .read(cx)
++                                .panel::<AgentPanel>(cx)
++                                .is_some_and(|panel| {
++                                    panel.read(cx).active_terminal_id() == Some(terminal_id)
++                                })
++                )
++        });
++        let neighbor = neighbor.filter(|entry| match entry {
++            ActivatableEntry::Thread { metadata } => ThreadMetadataStore::global(cx)
++                .read(cx)
++                .entry(metadata.thread_id)
++                .is_some_and(|thread| !thread.archived),
++            ActivatableEntry::Terminal { metadata, .. } => {
++                let store = TerminalThreadMetadataStore::global(cx).read(cx);
++                store.entry(metadata.terminal_id).is_some()
++                    && !store.is_restore_blocked(metadata.terminal_id)
++            }
++        });
          let defer_draft_activation = activate_panel_draft && is_active && neighbor.is_some();
  
 -        // Closing from the sidebar must not steal focus, since the row's
@@ -6478,7 +6510,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..14ddc541f09c817b94ab8aa367bdc542
              });
          }
  
-@@ -5264,22 +5924,16 @@ impl Sidebar {
+@@ -5264,22 +5941,16 @@ impl Sidebar {
          .detach_and_log_err(cx);
      }
  
@@ -6504,7 +6536,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..14ddc541f09c817b94ab8aa367bdc542
          let mut mixed_workspaces: Vec<(Entity<Workspace>, Vec<WorktreeId>)> = Vec::new();
  
          if let Some(multi_workspace) = self.multi_workspace.upgrade() {
-@@ -5290,16 +5944,22 @@ impl Sidebar {
+@@ -5290,16 +5961,22 @@ impl Sidebar {
                      continue;
                  }
  
@@ -6531,7 +6563,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..14ddc541f09c817b94ab8aa367bdc542
                      .collect();
  
                  if archived_worktree_ids.is_empty() {
-@@ -5314,6 +5974,128 @@ impl Sidebar {
+@@ -5314,6 +5991,128 @@ impl Sidebar {
              }
          }
  
@@ -6660,7 +6692,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..14ddc541f09c817b94ab8aa367bdc542
          let mut close_item_tasks = Vec::new();
          for (workspace, archived_worktree_ids) in &mixed_workspaces {
              let panes: Vec<_> = workspace.read(cx).panes().to_vec();
-@@ -5502,12 +6284,10 @@ impl Sidebar {
+@@ -5502,12 +6301,10 @@ impl Sidebar {
          // dropped without destroying the user's workspace layout.
          let mut workspaces_to_remove: Vec<Entity<Workspace>> =
              workspace_to_remove.into_iter().collect();
@@ -6677,7 +6709,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..14ddc541f09c817b94ab8aa367bdc542
  
          let removed_workspace = !workspaces_to_remove.is_empty();
          let session_id = session_id.clone();
-@@ -6931,12 +7711,10 @@ impl Sidebar {
+@@ -6931,12 +7728,10 @@ impl Sidebar {
          });
          let mut workspaces_to_remove: Vec<Entity<Workspace>> =
              workspace_to_remove.into_iter().collect();
@@ -6694,7 +6726,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..14ddc541f09c817b94ab8aa367bdc542
  
          let draft_workspace_removed = matches!(
              workspace,
-@@ -7993,6 +8771,8 @@ impl Render for Sidebar {
+@@ -7993,6 +8788,8 @@ impl Render for Sidebar {
  
          let no_open_projects = !self.contents.has_open_projects;
          let no_search_results = self.contents.entries.is_empty();
@@ -6703,7 +6735,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..14ddc541f09c817b94ab8aa367bdc542
  
          v_flex()
              .id("workspace-sidebar")
-@@ -8075,6 +8855,15 @@ impl Render for Sidebar {
+@@ -8075,6 +8872,15 @@ impl Render for Sidebar {
              .map(|this| match &self.view {
                  SidebarView::ThreadList => this
                      .child(self.render_sidebar_header(no_open_projects, window, cx))
@@ -6720,7 +6752,7 @@ index a8758df6cbfe7a1e02a4e675ddbac5e2a4342e20..14ddc541f09c817b94ab8aa367bdc542
                          if no_open_projects {
                              this.child(self.render_empty_state(cx))
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eebc7c8b02f 100644
+index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..c7a6e2d2460c47c203f9fb292cb119f94423dd5d 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
 @@ -27,15 +27,62 @@ use settings::{
@@ -7129,7 +7161,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
  
      assert_eq!(
          multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace
-@@ -3008,9 +3357,77 @@ async fn test_terminal_close_event_on_archived_linked_worktree_removes_workspace
+@@ -3008,9 +3357,146 @@ async fn test_terminal_close_event_on_archived_linked_worktree_removes_workspace
          "expected linked worktree terminal before closing, got: {entries_before:?}"
      );
  
@@ -7205,11 +7237,80 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
 +    );
 +
 +    fake.state.lock().kill_error = None;
++    fake.state.lock().kill_delay = Some(Duration::from_secs(1));
++    source.close(&sidebar, &worktree_panel, terminal_id, cx);
++    cx.run_until_parked();
++    assert_eq!(fake.kill_history().len(), 2);
++    assert!(fake.has_session(&session_name));
++
++    let added_folder = Path::new("/another-folder");
++    fs.insert_tree(added_folder, serde_json::json!({})).await;
++    let opened = worktree_workspace.update_in(cx, |workspace, window, cx| {
++        workspace.open_paths(
++            vec![added_folder.to_path_buf()],
++            workspace::OpenOptions {
++                visible: Some(workspace::OpenVisible::All),
++                ..Default::default()
++            },
++            None,
++            window,
++            cx,
++        )
++    });
++    assert!(opened.await.into_iter().all(|item| item.is_none()));
++    let added_worktree_id = worktree_project.read_with(cx, |project, cx| {
++        let added = project
++            .visible_worktrees(cx)
++            .find(|worktree| worktree.read(cx).abs_path().as_ref() == added_folder)
++            .expect("opening a folder must add a visible worktree");
++        added.read(cx).id()
++    });
++
++    cx.executor().advance_clock(Duration::from_secs(1));
++    cx.run_until_parked();
++    assert!(!fake.has_session(&session_name));
++    assert!(!worktree_panel.read_with(cx, |panel, _| panel.has_terminal(terminal_id)));
++    assert!(multi_workspace.read_with(cx, |multi_workspace, _| {
++        multi_workspace
++            .workspaces()
++            .any(|workspace| workspace == &worktree_workspace)
++    }));
++    assert!(worktree_project.read_with(cx, |project, cx| {
++        project
++            .visible_worktrees(cx)
++            .any(|worktree| worktree.read(cx).id() == added_worktree_id)
++    }));
++    assert!(
++        fs.is_dir(Path::new("/worktrees/project/feature-a/project"))
++            .await,
++        "adding a folder during terminal stop must cancel the stale archive plan"
++    );
++    cx.update(|_, cx| {
++        assert!(
++            ThreadMetadataStore::global(cx)
++                .read(cx)
++                .entry(empty_draft_id)
++                .is_some()
++        );
++    });
++
++    worktree_project.update(cx, |project, cx| {
++        project.remove_worktree(added_worktree_id, cx)
++    });
++    cx.run_until_parked();
++    fake.state.lock().kill_delay = None;
++    let terminal_id = worktree_panel
++        .update_in(cx, |panel, window, cx| {
++            panel.insert_test_terminal("Dev Server", true, window, cx)
++        })
++        .unwrap();
++    fake.add_session(terminal_id.session_name());
++    cx.run_until_parked();
 +    source.close(&sidebar, &worktree_panel, terminal_id, cx);
      for _ in 0..4 {
          cx.run_until_parked();
      }
-@@ -3064,9 +3481,23 @@ async fn test_terminal_close_event_on_archived_linked_worktree_removes_workspace
+@@ -3064,9 +3550,23 @@ async fn test_terminal_close_event_on_archived_linked_worktree_removes_workspace
      );
  }
  
@@ -7233,7 +7334,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
  ) {
      init_test(cx);
  
-@@ -3108,7 +3539,7 @@ async fn test_terminal_close_event_deletes_empty_draft_when_linked_worktree_has_
+@@ -3108,7 +3608,7 @@ async fn test_terminal_close_event_deletes_empty_draft_when_linked_worktree_has_
  
      let (multi_workspace, cx) =
          cx.add_window_view(|window, cx| MultiWorkspace::test_new(main_project.clone(), window, cx));
@@ -7242,7 +7343,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
      let worktree_workspace = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
          multi_workspace.test_add_workspace(worktree_project.clone(), window, cx)
      });
-@@ -3140,9 +3571,7 @@ async fn test_terminal_close_event_deletes_empty_draft_when_linked_worktree_has_
+@@ -3140,9 +3640,7 @@ async fn test_terminal_close_event_deletes_empty_draft_when_linked_worktree_has_
          .expect("test terminal should be inserted");
      cx.run_until_parked();
  
@@ -7253,7 +7354,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
      for _ in 0..4 {
          cx.run_until_parked();
      }
-@@ -3171,9 +3600,23 @@ async fn test_terminal_close_event_deletes_empty_draft_when_linked_worktree_has_
+@@ -3171,9 +3669,23 @@ async fn test_terminal_close_event_deletes_empty_draft_when_linked_worktree_has_
      );
  }
  
@@ -7277,7 +7378,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
  ) {
      init_test(cx);
  
-@@ -3232,7 +3675,7 @@ async fn test_terminal_close_event_keeps_linked_worktree_workspace_with_live_edi
+@@ -3232,7 +3744,7 @@ async fn test_terminal_close_event_keeps_linked_worktree_workspace_with_live_edi
  
      let (multi_workspace, cx) =
          cx.add_window_view(|window, cx| MultiWorkspace::test_new(main_project.clone(), window, cx));
@@ -7286,7 +7387,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
      let worktree_workspace = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
          multi_workspace.test_add_workspace(worktree_project.clone(), window, cx)
      });
-@@ -3316,9 +3759,7 @@ async fn test_terminal_close_event_keeps_linked_worktree_workspace_with_live_edi
+@@ -3316,9 +3828,7 @@ async fn test_terminal_close_event_keeps_linked_worktree_workspace_with_live_edi
          "should start with main and linked worktree workspaces"
      );
  
@@ -7297,7 +7398,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
      for _ in 0..4 {
          cx.run_until_parked();
      }
-@@ -3763,9 +4204,7 @@ async fn test_terminal_close_event_closes_sidebar_terminal(cx: &mut TestAppConte
+@@ -3763,9 +4273,7 @@ async fn test_terminal_close_event_closes_sidebar_terminal(cx: &mut TestAppConte
          vec!["v [my-project]", "  Dev Server"]
      );
  
@@ -7308,7 +7409,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
      cx.run_until_parked();
  
      panel.read_with(cx, |panel, _cx| {
-@@ -3805,9 +4244,7 @@ async fn test_terminal_close_event_activates_neighbor(cx: &mut TestAppContext) {
+@@ -3805,9 +4313,7 @@ async fn test_terminal_close_event_activates_neighbor(cx: &mut TestAppContext) {
          .expect("server test terminal should be inserted");
      cx.run_until_parked();
  
@@ -7319,10 +7420,79 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
      cx.run_until_parked();
  
      panel.read_with(cx, |panel, _cx| {
-@@ -3827,6 +4264,44 @@ async fn test_terminal_close_event_activates_neighbor(cx: &mut TestAppContext) {
+@@ -3825,6 +4331,111 @@ async fn test_terminal_close_event_activates_neighbor(cx: &mut TestAppContext) {
+         visible_entries_as_strings(&sidebar, cx),
+         vec!["v [my-project]", "  Build"]
      );
- }
- 
++
++    let fake = project.update(cx, |project, _| project.enable_fake_shpool(&[]));
++    let (alternate_id, closing_id) = panel.update_in(cx, |panel, window, cx| {
++        (
++            panel
++                .insert_test_terminal("Alternate", true, window, cx)
++                .unwrap(),
++            panel
++                .insert_test_terminal("Closing", true, window, cx)
++                .unwrap(),
++        )
++    });
++    let session_name = closing_id.session_name();
++    fake.add_session(&session_name);
++    fake.state.lock().kill_delay = Some(Duration::from_secs(1));
++    cx.run_until_parked();
++    let selected_id = sidebar.read_with(cx, |sidebar, _| {
++        assert!(
++            sidebar
++                .active_entry
++                .as_ref()
++                .is_some_and(|entry| entry.is_active_terminal(closing_id))
++        );
++        let position = sidebar
++            .contents
++            .entries
++            .iter()
++            .position(|entry| {
++                matches!(entry, ListEntry::Terminal(terminal) if terminal.metadata.terminal_id == closing_id)
++            })
++            .unwrap();
++        let Some(ActivatableEntry::Terminal { metadata, .. }) =
++            sidebar.neighboring_activatable_entry(position)
++        else {
++            panic!("the closing terminal must have a fallback terminal");
++        };
++        if metadata.terminal_id == build_terminal_id {
++            alternate_id
++        } else {
++            build_terminal_id
++        }
++    });
++
++    TerminalCloseSource::AgentPanel.close(&sidebar, &panel, closing_id, cx);
++    cx.run_until_parked();
++    assert_eq!(fake.kill_history(), vec![session_name.clone()]);
++    panel.update_in(cx, |panel, window, cx| {
++        panel.activate_terminal(selected_id, true, window, cx);
++    });
++    cx.run_until_parked();
++
++    cx.executor().advance_clock(Duration::from_secs(1));
++    cx.run_until_parked();
++    assert!(!fake.has_session(&session_name));
++    panel.read_with(cx, |panel, _| {
++        assert!(!panel.has_terminal(closing_id));
++        assert_eq!(panel.active_terminal_id(), Some(selected_id));
++    });
++    sidebar.read_with(cx, |sidebar, _| {
++        assert!(
++            sidebar
++                .active_entry
++                .as_ref()
++                .is_some_and(|entry| entry.is_active_terminal(selected_id)),
++            "stop completion must preserve the terminal selected while waiting"
++        );
++    });
++}
++
 +#[gpui::test]
 +async fn test_terminal_process_exit_keeps_terminal_thread(cx: &mut TestAppContext) {
 +    let project = init_test_project_with_agent_panel("/my-project", cx).await;
@@ -7359,12 +7529,10 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
 +            "terminal metadata should survive its process exiting"
 +        );
 +    });
-+}
-+
+ }
+ 
  #[gpui::test]
- async fn test_agent_panel_terminal_notifications_update_sidebar(cx: &mut TestAppContext) {
-     let project = init_test_project_with_agent_panel("/my-project", cx).await;
-@@ -3991,6 +4466,7 @@ async fn test_thread_switcher_includes_terminal_metadata_for_open_project_group(
+@@ -3991,6 +4602,7 @@ async fn test_thread_switcher_includes_terminal_metadata_for_open_project_group(
  
      let created_at = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap();
      let metadata = TerminalThreadMetadata {
@@ -7372,7 +7540,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
          terminal_id,
          title: "Feature Terminal".into(),
          custom_title: None,
-@@ -4002,7 +4478,6 @@ async fn test_thread_switcher_includes_terminal_metadata_for_open_project_group(
+@@ -4002,7 +4614,6 @@ async fn test_thread_switcher_includes_terminal_metadata_for_open_project_group(
          .unwrap(),
          remote_connection: None,
          working_directory: None,
@@ -7380,7 +7548,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
      };
      cx.update(|_, cx| {
          TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
-@@ -4099,6 +4574,7 @@ async fn test_thread_switcher_preserves_closed_terminal_linked_worktree_workspac
+@@ -4099,6 +4710,7 @@ async fn test_thread_switcher_preserves_closed_terminal_linked_worktree_workspac
      let worktree_folder_paths =
          PathList::new(&[PathBuf::from("/worktrees/project/feature-a/project")]);
      let metadata = TerminalThreadMetadata {
@@ -7388,7 +7556,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
          terminal_id,
          title: "Feature Terminal".into(),
          custom_title: None,
-@@ -4110,7 +4586,6 @@ async fn test_thread_switcher_preserves_closed_terminal_linked_worktree_workspac
+@@ -4110,7 +4722,6 @@ async fn test_thread_switcher_preserves_closed_terminal_linked_worktree_workspac
          .unwrap(),
          remote_connection: None,
          working_directory: None,
@@ -7396,7 +7564,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
      };
      cx.update(|_, cx| {
          TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
-@@ -4248,6 +4723,7 @@ async fn test_archive_selected_terminal_archives_closed_linked_worktree(cx: &mut
+@@ -4248,6 +4859,7 @@ async fn test_archive_selected_terminal_archives_closed_linked_worktree(cx: &mut
      let worktree_folder_paths =
          PathList::new(&[PathBuf::from("/worktrees/project/feature-a/project")]);
      let metadata = TerminalThreadMetadata {
@@ -7404,7 +7572,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
          terminal_id,
          title: "Feature Terminal".into(),
          custom_title: None,
-@@ -4259,7 +4735,6 @@ async fn test_archive_selected_terminal_archives_closed_linked_worktree(cx: &mut
+@@ -4259,7 +4871,6 @@ async fn test_archive_selected_terminal_archives_closed_linked_worktree(cx: &mut
          .unwrap(),
          remote_connection: None,
          working_directory: None,
@@ -7412,7 +7580,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
      };
      cx.update(|_, cx| {
          TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
-@@ -4848,6 +5323,1233 @@ async fn test_closing_active_agent_panel_terminal_activates_neighbor(cx: &mut Te
+@@ -4848,6 +5459,1233 @@ async fn test_closing_active_agent_panel_terminal_activates_neighbor(cx: &mut Te
      );
  }
  
@@ -8646,7 +8814,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
  #[gpui::test]
  async fn test_parallel_threads_shown_with_live_status(cx: &mut TestAppContext) {
      let project = init_test_project_with_agent_panel("/my-project", cx).await;
-@@ -9105,14 +10807,26 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window(cx: &m
+@@ -9105,14 +10943,26 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window(cx: &m
      cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
  
      let project_a = project::Project::test(fs.clone(), ["/project-a".as_ref()], cx).await;
@@ -8677,7 +8845,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
      let multi_workspace_b_entity = multi_workspace_b.root(cx).unwrap();
  
      let cx_b = &mut gpui::VisualTestContext::from_window(multi_workspace_b.into(), cx);
-@@ -9185,14 +10899,26 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window_with_t
+@@ -9185,14 +11035,26 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window_with_t
      cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
  
      let project_a = project::Project::test(fs.clone(), ["/project-a".as_ref()], cx).await;
@@ -8708,7 +8876,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
      let multi_workspace_b_entity = multi_workspace_b.root(cx).unwrap();
  
      let cx_a = &mut gpui::VisualTestContext::from_window(multi_workspace_a.into(), cx);
-@@ -15173,6 +16899,526 @@ async fn test_archive_removes_worktree_even_when_workspace_paths_diverge(cx: &mu
+@@ -15173,6 +17035,526 @@ async fn test_archive_removes_worktree_even_when_workspace_paths_diverge(cx: &mu
      );
  }
  
@@ -9235,7 +9403,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
  #[gpui::test]
  async fn test_archive_mixed_workspace_closes_only_archived_worktree_items(cx: &mut TestAppContext) {
      // When a workspace contains both a worktree being archived and other
-@@ -15677,6 +17923,7 @@ fn test_worktree_info_missing_branch_returns_none() {
+@@ -15677,6 +18059,7 @@ fn test_worktree_info_missing_branch_returns_none() {
  async fn test_remote_archive_thread_with_active_connection(
      cx: &mut TestAppContext,
      server_cx: &mut TestAppContext,
@@ -9243,7 +9411,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
  ) {
      // End-to-end test of archiving a remote thread tied to a linked git
      // worktree. Archival should:
-@@ -15708,8 +17955,12 @@ async fn test_remote_archive_thread_with_active_connection(
+@@ -15708,8 +18091,12 @@ async fn test_remote_archive_thread_with_active_connection(
      server_cx.update(|cx| {
          release_channel::init(semver::Version::new(0, 0, 0), cx);
      });
@@ -9256,7 +9424,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
      let server_fs = FakeFs::new(server_cx.executor());
      server_fs
          .insert_tree(
-@@ -15759,14 +18010,13 @@ async fn test_remote_archive_thread_with_active_connection(
+@@ -15759,14 +18146,13 @@ async fn test_remote_archive_thread_with_active_connection(
      // Open a single remote project with both the main repo and the linked
      // worktree as visible worktrees. The mock transport doesn't multiplex
      // multiple `RemoteClient`s over one pooled connection cleanly (each
@@ -9275,7 +9443,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
          &server_fs,
          Path::new("/project"),
          &app_state,
-@@ -15788,11 +18038,34 @@ async fn test_remote_archive_thread_with_active_connection(
+@@ -15788,11 +18174,34 @@ async fn test_remote_archive_thread_with_active_connection(
      project.update(cx, |p, cx| p.git_scans_complete(cx)).await;
      cx.run_until_parked();
  
@@ -9310,7 +9478,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
  
      // The worktree thread's (main_worktree_path, folder_path) pair points
      // the folder at the linked worktree checkout and the main at the
-@@ -15811,6 +18084,54 @@ async fn test_remote_archive_thread_with_active_connection(
+@@ -15811,6 +18220,54 @@ async fn test_remote_archive_thread_with_active_connection(
      )
      .await;
  
@@ -9365,7 +9533,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
      let wt_thread_id = acp::SessionId::new(Arc::from("worktree-thread"));
      cx.update(|_window, cx| {
          let metadata = ThreadMetadata {
-@@ -15856,6 +18177,21 @@ async fn test_remote_archive_thread_with_active_connection(
+@@ -15856,6 +18313,21 @@ async fn test_remote_archive_thread_with_active_connection(
              .unwrap_or(false)
      });
      assert!(is_archived, "worktree thread should be archived");
@@ -9387,7 +9555,7 @@ index 366da0c44d1d3150cb0b163b84a91fc2471b25dd..d768009e132db505f9303f9155da8eeb
  
      assert!(
          !server_fs
-@@ -16691,3 +19027,135 @@ fn header_search_offsets(
+@@ -16691,3 +19163,135 @@ fn header_search_offsets(
          fullscreen,
      }
  }
