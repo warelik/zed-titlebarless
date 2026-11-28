@@ -1,7 +1,7 @@
-From 3a5326b1f8a8329991e19eb8b8e0688e751946d8 Mon Sep 17 00:00:00 2001
+From 991e8b66efcf296cba901472dd435cc97e434ec5 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Thu, 15 Oct 2026 00:00:00 +0000
-Subject: [PATCH 3/7] Preserve workspace groups and close consent
+Subject: [PATCH 05/10] Preserve workspace groups and close consent
 
 
 diff --git a/crates/project/src/project.rs b/crates/project/src/project.rs
@@ -144,7 +144,7 @@ index 846c01288c1ef3bba57c1e450795ad312151703a..c809944a98198322ed90a38ec9bab23d
      fn item_focus_handle(&self, cx: &App) -> FocusHandle;
      fn subscribe_to_item_events(
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100aeec33840 100644
+index 01d8e217f006479765b75b4732aa7232df04b1c3..073ba2c1477f492ba7c31fbe06bb18fad6a6bcc5 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -1,5 +1,6 @@
@@ -279,23 +279,24 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
 +        // Include the displayed workspace without changing retention before
 +        // consent. A cancelled close must not turn a transient view persistent.
          let active_workspace = self.workspace().clone();
-+        let mut workspaces = self
-+            .workspaces_for_project_group(group_key, cx)
-+            .cloned()
-+            .collect::<Vec<_>>();
-         if active_workspace.read(cx).project_group_key(cx) == *group_key
+-        if active_workspace.read(cx).project_group_key(cx) == *group_key
 -            && !self.is_workspace_retained(&active_workspace)
-+            && !workspaces.contains(&active_workspace)
-         {
+-        {
 -            let index = self.hold(active_workspace, window, cx);
 -            self.pin(index, group_key.clone(), cx);
-+            workspaces.push(active_workspace);
-         }
- 
+-        }
+-
 -        let workspaces = self
--            .workspaces_for_project_group(group_key, cx)
--            .cloned()
--            .collect::<Vec<_>>();
++        let mut workspaces = self
+             .workspaces_for_project_group(group_key, cx)
+             .cloned()
+             .collect::<Vec<_>>();
++        if active_workspace.read(cx).project_group_key(cx) == *group_key
++            && !workspaces.contains(&active_workspace)
++        {
++            workspaces.push(active_workspace);
++        }
++
          if workspaces.is_empty() {
              let previous_group_count = self.project_groups.len();
              self.project_groups.retain(|group| group.key != *group_key);
@@ -450,37 +451,41 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
          let group_index = self
              .project_groups
              .iter()
-@@ -1837,12 +1923,38 @@ impl MultiWorkspace {
+@@ -1837,12 +1923,42 @@ impl MultiWorkspace {
          });
  
          cx.spawn_in(window, async move |this, cx| {
 -            // Consent phase: run the standard close lifecycle for every
 -            // workspace being removed. Prompts only; no state changes.
-+            let (mut guard, item_ids) = cx.update(|window, cx| {
-+                let mut item_ids = Vec::with_capacity(workspaces.len());
-+                let mut items = Vec::new();
-+                for workspace in &workspaces {
-+                    let mut workspace_item_ids = Vec::new();
-+                    for item in workspace.read(cx).items(cx) {
-+                        workspace_item_ids.push(item.item_id());
-+                        items.push(item.boxed_clone());
-+                    }
-+                    item_ids.push(workspace_item_ids);
-+                }
-+                (ItemCloseGuard::new(items, window, cx), item_ids)
-+            })?;
-+            let guarded_workspaces = workspaces.clone();
-+            let item_membership_matches = move |cx: &App| {
-+                guarded_workspaces
++            let membership = |workspace: &Entity<Workspace>, cx: &App| {
++                workspace
++                    .read(cx)
++                    .panes()
 +                    .iter()
-+                    .zip(&item_ids)
-+                    .all(|(workspace, expected)| {
-+                        workspace
-+                            .read(cx)
-+                            .items(cx)
-+                            .map(|item| item.item_id())
-+                            .eq(expected.iter().copied())
++                    .flat_map(|pane| {
++                        let pane_id = pane.entity_id();
++                        pane.read(cx)
++                            .items()
++                            .map(move |item| (pane_id, item.item_id()))
 +                    })
++                    .collect::<collections::HashSet<_>>()
++            };
++            let (mut guard, expected_membership) = cx.update(|window, cx| {
++                let items = workspaces
++                    .iter()
++                    .flat_map(|workspace| workspace.read(cx).items(cx))
++                    .map(|item| item.boxed_clone())
++                    .collect();
++                let expected_membership = workspaces
++                    .iter()
++                    .map(|workspace| (workspace.clone(), membership(workspace, cx)))
++                    .collect::<Vec<_>>();
++                (ItemCloseGuard::new(items, window, cx), expected_membership)
++            })?;
++            let item_membership_matches = move |cx: &App| {
++                expected_membership
++                    .iter()
++                    .all(|(workspace, expected)| membership(workspace, cx) == *expected)
 +            };
 +
 +            // Ask every workspace for consent before changing retention or session bindings.
@@ -492,7 +497,7 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
                      })?
                      .await?;
  
-@@ -1851,21 +1963,44 @@ impl MultiWorkspace {
+@@ -1851,21 +1967,44 @@ impl MultiWorkspace {
                  }
              }
  
@@ -542,7 +547,7 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
                      cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
                  }
  
-@@ -1874,7 +2009,14 @@ impl MultiWorkspace {
+@@ -1874,7 +2013,14 @@ impl MultiWorkspace {
                          continue;
                      }
                      if this.held_index(workspace).is_some() {
@@ -558,7 +563,7 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
                          removed_any = true;
                      }
                  }
-@@ -1923,8 +2065,15 @@ impl MultiWorkspace {
+@@ -1923,8 +2069,15 @@ impl MultiWorkspace {
                              cx.new(|cx| Workspace::new(None, project, app_state, window, cx))
                          });
  
@@ -576,7 +581,7 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
                      removed_any = true;
                  } else if *this.workspace() != original_active
                      && !workspaces.contains(&original_active)
-@@ -1939,9 +2088,10 @@ impl MultiWorkspace {
+@@ -1939,9 +2092,10 @@ impl MultiWorkspace {
                      cx.notify();
                  }
  
@@ -589,10 +594,10 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
                  this.update_in(cx, |this, window, cx| {
                      this.find_or_create_local_workspace(
 diff --git a/crates/workspace/src/multi_workspace_tests.rs b/crates/workspace/src/multi_workspace_tests.rs
-index d60a676228b4739c387644389c053c41996ef7c3..b986b5f52894622f43dd69bbb57e5df8bcf24a78 100644
+index d60a676228b4739c387644389c053c41996ef7c3..33b018bb29ca10b23b071518e5b25b39e67ab367 100644
 --- a/crates/workspace/src/multi_workspace_tests.rs
 +++ b/crates/workspace/src/multi_workspace_tests.rs
-@@ -830,6 +830,134 @@ async fn test_remove_fallback_via_find_or_create_skips_removed_workspaces(cx: &m
+@@ -830,6 +830,155 @@ async fn test_remove_fallback_via_find_or_create_skips_removed_workspaces(cx: &m
      });
  }
  
@@ -693,17 +698,38 @@ index d60a676228b4739c387644389c053c41996ef7c3..b986b5f52894622f43dd69bbb57e5df8
 +    let guard_calls = Rc::new(Cell::new(0));
 +    let weak_multi_workspace = multi_workspace.downgrade();
 +    let guarded_workspace = workspace.clone();
++    let other_item = cx.new(|cx| TestItem::new(cx));
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.add_item_to_active_pane(Box::new(other_item.clone()), None, true, window, cx);
++    });
 +    let remove_task = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
 +        let guard_calls = guard_calls.clone();
 +        multi_workspace.remove_with_pre_remove(
 +            [workspace.clone()],
 +            RemovalIntent::CloseProject,
-+            async move |cx, _workspaces_unchanged| {
++            async move |cx, workspaces_unchanged| {
 +                assert!(weak_multi_workspace.read_with(cx, |multi_workspace, _| {
 +                    multi_workspace
 +                        .workspaces()
 +                        .any(|candidate| candidate == &guarded_workspace)
 +                })?);
++                cx.update(|window, cx| {
++                    let pane = guarded_workspace.read(cx).active_pane().clone();
++                    let before = pane
++                        .read(cx)
++                        .items()
++                        .map(|item| item.item_id())
++                        .collect::<Vec<_>>();
++                    assert_eq!(before.len(), 2);
++                    crate::move_item(&pane, &pane, before[1], 0, false, window, cx);
++                    assert!(
++                        pane.read(cx)
++                            .items()
++                            .map(|item| item.item_id())
++                            .eq(before.into_iter().rev())
++                    );
++                    assert!(workspaces_unchanged(cx), "tab order is not membership");
++                })?;
 +                guard_calls.set(guard_calls.get() + 1);
 +                Ok(true)
 +            },
@@ -727,7 +753,7 @@ index d60a676228b4739c387644389c053c41996ef7c3..b986b5f52894622f43dd69bbb57e5df8
  #[gpui::test]
  async fn test_remove_keeping_the_project_does_not_switch_projects(cx: &mut TestAppContext) {
      init_test(cx);
-@@ -1882,3 +2010,527 @@ async fn test_nearest_retained_workspace_skips_disconnected_workspace(cx: &mut T
+@@ -1882,3 +2031,527 @@ async fn test_nearest_retained_workspace_skips_disconnected_workspace(cx: &mut T
          );
      });
  }

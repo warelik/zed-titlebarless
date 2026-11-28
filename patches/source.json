@@ -481,6 +481,10 @@
     ],
     [
       "auto_update",
+      "test_fork_manual_check_surfaces_in_flight_automatic_error"
+    ],
+    [
+      "auto_update",
       "test_fork_poll_errors_preserve_pending_relaunch_and_manual_error_feedback"
     ],
     [

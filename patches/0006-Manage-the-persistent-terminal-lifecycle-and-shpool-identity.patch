@@ -1,7 +1,7 @@
-From 593b176a634377689aaf8edbdf78ce21f564c1bb Mon Sep 17 00:00:00 2001
+From c3c683931afe51f3b9af031e5a92d7a732af186b Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 13:09:08 +0300
-Subject: [PATCH 4/7] Manage the persistent terminal lifecycle and shpool
+Subject: [PATCH 06/10] Manage the persistent terminal lifecycle and shpool
  identity
 
 
@@ -215,10 +215,10 @@ index 06ba365b6ee65b20fc7704a1075c9a6aa9eafbaa..3171b10fc0f778a4c0130a6adf5dd5f3
 +            return;
 +        }
 +        self.deleted_terminal_ids.remove(&metadata.terminal_id);
-+        self.save_internal(metadata);
-+        cx.notify();
-+    }
-+
+         self.save_internal(metadata);
+         cx.notify();
+     }
+ 
 +    /// A confirmed newly created session must stay recoverable even if its
 +    /// window disappeared or a close is waiting for creation to finish.
 +    pub fn retain_created_session(&mut self, metadata: TerminalThreadMetadata, cx: &mut Context<Self>) {
@@ -227,10 +227,10 @@ index 06ba365b6ee65b20fc7704a1075c9a6aa9eafbaa..3171b10fc0f778a4c0130a6adf5dd5f3
 +            return;
 +        }
 +        self.deleted_terminal_ids.remove(&id);
-         self.save_internal(metadata);
-         cx.notify();
-     }
- 
++        self.save_internal(metadata);
++        cx.notify();
++    }
++
 +    pub fn begin_intentional_close(&mut self, terminal_id: TerminalId) -> bool {
 +        !self.intentionally_closed_terminal_ids.contains(&terminal_id)
 +            && self.closing_terminal_ids.insert(terminal_id)
@@ -2824,16 +2824,14 @@ index c7f59903a4965f88d402be71f710ea2ba5e1f766..9077cf0e17f4c18525dd3099957397f9
                      ))
                  })??
                  .await?;
-@@ -550,13 +1571,113 @@ impl Project {
+@@ -550,6 +1571,106 @@ impl Project {
          TerminalSettings::get(settings_location, cx)
      }
  
--    pub fn exec_in_shell(
 +    /// A captured daemon locator must not be reinterpreted through current
 +    /// project roots, shell settings, PATH, HOME or XDG_RUNTIME_DIR.
 +    fn exec_shpool_context_script(
-         &self,
--        command: String,
++        &self,
 +        script: String,
 +        cx: &mut Context<Self>,
 +    ) -> Task<Result<smol::process::Command>> {
@@ -2864,10 +2862,9 @@ index c7f59903a4965f88d402be71f710ea2ba5e1f766..9077cf0e17f4c18525dd3099957397f9
 +    pub fn exec_script_in_sh(
 +        &self,
 +        script: String,
-         cx: &mut Context<Self>,
-     ) -> Task<Result<smol::process::Command>> {
-         let path = self.first_project_directory(cx);
--        let remote_client = self.remote_client.clone();
++        cx: &mut Context<Self>,
++    ) -> Task<Result<smol::process::Command>> {
++        let path = self.first_project_directory(cx);
 +        self.exec_script_in_sh_at(script, path, cx)
 +    }
 +
@@ -2931,16 +2928,9 @@ index c7f59903a4965f88d402be71f710ea2ba5e1f766..9077cf0e17f4c18525dd3099957397f9
 +        })
 +    }
 +
-+    pub fn exec_in_shell(
-+        &self,
-+        command: String,
-+        cx: &mut Context<Self>,
-+    ) -> Task<Result<smol::process::Command>> {
-+        let path = self.first_project_directory(cx);
-+        let remote_client = self.remote_client.clone();
-         let settings = self.terminal_settings(&path, cx).clone();
-         let shell = remote_client
-             .as_ref()
+     pub fn exec_in_shell(
+         &self,
+         command: String,
 @@ -747,9 +1868,78 @@ fn quote_cmd_command_arg_for_outer_shell(arg: &str, shell_kind: ShellKind) -> Op
  #[cfg(test)]
  mod tests {
@@ -5301,7 +5291,7 @@ index 3b862dbc40600e814622096413981238bc0c5ab0..437010273a067ecf56e22f68c2eebb12
                  Event::SelectionsChanged => {
                      window.invalidate_character_coordinates();
 diff --git a/crates/workspace/src/pane.rs b/crates/workspace/src/pane.rs
-index 1b9adc966ced01eced1cdc905b29836fd704abec..5442e4fd35fbc093ce70aa761f9d7d0d9cd09aa0 100644
+index 78646a7dd28eed8607b737d4203f41b615365017..b9d11ebcb663c980f4941ff009683b1884fd33be 100644
 --- a/crates/workspace/src/pane.rs
 +++ b/crates/workspace/src/pane.rs
 @@ -866,6 +866,10 @@ impl Pane {

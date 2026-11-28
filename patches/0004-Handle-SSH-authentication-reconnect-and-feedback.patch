@@ -1,7 +1,7 @@
-From af202111e7ff0eb4b0aa674079793fdc8f04177d Mon Sep 17 00:00:00 2001
+From 9df3eb90e4068511bdee05d5808884589a50afcd Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 13:09:08 +0300
-Subject: [PATCH 2/7] Handle SSH authentication, reconnect and feedback
+Subject: [PATCH 04/10] Handle SSH authentication, reconnect and feedback
 
 
 diff --git a/crates/askpass/src/askpass.rs b/crates/askpass/src/askpass.rs
@@ -540,7 +540,7 @@ index 14b5684ed38d7f53a8da1f854aa96897292aea39..7755fc476fd9a111a824eba91c49f0c4
                  connection_options,
                  paths,
                  app_state,
-@@ -131,27 +160,64 @@ impl DisconnectedOverlay {
+@@ -131,12 +160,92 @@ impl DisconnectedOverlay {
                  },
                  cx,
              )
@@ -560,11 +560,6 @@ index 14b5684ed38d7f53a8da1f854aa96897292aea39..7755fc476fd9a111a824eba91c49f0c4
          .detach_and_prompt_err("Failed to reconnect", window, cx, |_, _, _| None);
      }
  
--    fn cancel(&mut self, _: &menu::Cancel, _: &mut Window, cx: &mut Context<Self>) {
--        self.finished = true;
--        cx.emit(DismissEvent)
--    }
--}
 +    fn finish_reconnect_attempt(
 +        result: anyhow::Result<WindowHandle<MultiWorkspace>>,
 +        window_handle: WindowHandle<MultiWorkspace>,
@@ -598,43 +593,31 @@ index 14b5684ed38d7f53a8da1f854aa96897292aea39..7755fc476fd9a111a824eba91c49f0c4
 +                    .log_err();
 +            }
 +        }
- 
--impl Render for DisconnectedOverlay {
--    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
--        let can_reconnect = matches!(self.host, Host::RemoteServerProject(..));
++
 +        result?;
 +        Ok(())
 +    }
- 
--        let message = match &self.host {
++
 +    fn message_for_host(host: &Host, cx: &App) -> String {
 +        match host {
-             Host::CollabGuestProject => {
-                 "Your connection to the remote project has been lost.".to_string()
-             }
--            Host::RemoteServerProject(options, server_not_running) => {
++            Host::CollabGuestProject => {
++                "Your connection to the remote project has been lost.".to_string()
++            }
 +            Host::RemoteServerProject(options, server_not_running, reason) => {
-                 let autosave = if ProjectSettings::get_global(cx)
-                     .session
-                     .restore_unsaved_buffers
-@@ -160,17 +226,36 @@ impl Render for DisconnectedOverlay {
-                 } else {
-                     ""
-                 };
--                let reason = if *server_not_running {
--                    "process exiting unexpectedly"
++                let autosave = if ProjectSettings::get_global(cx)
++                    .session
++                    .restore_unsaved_buffers
++                {
++                    "\nUnsaved changes are stored locally."
++                } else {
++                    ""
++                };
 +                if let Some(reason) = reason {
 +                    format!(
 +                        "Your connection to {} has been lost: {reason}.{autosave}",
 +                        options.display_name(),
 +                    )
-                 } else {
--                    "not responding"
--                };
--                format!(
--                    "Your connection to {} has been lost due to the server {reason}.{autosave}",
--                    options.display_name(),
--                )
++                } else {
 +                    let reason = if *server_not_running {
 +                        "process exiting unexpectedly"
 +                    } else {
@@ -645,20 +628,42 @@ index 14b5684ed38d7f53a8da1f854aa96897292aea39..7755fc476fd9a111a824eba91c49f0c4
 +                        options.display_name(),
 +                    )
 +                }
-             }
--        };
++            }
 +        }
 +    }
 +
-+    fn cancel(&mut self, _: &menu::Cancel, _: &mut Window, cx: &mut Context<Self>) {
-+        self.finished = true;
-+        cx.emit(DismissEvent)
-+    }
-+}
-+
-+impl Render for DisconnectedOverlay {
-+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-+        let can_reconnect = matches!(self.host, Host::RemoteServerProject(..));
+     fn cancel(&mut self, _: &menu::Cancel, _: &mut Window, cx: &mut Context<Self>) {
+         self.finished = true;
+         cx.emit(DismissEvent)
+@@ -146,31 +255,7 @@ impl DisconnectedOverlay {
+ impl Render for DisconnectedOverlay {
+     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+         let can_reconnect = matches!(self.host, Host::RemoteServerProject(..));
+-
+-        let message = match &self.host {
+-            Host::CollabGuestProject => {
+-                "Your connection to the remote project has been lost.".to_string()
+-            }
+-            Host::RemoteServerProject(options, server_not_running) => {
+-                let autosave = if ProjectSettings::get_global(cx)
+-                    .session
+-                    .restore_unsaved_buffers
+-                {
+-                    "\nUnsaved changes are stored locally."
+-                } else {
+-                    ""
+-                };
+-                let reason = if *server_not_running {
+-                    "process exiting unexpectedly"
+-                } else {
+-                    "not responding"
+-                };
+-                format!(
+-                    "Your connection to {} has been lost due to the server {reason}.{autosave}",
+-                    options.display_name(),
+-                )
+-            }
+-        };
 +        let message = Self::message_for_host(&self.host, cx);
  
          div()

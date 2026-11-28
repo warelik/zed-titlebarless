@@ -1,7 +1,7 @@
-From eb6c4b4449cc6a0e8dde070a046fe0dd9f49d7a6 Mon Sep 17 00:00:00 2001
+From 0673ab8a770e42876b344e0afe85e07ff9413f42 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 11:28:27 +0300
-Subject: [PATCH 6/7] Verify and install immutable fork updates
+Subject: [PATCH 09/10] Verify and install immutable fork updates
 
 
 diff --git a/Cargo.lock b/Cargo.lock
@@ -29,7 +29,7 @@ index 47b4f7a0380e1036c5a12189e4d83ab998226b7d..cf92e47b52c9f52a0d5c9bf8c28a7719
  tempfile.workspace = true
  util.workspace = true
 diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs
-index 38324d5348152b7bd1bd68fa063a3228f9f1b8e6..33f0c43a1bc1b01f7ca37cb7b80dfa794d5a3d7d 100644
+index 38324d5348152b7bd1bd68fa063a3228f9f1b8e6..966319d2eed3e4fddd1d34dc14a3d4358ae92ba6 100644
 --- a/crates/auto_update/src/auto_update.rs
 +++ b/crates/auto_update/src/auto_update.rs
 @@ -10,8 +10,9 @@ use http_client::{HttpClient, HttpClientWithUrl};
@@ -155,7 +155,7 @@ index 38324d5348152b7bd1bd68fa063a3228f9f1b8e6..33f0c43a1bc1b01f7ca37cb7b80dfa79
          self.poll(check_type, cx);
      }
  
-@@ -533,6 +609,7 @@ impl AutoUpdater {
+@@ -533,11 +609,13 @@ impl AutoUpdater {
  
          cx.notify();
  
@@ -163,7 +163,13 @@ index 38324d5348152b7bd1bd68fa063a3228f9f1b8e6..33f0c43a1bc1b01f7ca37cb7b80dfa79
          self.pending_poll = Some(cx.spawn(async move |this, cx| {
              let result = Self::update(this.upgrade()?, cx).await;
              this.update(cx, |this, cx| {
-@@ -559,6 +636,15 @@ impl AutoUpdater {
+                 this.pending_poll = None;
+                 if let Err(error) = result {
++                    let check_type = this.update_check_type;
+                     let is_missing_dependency =
+                         error.downcast_ref::<MissingDependencyError>().is_some();
+                     this.status = match check_type {
+@@ -559,6 +637,15 @@ impl AutoUpdater {
                              }
                          }
                      };
@@ -179,7 +185,7 @@ index 38324d5348152b7bd1bd68fa063a3228f9f1b8e6..33f0c43a1bc1b01f7ca37cb7b80dfa79
  
                      cx.notify();
                  }
-@@ -717,34 +803,24 @@ impl AutoUpdater {
+@@ -717,34 +804,24 @@ impl AutoUpdater {
              },
          )?;
  
@@ -223,7 +229,7 @@ index 38324d5348152b7bd1bd68fa063a3228f9f1b8e6..33f0c43a1bc1b01f7ca37cb7b80dfa79
                  )
              });
  
-@@ -756,22 +832,50 @@ impl AutoUpdater {
+@@ -756,22 +833,50 @@ impl AutoUpdater {
              cx.notify();
          });
  
@@ -285,7 +291,7 @@ index 38324d5348152b7bd1bd68fa063a3228f9f1b8e6..33f0c43a1bc1b01f7ca37cb7b80dfa79
                      _ => {
                          if this.update_check_type.is_manual() {
                              cx.emit(AutoUpdateEvent::UpToDate);
-@@ -796,27 +900,34 @@ impl AutoUpdater {
+@@ -796,27 +901,34 @@ impl AutoUpdater {
              .await
              .context("Failed to create installer dir")?;
          let target_path = Self::target_path(&installer_dir).await?;
@@ -339,7 +345,7 @@ index 38324d5348152b7bd1bd68fa063a3228f9f1b8e6..33f0c43a1bc1b01f7ca37cb7b80dfa79
  
          this.update(cx, |this, cx| {
              this.status = AutoUpdateStatus::Installing {
-@@ -857,6 +968,9 @@ impl AutoUpdater {
+@@ -857,6 +969,9 @@ impl AutoUpdater {
          this.update(cx, |this, cx| {
              this.set_should_show_update_notification(true, cx)
                  .detach_and_log_err(cx);
@@ -349,7 +355,7 @@ index 38324d5348152b7bd1bd68fa063a3228f9f1b8e6..33f0c43a1bc1b01f7ca37cb7b80dfa79
              this.status = AutoUpdateStatus::Updated {
                  version: newer_version,
              };
-@@ -1073,10 +1187,169 @@ async fn cleanup_remote_server_cache(
+@@ -1073,10 +1188,169 @@ async fn cleanup_remote_server_cache(
      Ok(())
  }
  
@@ -519,7 +525,7 @@ index 38324d5348152b7bd1bd68fa063a3228f9f1b8e6..33f0c43a1bc1b01f7ca37cb7b80dfa79
      mut on_progress: impl FnMut(Option<f32>),
  ) -> Result<()> {
      let mut target_file = File::create(&target_path).await?;
-@@ -1104,8 +1377,16 @@ async fn download_release(
+@@ -1104,8 +1378,16 @@ async fn download_release(
          if bytes_read == 0 {
              break;
          }
@@ -537,7 +543,7 @@ index 38324d5348152b7bd1bd68fa063a3228f9f1b8e6..33f0c43a1bc1b01f7ca37cb7b80dfa79
  
          if let Some(total_bytes) = total_bytes {
              let fraction = (downloaded_bytes as f32 / total_bytes as f32).clamp(0.0, 1.0);
-@@ -1126,6 +1407,59 @@ async fn download_release(
+@@ -1126,6 +1408,59 @@ async fn download_release(
      Ok(())
  }
  
@@ -597,7 +603,7 @@ index 38324d5348152b7bd1bd68fa063a3228f9f1b8e6..33f0c43a1bc1b01f7ca37cb7b80dfa79
  async fn install_release_linux(
      temp_dir: &InstallerDir,
      downloaded_tar_gz: &Path,
-@@ -1368,7 +1702,7 @@ mod tests {
+@@ -1368,7 +1703,7 @@ mod tests {
          rc::Rc,
          sync::{
              Arc,
@@ -606,7 +612,7 @@ index 38324d5348152b7bd1bd68fa063a3228f9f1b8e6..33f0c43a1bc1b01f7ca37cb7b80dfa79
          },
      };
      use tempfile::tempdir;
-@@ -1380,9 +1714,767 @@ mod tests {
+@@ -1380,9 +1715,817 @@ mod tests {
  
      use super::*;
  
@@ -890,6 +896,56 @@ index 38324d5348152b7bd1bd68fa063a3228f9f1b8e6..33f0c43a1bc1b01f7ca37cb7b80dfa79
 +        cx.condition(&updater, |updater, _| updater.pending_poll.is_none()).await;
 +        assert_eq!(updater.read_with(cx, |updater, _| updater.status()), updated);
 +        assert_eq!(install_calls.load(atomic::Ordering::SeqCst), 1);
++    }
++
++    #[gpui::test]
++    async fn test_fork_manual_check_surfaces_in_flight_automatic_error(cx: &mut TestAppContext) {
++        let (release_response, response) = oneshot::channel::<()>();
++        let response = parking_lot::Mutex::new(Some(response));
++        let http = FakeHttpClient::create(move |request| {
++            assert_eq!(
++                request.uri().path(),
++                "/example/zed/releases/latest/download/latest.json"
++            );
++            let response = response.lock().take().expect("only one manifest request");
++            async move {
++                response.await.expect("release the manifest response");
++                anyhow::bail!("manifest request failed")
++            }
++        });
++        let version = Version::new(1, 24, 2);
++        let updater = create_fork_test_updater(
++            cx,
++            version.clone(),
++            http,
++            test_fork_config(41),
++            Rc::new(|_, _| panic!("a failed manifest request must not install")),
++        );
++        updater.update(cx, |updater, cx| {
++            updater.cached_fork_release = Some((42, version.clone()));
++            updater.status = AutoUpdateStatus::Updated {
++                version: version.clone(),
++            };
++            updater.poll(UpdateCheckType::Automatic, cx);
++        });
++        cx.condition(&updater, |updater, _| {
++            matches!(updater.status, AutoUpdateStatus::Checking)
++        })
++        .await;
++
++        start_manual_fork_check(&updater, cx);
++        release_response
++            .send(())
++            .expect("manifest request is pending");
++        cx.condition(&updater, |updater, _| updater.pending_poll.is_none())
++            .await;
++        updater.read_with(cx, |updater, _| {
++            let AutoUpdateStatus::Errored { error } = updater.status() else {
++                panic!("the manual check must surface the manifest error");
++            };
++            assert_eq!(error.to_string(), "manifest request failed");
++            assert_eq!(updater.cached_fork_release, Some((42, version)));
++        });
 +    }
 +
 +    #[gpui::test]
@@ -1374,7 +1430,7 @@ index 38324d5348152b7bd1bd68fa063a3228f9f1b8e6..33f0c43a1bc1b01f7ca37cb7b80dfa79
      #[gpui::test]
      fn test_auto_update_defaults_to_true(cx: &mut TestAppContext) {
          cx.update(|cx| {
-@@ -1510,6 +2602,31 @@ mod tests {
+@@ -1510,6 +2653,31 @@ mod tests {
          assert_eq!(std::fs::read_to_string(path).unwrap(), "<fake-zed-update>");
      }
  
@@ -1406,7 +1462,7 @@ index 38324d5348152b7bd1bd68fa063a3228f9f1b8e6..33f0c43a1bc1b01f7ca37cb7b80dfa79
      #[gpui::test]
      async fn test_download_release_reports_progress(cx: &mut TestAppContext) {
          cx.background_executor.allow_parking();
-@@ -1539,7 +2656,7 @@ mod tests {
+@@ -1539,7 +2707,7 @@ mod tests {
          };
  
          let reported = Rc::new(std::cell::RefCell::new(Vec::<f32>::new()));
@@ -1415,7 +1471,7 @@ index 38324d5348152b7bd1bd68fa063a3228f9f1b8e6..33f0c43a1bc1b01f7ca37cb7b80dfa79
              let reported = reported.clone();
              move |fraction| {
                  if let Some(fraction) = fraction {
-@@ -1599,7 +2716,7 @@ mod tests {
+@@ -1599,7 +2767,7 @@ mod tests {
          };
  
          let reported = Rc::new(std::cell::RefCell::new(Vec::<Option<f32>>::new()));
