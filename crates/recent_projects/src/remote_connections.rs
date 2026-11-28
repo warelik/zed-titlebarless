@@ -49,6 +49,7 @@ impl RemoteSettings {
                 options.upload_binary_over_ssh = conn.upload_binary_over_ssh.unwrap_or_default();
                 options.args = Some(conn.args);
                 options.port_forwards = conn.port_forwards;
+                options.connection_timeout = options.connection_timeout.or(conn.connection_timeout);
                 break;
             }
         }
@@ -525,15 +526,20 @@ async fn path_exists(connection: &Arc<dyn RemoteConnection>, path: &Path) -> boo
 async fn wait_while_reconnecting(remote_client: &Entity<RemoteClient>, cx: &mut AsyncApp) {
     let (reconnect_ended_tx, reconnect_ended_rx) = oneshot::channel();
     let mut reconnect_ended_tx = Some(reconnect_ended_tx);
-    let _subscription = cx.update(|cx| {
-        cx.observe(remote_client, move |remote_client, cx| {
-            if remote_client.read(cx).connection_state() != ConnectionState::Reconnecting
-                && let Some(reconnect_ended_tx) = reconnect_ended_tx.take()
-            {
-                reconnect_ended_tx.send(()).ok();
-            }
+    let Some(_subscription) = cx.update(|cx| {
+        (remote_client.read(cx).connection_state() == ConnectionState::Reconnecting).then(|| {
+            cx.observe(remote_client, move |remote_client, cx| {
+                if remote_client.read(cx).connection_state() != ConnectionState::Reconnecting
+                    && let Some(reconnect_ended_tx) = reconnect_ended_tx.take()
+                {
+                    reconnect_ended_tx.send(()).ok();
+                }
+            })
         })
-    });
+    })
+    else {
+        return;
+    };
     reconnect_ended_rx.await.ok();
 }
 
@@ -552,6 +558,44 @@ mod tests {
     use serde_json::json;
     use util::path;
     use workspace::find_existing_workspace;
+
+    #[test]
+    fn test_restore_ssh_connection_timeout_from_matching_settings() {
+        let settings = RemoteSettings {
+            ssh_connections: ExtendingVec(vec![SshConnection {
+                host: "example.com".into(),
+                username: Some("dev".into()),
+                port: Some(2222),
+                connection_timeout: Some(30),
+                ..Default::default()
+            }]),
+            wsl_connections: ExtendingVec::default(),
+            read_ssh_config: false,
+        };
+        let record = json!({
+            "host": {"Hostname": "example.com"},
+            "username": "dev",
+            "port": 2222,
+            "upload_binary_over_ssh": false
+        });
+        let mut legacy: SshConnectionOptions = serde_json::from_value(record.clone()).unwrap();
+        assert_eq!(legacy.connection_timeout, None);
+        settings.fill_connection_options_from_settings(&mut legacy);
+        assert_eq!(legacy.connection_timeout, Some(30));
+
+        let mut explicit = record.clone();
+        explicit["connection_timeout"] = json!(60);
+        let mut explicit: SshConnectionOptions = serde_json::from_value(explicit).unwrap();
+        settings.fill_connection_options_from_settings(&mut explicit);
+        assert_eq!(explicit.connection_timeout, Some(60));
+
+        let mut unmatched = record;
+        unmatched["port"] = json!(2223);
+        let mut unmatched: SshConnectionOptions = serde_json::from_value(unmatched).unwrap();
+        let original = unmatched.clone();
+        settings.fill_connection_options_from_settings(&mut unmatched);
+        assert_eq!(unmatched, original);
+    }
 
     // Each remote path style is set explicitly, so the client and remote styles differ on every
     // platform the tests run on.
@@ -1413,6 +1457,59 @@ mod tests {
             window_remote_client(new_window, cx)
                 .read_with(cx, |client, _| client.connection_state()),
             ConnectionState::Connected
+        );
+    }
+
+    #[gpui::test]
+    async fn test_project_observes_remote_client_notifications(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let app_state = init_test(cx);
+        cx.update(|cx| {
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+        });
+        server_cx.update(|cx| {
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+        });
+        let (options, server_session, connection_guard) = RemoteClient::fake_server(cx, server_cx);
+        let ping_handler = server_cx.new(|_| ());
+        server_session.add_request_handler::<proto::Ping, _, _, _>(
+            ping_handler.downgrade(),
+            |_, _, _| async { Ok(proto::Ack {}) },
+        );
+        drop(connection_guard);
+
+        let remote_client = RemoteClient::connect_mock(options, cx).await;
+        let project = cx.update(|cx| {
+            Project::remote(
+                remote_client.clone(),
+                app_state.client.clone(),
+                app_state.node_runtime.clone(),
+                app_state.user_store.clone(),
+                app_state.languages.clone(),
+                app_state.fs.clone(),
+                false,
+                cx,
+            )
+        });
+
+        cx.run_until_parked();
+        let notifications = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_notifications = notifications.clone();
+        cx.update(|cx| {
+            cx.observe(&project, move |_, _cx| {
+                observed_notifications.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .detach();
+        });
+
+        remote_client.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+
+        assert!(
+            notifications.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "project observers should be notified when the remote client changes"
         );
     }
 

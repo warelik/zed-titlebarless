@@ -804,6 +804,8 @@ impl VsCodeSettings {
                         ShowCloseButton::Hidden
                     }
                 }),
+            min_width: None,
+            max_width: None,
         })
     }
 
@@ -833,6 +835,9 @@ impl VsCodeSettings {
                 .read_str("workbench.editor.editorActionsLocation")
                 .and_then(|str| if str == "hidden" { Some(false) } else { None }),
             show_pinned_tabs_in_separate_row: None,
+            pinned_tab_chips: None,
+            unpinned_tab_chips: None,
+            max_tab_rows: None,
         })
     }
 
@@ -1042,7 +1047,9 @@ impl VsCodeSettings {
             mermaid_font_family: None,
             theme: None,
             icon_theme: None,
+            panel_rows_tab_height: None,
             ui_density: None,
+            shadows: None,
             unnecessary_code_fade: None,
             experimental_theme_overrides: None,
             theme_overrides: Default::default(),
@@ -1099,6 +1106,7 @@ impl VsCodeSettings {
             reveal_if_open: self.read_bool("workbench.editor.revealIfOpen"),
             restore_on_startup: None,
             window_decorations: None,
+            title_bar_to_status_bar: None,
             show_call_status_icon: None,
             use_system_path_prompts: self.read_bool("files.simpleDialog.enable").map(|b| !b),
             use_system_prompts: None,
