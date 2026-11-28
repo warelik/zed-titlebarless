@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import textwrap
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -1743,6 +1744,48 @@ class BootstrapTrustBoundaryTests(unittest.TestCase):
         self.assertIn("needs.verify-bootstrap-bundle.outputs.policy_ref", repair)
         self.assertIn("BOOTSTRAP_BUNDLE_FAILED", repair)
         self.assertNotIn("bootstrap-policy", repair)
+
+    def test_macos_requires_a_verified_native_policy_pin(self):
+        workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
+        product = workflow.split("\n  test:\n", 1)[1].split("\n  publish:\n", 1)[0]
+        self.assertIn("needs: [prepare, activate-policy, land]", product)
+        self.assertIn("needs.activate-policy.result == 'success'", product)
+        pin = workflow.split("      - name: Pin The Checked Controller For Subsequent Runs\n", 1)[1]
+        script = textwrap.dedent(pin.split("        run: |\n", 1)[1].split("\n      - ", 1)[0])
+        fake_gh = """
+gh() {
+    test ! -s "$GITHUB_OUTPUT" || return 90
+    printf '%s\\n' "$*" >> "$CALLS"
+    if [[ "$2" == get ]]; then
+        if [[ "$*" == *' --json value --jq .value | @json' ]]; then
+            printf '%s\\n' "$ENCODED_READBACK"
+        else
+            printf '%s\\n' "$READBACK"
+        fi
+        return "$READBACK_STATUS"
+    fi
+}
+"""
+        expected = "a" * 40
+        for value, status in ((expected, 0), ("b" * 40, 0), (expected + "\n", 0), (expected, 1)):
+            with self.subTest(value=value, status=status), tempfile.TemporaryDirectory() as temporary:
+                output, calls = (Path(temporary) / name for name in ("output", "calls"))
+                result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", fake_gh + script],
+                    env={**os.environ, "GITHUB_OUTPUT": str(output), "CALLS": str(calls),
+                         "GITHUB_REPOSITORY": "owner/zed", "POLICY_REF": expected, "REPAIR_PR": "",
+                         "READBACK": value, "ENCODED_READBACK": json.dumps(value),
+                         "READBACK_STATUS": str(status)},
+                    capture_output=True, text=True)
+                self.assertEqual(calls.read_text().splitlines(), [
+                    f"variable set ZED_TRUSTED_POLICY --repo owner/zed --body {expected}",
+                    "variable get ZED_TRUSTED_POLICY --repo owner/zed --json value --jq .value | @json",
+                ])
+                if value == expected and status == 0:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(output.read_text(), f"policy_ref={expected}\n")
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(output.exists())
 
 
 class SharedPolicyOutputBoundaryTests(unittest.TestCase):

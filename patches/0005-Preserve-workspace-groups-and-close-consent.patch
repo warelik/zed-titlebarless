@@ -1,7 +1,7 @@
-From 3a5326b1f8a8329991e19eb8b8e0688e751946d8 Mon Sep 17 00:00:00 2001
+From e6273938775fcbfe41877a024a73ecdb9789deeb Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Thu, 15 Oct 2026 00:00:00 +0000
-Subject: [PATCH 3/7] Preserve workspace groups and close consent
+Subject: [PATCH 05/10] Preserve workspace groups and close consent
 
 
 diff --git a/crates/project/src/project.rs b/crates/project/src/project.rs
@@ -144,7 +144,7 @@ index 846c01288c1ef3bba57c1e450795ad312151703a..c809944a98198322ed90a38ec9bab23d
      fn item_focus_handle(&self, cx: &App) -> FocusHandle;
      fn subscribe_to_item_events(
 diff --git a/crates/workspace/src/multi_workspace.rs b/crates/workspace/src/multi_workspace.rs
-index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100aeec33840 100644
+index 01d8e217f006479765b75b4732aa7232df04b1c3..50b6097771b39f10c9845d49525e5c8b8ffa345b 100644
 --- a/crates/workspace/src/multi_workspace.rs
 +++ b/crates/workspace/src/multi_workspace.rs
 @@ -1,5 +1,6 @@
@@ -154,6 +154,15 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
  
  use gpui::{
      AnyView, App, Context, Corners, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle,
+@@ -11,7 +12,7 @@ use project::{DisableAiSettings, Project};
+ use remote::RemoteConnectionOptions;
+ use settings::Settings;
+ pub use settings::SidebarSide;
+-use std::cell::Cell;
++use std::cell::{Cell, RefCell};
+ use std::path::PathBuf;
+ use std::rc::Rc;
+ use ui::prelude::*;
 @@ -27,8 +28,8 @@ const SIDEBAR_RESIZE_HANDLE_SIZE: Pixels = px(6.0);
  
  use crate::open_remote_project_with_existing_connection;
@@ -279,27 +288,79 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
 +        // Include the displayed workspace without changing retention before
 +        // consent. A cancelled close must not turn a transient view persistent.
          let active_workspace = self.workspace().clone();
-+        let mut workspaces = self
-+            .workspaces_for_project_group(group_key, cx)
-+            .cloned()
-+            .collect::<Vec<_>>();
-         if active_workspace.read(cx).project_group_key(cx) == *group_key
+-        if active_workspace.read(cx).project_group_key(cx) == *group_key
 -            && !self.is_workspace_retained(&active_workspace)
-+            && !workspaces.contains(&active_workspace)
-         {
+-        {
 -            let index = self.hold(active_workspace, window, cx);
 -            self.pin(index, group_key.clone(), cx);
-+            workspaces.push(active_workspace);
-         }
- 
+-        }
+-
 -        let workspaces = self
--            .workspaces_for_project_group(group_key, cx)
--            .cloned()
--            .collect::<Vec<_>>();
++        let mut workspaces = self
+             .workspaces_for_project_group(group_key, cx)
+             .cloned()
+             .collect::<Vec<_>>();
++        if active_workspace.read(cx).project_group_key(cx) == *group_key
++            && !workspaces.contains(&active_workspace)
++        {
++            workspaces.push(active_workspace);
++        }
++
          if workspaces.is_empty() {
              let previous_group_count = self.project_groups.len();
              self.project_groups.retain(|group| group.key != *group_key);
-@@ -1350,6 +1383,17 @@ impl MultiWorkspace {
+@@ -1222,6 +1255,20 @@ impl MultiWorkspace {
+         })
+     }
+ 
++    fn local_workspace_for_paths(
++        &self,
++        path_list: &PathList,
++        cx: &App,
++    ) -> Option<Entity<Workspace>> {
++        self.workspaces()
++            .find(|workspace| {
++                let workspace = workspace.read(cx);
++                workspace.project().read(cx).is_local()
++                    && PathList::new(&workspace.root_paths(cx)) == *path_list
++            })
++            .cloned()
++    }
++
+     /// Finds an existing workspace in this multi-workspace whose paths match,
+     /// or creates a new one (deserializing its saved state from the database).
+     /// Never searches other windows or matches workspaces with a superset of
+@@ -1236,18 +1283,7 @@ impl MultiWorkspace {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) -> Task<Result<Entity<Workspace>>> {
+-        let local_workspace_for_paths = |multi_workspace: &Self, path_list: &PathList, cx: &App| {
+-            multi_workspace
+-                .workspaces()
+-                .find(|workspace| {
+-                    let workspace = workspace.read(cx);
+-                    workspace.project().read(cx).is_local()
+-                        && PathList::new(&workspace.root_paths(cx)) == *path_list
+-                })
+-                .cloned()
+-        };
+-
+-        if let Some(workspace) = local_workspace_for_paths(self, &path_list, cx) {
++        if let Some(workspace) = self.local_workspace_for_paths(&path_list, cx) {
+             self.activate(workspace.clone(), source_workspace, window, cx);
+             return Task::ready(Ok(workspace));
+         }
+@@ -1284,7 +1320,8 @@ impl MultiWorkspace {
+             if let Some(requesting_window) = requesting_window
+                 && let Some(workspace) = requesting_window
+                     .update(cx, |multi_workspace, window, cx| {
+-                        local_workspace_for_paths(multi_workspace, &effective_path_list, cx)
++                        multi_workspace
++                            .local_workspace_for_paths(&effective_path_list, cx)
+                             .inspect(|workspace| {
+                                 multi_workspace.activate(
+                                     workspace.clone(),
+@@ -1350,6 +1387,17 @@ impl MultiWorkspace {
          source_workspace: Option<WeakEntity<Workspace>>,
          window: &mut Window,
          cx: &mut Context<Self>,
@@ -317,7 +378,7 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
      ) {
          if self.workspace() == &workspace {
              self.focus_active_workspace(window, cx);
-@@ -1360,7 +1404,7 @@ impl MultiWorkspace {
+@@ -1360,7 +1408,7 @@ impl MultiWorkspace {
          let old_active_was_retained = self.active_workspace_is_retained();
          let should_retain_workspaces = self.multi_workspace_enabled(cx);
  
@@ -326,7 +387,7 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
              let key = old_active_workspace.read(cx).project_group_key(cx);
              let index = self.hold(old_active_workspace.clone(), window, cx);
              self.pin(index, key, cx);
-@@ -1384,7 +1428,7 @@ impl MultiWorkspace {
+@@ -1384,7 +1432,7 @@ impl MultiWorkspace {
              .map_or(0, |max| max + 1);
          self.held[displayed].activated_at = Some(stamp);
  
@@ -335,7 +396,7 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
              self.detach_workspace(&old_active_workspace, cx);
          }
  
-@@ -1441,6 +1485,15 @@ impl MultiWorkspace {
+@@ -1441,6 +1489,15 @@ impl MultiWorkspace {
      /// group key, and emits `WorkspaceRemoved`. The DB row is preserved
      /// so the workspace still appears in the recent-projects list.
      fn detach_workspace(&mut self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
@@ -351,7 +412,7 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
          if let Some(index) = self.held_index(workspace) {
              assert_ne!(
                  index,
-@@ -1450,21 +1503,28 @@ impl MultiWorkspace {
+@@ -1450,21 +1507,28 @@ impl MultiWorkspace {
              self.held.remove(index);
          }
          cx.emit(MultiWorkspaceEvent::WorkspaceRemoved(workspace.entity_id()));
@@ -388,7 +449,7 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
          }
      }
  
-@@ -1635,6 +1695,11 @@ impl MultiWorkspace {
+@@ -1635,6 +1699,11 @@ impl MultiWorkspace {
              );
  
              let live_key = workspace.read(cx).project_group_key(cx);
@@ -400,7 +461,7 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
              anyhow::ensure!(
                  self.project_groups
                      .iter()
-@@ -1667,7 +1732,14 @@ impl MultiWorkspace {
+@@ -1667,7 +1736,14 @@ impl MultiWorkspace {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) -> Entity<Workspace> {
@@ -416,11 +477,10 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
          self.activate(workspace.clone(), None, window, cx);
          workspace
      }
-@@ -1807,6 +1879,21 @@ impl MultiWorkspace {
-         intent: RemovalIntent,
+@@ -1808,64 +1884,205 @@ impl MultiWorkspace {
          window: &mut Window,
          cx: &mut Context<Self>,
-+    ) -> Task<Result<bool>> {
+     ) -> Task<Result<bool>> {
 +        self.remove_with_pre_remove(workspaces, intent, async |_, _| Ok(true), window, cx)
 +    }
 +
@@ -435,75 +495,177 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
 +        + 'static,
 +        window: &mut Window,
 +        cx: &mut Context<Self>,
-     ) -> Task<Result<bool>> {
++    ) -> Task<Result<bool>> {
++        self.remove_with_detach_check(
++            workspaces,
++            intent,
++            before_remove,
++            |_| Some(|_: &mut Window, _: &mut App| false),
++            window,
++            cx,
++        )
++    }
++
++    /// Checks caller-owned state in the same update as the detach. The
++    /// returned callback runs after detachment and may select a replacement.
++    pub fn remove_with_detach_check<AfterDetach>(
++        &mut self,
++        workspaces: impl IntoIterator<Item = Entity<Workspace>>,
++        intent: RemovalIntent,
++        before_remove: impl AsyncFnOnce(
++            &mut gpui::AsyncWindowContext,
++            Rc<dyn Fn(&App) -> bool>,
++        ) -> Result<bool>
++        + 'static,
++        prepare_detach: impl FnOnce(&App) -> Option<AfterDetach> + 'static,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) -> Task<Result<bool>>
++    where
++        AfterDetach: FnOnce(&mut Window, &mut App) -> bool + 'static,
++    {
          let workspaces: Vec<_> = workspaces.into_iter().collect();
  
-@@ -1817,9 +1904,8 @@ impl MultiWorkspace {
-         let original_active = self.workspace().clone();
-         let group_key = original_active.read(cx).project_group_key(cx);
+         if workspaces.is_empty() {
+             return Task::ready(Ok(false));
+         }
  
+-        let original_active = self.workspace().clone();
+-        let group_key = original_active.read(cx).project_group_key(cx);
+-
 -        // Record the neighborhood of the project as the user sees it now:
 -        // callers like `remove_project_group` delete the project row itself
 -        // before the removal task runs.
+-        let group_index = self
+-            .project_groups
+-            .iter()
+-            .position(|group| group.key == group_key);
+-        let neighbor_keys = self.neighbor_group_keys(group_index);
+-        let adjacent_key = group_index.and_then(|index| {
+-            self.project_groups
+-                .get(index + 1)
+-                .or_else(|| {
+-                    index
+-                        .checked_sub(1)
+-                        .and_then(|previous| self.project_groups.get(previous))
++        let visible_worktrees = |project: &Entity<Project>, cx: &App| {
++            project
++                .read(cx)
++                .visible_worktrees(cx)
++                .map(|worktree| {
++                    let worktree = worktree.read(cx);
++                    (worktree.id(), worktree.abs_path())
+                 })
+-                .map(|group| group.key.clone())
+-        });
++                .collect::<collections::HashSet<_>>()
++        };
++        let projects = workspaces
++            .iter()
++            .map(|workspace| {
++                let project = workspace.read(cx).project().clone();
++                let worktrees = visible_worktrees(&project, cx);
++                (workspace.clone(), project, worktrees)
++            })
++            .collect::<Vec<_>>();
++
 +        // Record the neighborhood as the user sees it before asynchronous
 +        // consent; other project rows may change while a prompt is pending.
-         let group_index = self
-             .project_groups
-             .iter()
-@@ -1837,12 +1923,38 @@ impl MultiWorkspace {
-         });
++        let neighborhood = |this: &Self, cx: &App| {
++            let group_key = this.workspace().read(cx).project_group_key(cx);
++            let group_index = this
++                .project_groups
++                .iter()
++                .position(|group| group.key == group_key);
++            let neighbor_keys = this.neighbor_group_keys(group_index);
++            let adjacent_key = group_index.and_then(|index| {
++                this.project_groups
++                    .get(index + 1)
++                    .or_else(|| {
++                        index
++                            .checked_sub(1)
++                            .and_then(|previous| this.project_groups.get(previous))
++                    })
++                    .map(|group| group.key.clone())
++            });
++            (group_key, neighbor_keys, adjacent_key)
++        };
++        let original_neighborhood = neighborhood(self, cx);
++        let active_selection = |this: &Self| {
++            let active = &this.held[this.displayed_index()];
++            (active.workspace.clone(), active.activated_at)
++        };
  
          cx.spawn_in(window, async move |this, cx| {
 -            // Consent phase: run the standard close lifecycle for every
 -            // workspace being removed. Prompts only; no state changes.
-+            let (mut guard, item_ids) = cx.update(|window, cx| {
-+                let mut item_ids = Vec::with_capacity(workspaces.len());
-+                let mut items = Vec::new();
-+                for workspace in &workspaces {
-+                    let mut workspace_item_ids = Vec::new();
-+                    for item in workspace.read(cx).items(cx) {
-+                        workspace_item_ids.push(item.item_id());
-+                        items.push(item.boxed_clone());
-+                    }
-+                    item_ids.push(workspace_item_ids);
-+                }
-+                (ItemCloseGuard::new(items, window, cx), item_ids)
-+            })?;
-+            let guarded_workspaces = workspaces.clone();
-+            let item_membership_matches = move |cx: &App| {
-+                guarded_workspaces
+-            for workspace in &workspaces {
++            let membership = |workspace: &Entity<Workspace>, cx: &App| {
++                workspace
++                    .read(cx)
++                    .panes()
 +                    .iter()
-+                    .zip(&item_ids)
-+                    .all(|(workspace, expected)| {
-+                        workspace
-+                            .read(cx)
-+                            .items(cx)
-+                            .map(|item| item.item_id())
-+                            .eq(expected.iter().copied())
++                    .flat_map(|pane| {
++                        let pane_id = pane.entity_id();
++                        pane.read(cx)
++                            .items()
++                            .map(move |item| (pane_id, item.item_id()))
 +                    })
++                    .collect::<collections::HashSet<_>>()
 +            };
-+
++            let (mut guard, mut expected_membership) = cx.update(|window, cx| {
++                let items = workspaces
++                    .iter()
++                    .flat_map(|workspace| workspace.read(cx).items(cx))
++                    .map(|item| item.boxed_clone())
++                    .collect();
++                let expected_membership = workspaces
++                    .iter()
++                    .map(|workspace| (workspace.clone(), membership(workspace, cx)))
++                    .collect::<Vec<_>>();
++                (ItemCloseGuard::new(items, window, cx), expected_membership)
++            })?;
 +            // Ask every workspace for consent before changing retention or session bindings.
-             for workspace in &workspaces {
++            for (workspace, expected) in &mut expected_membership {
++                let deleted_tab_closes = Rc::new(RefCell::new(Vec::new()));
                  let should_continue = workspace
                      .update_in(cx, |workspace, window, cx| {
 -                        workspace.prepare_to_close(CloseIntent::ReplaceWindow, window, cx)
-+                        workspace.prepare_to_remove(window, cx)
++                        workspace.prepare_to_remove(deleted_tab_closes.clone(), window, cx)
                      })?
                      .await?;
  
-@@ -1851,21 +1963,44 @@ impl MultiWorkspace {
+-                if !should_continue {
++                if !should_continue
++                    || !deleted_tab_closes
++                        .borrow()
++                        .iter()
++                        .all(|receipt| expected.remove(&(receipt.pane_id, receipt.item_id)))
++                {
+                     return Ok(false);
                  }
              }
  
++            let item_membership_matches = move |cx: &App| {
++                expected_membership
++                    .iter()
++                    .all(|(workspace, expected)| membership(workspace, cx) == *expected)
++            };
 +            if !gpui::AsyncApp::update(cx, |cx| {
 +                item_membership_matches(cx) && guard.accept_consent(cx)
 +            }) {
 +                return Ok(false);
 +            }
 +
-+            let workspaces_unchanged: Rc<dyn Fn(&App) -> bool> =
-+                Rc::new(move |cx| !guard.changed(cx) && item_membership_matches(cx));
++            let workspaces_unchanged: Rc<dyn Fn(&App) -> bool> = Rc::new(move |cx| {
++                !guard.changed(cx)
++                    && item_membership_matches(cx)
++                    && projects.iter().all(|(workspace, project, worktrees)| {
++                        workspace.read(cx).project() == project
++                            && visible_worktrees(project, cx) == *worktrees
++                    })
++            });
++            let selection_after_consent = this.read_with(cx, |this, _| active_selection(this))?;
 +            if !before_remove(cx, workspaces_unchanged.clone()).await? {
 +                return Ok(false);
 +            }
@@ -511,12 +673,21 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
              // Edit phase: one synchronous update. Delete the rows, then pick
              // the replacement from the rows that actually remain.
 -            let (removed_any, reopen_key) = this.update_in(cx, |this, window, cx| {
-+            let (removed_any, reopen_key, snapshots) = this.update_in(cx, |this, window, cx| {
-+                if !workspaces_unchanged(cx) {
-+                    return (false, None, Vec::new());
++            let detach = |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
++                if workspaces
++                    .iter()
++                    .any(|workspace| this.held_index(workspace).is_none())
++                {
++                    return (false, None, Vec::new(), None);
 +                }
                  let mut removed_any = false;
                  let displayed_workspace = this.workspace().clone();
++                let (group_key, neighbor_keys, adjacent_key) =
++                    if active_selection(this) == selection_after_consent {
++                        original_neighborhood
++                    } else {
++                        neighborhood(this, cx)
++                    };
 +                let mut snapshots = Vec::new();
  
                  // wait for should_continue to be true before removing project groups
@@ -542,7 +713,7 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
                      cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
                  }
  
-@@ -1874,7 +2009,14 @@ impl MultiWorkspace {
+@@ -1874,7 +2091,14 @@ impl MultiWorkspace {
                          continue;
                      }
                      if this.held_index(workspace).is_some() {
@@ -558,7 +729,7 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
                          removed_any = true;
                      }
                  }
-@@ -1923,8 +2065,15 @@ impl MultiWorkspace {
+@@ -1923,15 +2147,16 @@ impl MultiWorkspace {
                              cx.new(|cx| Workspace::new(None, project, app_state, window, cx))
                          });
  
@@ -574,25 +745,104 @@ index 01d8e217f006479765b75b4732aa7232df04b1c3..9abe2edaf0299accc5e4c92414f8100a
 +                        cx,
 +                    ));
                      removed_any = true;
-                 } else if *this.workspace() != original_active
-                     && !workspaces.contains(&original_active)
-@@ -1939,9 +2088,10 @@ impl MultiWorkspace {
+-                } else if *this.workspace() != original_active
+-                    && !workspaces.contains(&original_active)
+-                {
+-                    // Prompting switched the display away from where the user
+-                    // was; go back.
+-                    this.activate(original_active.clone(), None, window, cx);
+                 }
+ 
+                 if removed_any {
+@@ -1939,21 +2164,63 @@ impl MultiWorkspace {
                      cx.notify();
                  }
  
 -                (removed_any, reopen_key)
-+                (removed_any, reopen_key, snapshots)
-             })?;
+-            })?;
++                let active_after_detach = reopen_key.as_ref().map(|_| active_selection(this));
++                (removed_any, reopen_key, snapshots, active_after_detach)
++            };
++            let (removed_any, reopen_key, snapshots, active_after_detach) =
++                cx.update(|window, cx| {
++                    if !workspaces_unchanged(cx) {
++                        return Ok((false, None, Vec::new(), None));
++                    }
++                    let Some(after_detach) = prepare_detach(cx) else {
++                        return Ok((false, None, Vec::new(), None));
++                    };
++                    let (removed, mut reopen_key, snapshots, active) =
++                        this.update(cx, |this, cx| detach(this, window, cx))?;
++                    if removed && after_detach(window, cx) {
++                        reopen_key = None;
++                    }
++                    anyhow::Ok((removed, reopen_key, snapshots, active))
++                })??;
  
+-            if let Some(key) = reopen_key {
+-                this.update_in(cx, |this, window, cx| {
+-                    this.find_or_create_local_workspace(
+-                        key.path_list().clone(),
+-                        Some(key),
+-                        None,
+-                        OpenMode::Activate,
+-                        None,
 +            futures::future::join_all(snapshots).await;
-             if let Some(key) = reopen_key {
-                 this.update_in(cx, |this, window, cx| {
-                     this.find_or_create_local_workspace(
++            if let (Some(key), Some(selection)) = (reopen_key, active_after_detach)
++                && let Some((paths, app_state, window)) =
++                    this.update_in(cx, |this, window, cx| {
++                        if active_selection(this) != selection {
++                            return None;
++                        }
++                        let paths = key.path_list().clone();
++                        if let Some(workspace) = this.local_workspace_for_paths(&paths, cx) {
++                            this.activate(workspace, None, window, cx);
++                            return None;
++                        }
++                        Some((
++                            paths,
++                            this.workspace().read(cx).app_state().clone(),
++                            window.window_handle().downcast::<MultiWorkspace>()?,
++                        ))
++                    })?
++            {
++                gpui::AsyncApp::update(cx, |cx| {
++                    Workspace::activate_local_if(
++                        paths.paths().to_vec(),
++                        app_state,
+                         window,
++                        move |this, window, cx| {
++                            if active_selection(this) != selection {
++                                return false;
++                            }
++                            // The fallback may have been opened while we were loading it.
++                            if let Some(workspace) = this.local_workspace_for_paths(&paths, cx) {
++                                this.activate(workspace, None, window, cx);
++                                return false;
++                            }
++                            true
++                        },
+                         cx,
+                     )
+-                })?
++                })
+                 .await?;
+             }
+ 
 diff --git a/crates/workspace/src/multi_workspace_tests.rs b/crates/workspace/src/multi_workspace_tests.rs
-index d60a676228b4739c387644389c053c41996ef7c3..b986b5f52894622f43dd69bbb57e5df8bcf24a78 100644
+index d60a676228b4739c387644389c053c41996ef7c3..c41ca297823da63f00bf198e7113b6ba6c3d26bf 100644
 --- a/crates/workspace/src/multi_workspace_tests.rs
 +++ b/crates/workspace/src/multi_workspace_tests.rs
-@@ -830,6 +830,134 @@ async fn test_remove_fallback_via_find_or_create_skips_removed_workspaces(cx: &m
+@@ -1,7 +1,7 @@
+ use std::path::PathBuf;
+ 
+ use super::*;
+-use crate::item::test::TestItem;
++use crate::item::test::{TestItem, TestProjectItem};
+ use agent_settings::AgentSettings;
+ use client::proto;
+ use fs::{FakeFs, Fs};
+@@ -830,6 +830,183 @@ async fn test_remove_fallback_via_find_or_create_skips_removed_workspaces(cx: &m
      });
  }
  
@@ -600,10 +850,12 @@ index d60a676228b4739c387644389c053c41996ef7c3..b986b5f52894622f43dd69bbb57e5df8
 +async fn test_remove_with_pre_remove_runs_guard_after_consent_before_detach(
 +    cx: &mut TestAppContext,
 +) {
++    use futures::channel::oneshot;
++
 +    init_test(cx);
 +    let fs = FakeFs::new(cx.executor());
 +    fs.insert_tree("/root", json!({ "file.txt": "" })).await;
-+    let project = Project::test(fs, ["/root".as_ref()], cx).await;
++    let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
 +    let (multi_workspace, cx) =
 +        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
 +    let workspace =
@@ -690,33 +942,80 @@ index d60a676228b4739c387644389c053c41996ef7c3..b986b5f52894622f43dd69bbb57e5df8
 +            .any(|candidate| candidate == &workspace)
 +    }));
 +
++    fs.insert_tree("/retained", json!({})).await;
++    fs.insert_tree("/selected", json!({})).await;
++    let retained_project = Project::test(fs.clone(), ["/retained".as_ref()], cx).await;
++    let selected_project = Project::test(fs, ["/selected".as_ref()], cx).await;
++    let selected_workspace = multi_workspace.update_in(cx, |mw, window, cx| {
++        let selected = mw.test_add_workspace(selected_project, window, cx);
++        let retained = mw.test_add_workspace(retained_project, window, cx);
++        assert_eq!(mw.workspace(), &retained);
++        selected
++    });
++    let (started_tx, started_rx) = oneshot::channel();
++    let (release_tx, release_rx) = oneshot::channel();
 +    let guard_calls = Rc::new(Cell::new(0));
 +    let weak_multi_workspace = multi_workspace.downgrade();
 +    let guarded_workspace = workspace.clone();
++    let other_item = cx.new(|cx| TestItem::new(cx));
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.add_item_to_active_pane(Box::new(other_item.clone()), None, true, window, cx);
++    });
 +    let remove_task = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
 +        let guard_calls = guard_calls.clone();
 +        multi_workspace.remove_with_pre_remove(
 +            [workspace.clone()],
 +            RemovalIntent::CloseProject,
-+            async move |cx, _workspaces_unchanged| {
++            async move |cx, workspaces_unchanged| {
 +                assert!(weak_multi_workspace.read_with(cx, |multi_workspace, _| {
 +                    multi_workspace
 +                        .workspaces()
 +                        .any(|candidate| candidate == &guarded_workspace)
 +                })?);
++                cx.update(|window, cx| {
++                    let pane = guarded_workspace.read(cx).active_pane().clone();
++                    let before = pane
++                        .read(cx)
++                        .items()
++                        .map(|item| item.item_id())
++                        .collect::<Vec<_>>();
++                    assert_eq!(before.len(), 2);
++                    crate::move_item(&pane, &pane, before[1], 0, false, window, cx);
++                    assert!(
++                        pane.read(cx)
++                            .items()
++                            .map(|item| item.item_id())
++                            .eq(before.into_iter().rev())
++                    );
++                    assert!(workspaces_unchanged(cx), "tab order is not membership");
++                })?;
 +                guard_calls.set(guard_calls.get() + 1);
++                started_tx.send(()).expect("test awaits the guard");
++                release_rx.await?;
 +                Ok(true)
 +            },
 +            window,
 +            cx,
 +        )
 +    });
++    started_rx.await.expect("guard should start");
++    multi_workspace.update_in(cx, |mw, window, cx| {
++        mw.activate(selected_workspace.clone(), None, window, cx);
++    });
++    release_tx.send(()).expect("guard should be waiting");
 +    assert!(remove_task.await.expect("guarded removal should succeed"));
 +    assert_eq!(
 +        workspace.read_with(cx, |workspace, _| workspace.session_id()),
 +        None
 +    );
 +    assert_eq!(guard_calls.get(), 1);
++    multi_workspace.read_with(cx, |mw, _| {
++        assert_eq!(
++            mw.workspace(),
++            &selected_workspace,
++            "removal must preserve the workspace selected while the guard was waiting"
++        );
++    });
 +    assert!(!multi_workspace.read_with(cx, |multi_workspace, _| {
 +        multi_workspace
 +            .workspaces()
@@ -727,7 +1026,84 @@ index d60a676228b4739c387644389c053c41996ef7c3..b986b5f52894622f43dd69bbb57e5df8
  #[gpui::test]
  async fn test_remove_keeping_the_project_does_not_switch_projects(cx: &mut TestAppContext) {
      init_test(cx);
-@@ -1882,3 +2010,527 @@ async fn test_nearest_retained_workspace_skips_disconnected_workspace(cx: &mut T
+@@ -1143,6 +1320,76 @@ async fn test_close_workspace_opens_unloaded_local_neighbor(cx: &mut TestAppCont
+     });
+ }
+ 
++#[gpui::test]
++async fn test_remove_keeps_user_selection_during_local_fallback_open(cx: &mut TestAppContext) {
++    init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    fs.insert_tree("/project-a", json!({})).await;
++    fs.insert_tree("/project-b", json!({})).await;
++    fs.insert_tree("/project-c", json!({})).await;
++    cx.update(|cx| <dyn Fs>::set_global(fs.clone(), cx));
++
++    let project_a = Project::test(fs.clone(), ["/project-a".as_ref()], cx).await;
++    let project_b = Project::test(fs.clone(), ["/project-b".as_ref()], cx).await;
++    let project_c = Project::test(fs, ["/project-c".as_ref()], cx).await;
++    let (multi_workspace, cx) = setup_multi_workspace(&[project_a, project_b, project_c], cx);
++    let (workspace_a, workspace_b, workspace_c, window) =
++        multi_workspace.update_in(cx, |mw, window, cx| {
++            let [workspace_a, workspace_b, workspace_c] = mw
++                .workspaces()
++                .cloned()
++                .collect::<Vec<_>>()
++                .try_into()
++                .unwrap();
++            mw.activate(workspace_a.clone(), None, window, cx);
++            (
++                workspace_a,
++                workspace_b,
++                workspace_c,
++                window.window_handle().downcast::<MultiWorkspace>().unwrap(),
++            )
++        });
++
++    let switched = Rc::new(Cell::new(false));
++    let _pending_fallback = cx.update(|cx| {
++        let workspace_b = workspace_b.clone();
++        let workspace_c = workspace_c.clone();
++        let switched = switched.clone();
++        cx.observe_new::<Project>(move |_, _, cx| {
++            if !switched.replace(true) {
++                // B is displayed after detaching A. Select C when reopening A
++                // starts, before the new workspace can be created.
++                window
++                    .update(cx, |mw, window, cx| {
++                        assert_eq!(mw.workspace(), &workspace_b);
++                        mw.activate(workspace_c.clone(), None, window, cx);
++                    })
++                    .unwrap();
++            }
++        })
++    });
++
++    let removed = multi_workspace
++        .update_in(cx, |mw, window, cx| {
++            mw.remove([workspace_a], RemovalIntent::KeepProject, window, cx)
++        })
++        .await
++        .expect("removing the active workspace should succeed");
++
++    assert!(removed);
++    assert!(switched.get(), "the local fallback must have started");
++    multi_workspace.update_in(cx, |mw, window, cx| {
++        assert_eq!(mw.workspace(), &workspace_c);
++        assert_eq!(mw.workspaces().count(), 2);
++        assert!(
++            workspace_c
++                .read(cx)
++                .fallback_focus_handle(window, cx)
++                .contains_focused(window, cx)
++        );
++    });
++}
++
+ #[gpui::test]
+ async fn test_remove_unloaded_project_group_removes_its_row(cx: &mut TestAppContext) {
+     init_test(cx);
+@@ -1882,3 +2129,561 @@ async fn test_nearest_retained_workspace_skips_disconnected_workspace(cx: &mut T
          );
      });
  }
@@ -876,6 +1252,40 @@ index d60a676228b4739c387644389c053c41996ef7c3..b986b5f52894622f43dd69bbb57e5df8
 +        2
 +    );
 +    assert!(first_item.read_with(cx, |item, _| item.is_dirty));
++
++    first_item.update(cx, |item, cx| {
++        item.has_conflict = true;
++        item.set_has_deleted_file(true);
++        item.project_items
++            .push(TestProjectItem::new(1, "file.txt", cx));
++    });
++    let workspace = &workspaces[0];
++    let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
++    let start_close = |cx: &mut VisualTestContext| {
++        multi_workspace.update_in(cx, |mw, window, cx| {
++            mw.remove([workspace.clone()], RemovalIntent::CloseProject, window, cx)
++        })
++    };
++    let task = start_close(cx);
++    cx.run_until_parked();
++    pane.update_in(cx, |pane, window, cx| {
++        pane.remove_item(first_item.entity_id(), false, false, window, cx);
++        pane.add_item(Box::new(first_item.clone()), true, true, None, window, cx);
++    });
++    cx.simulate_prompt_answer("Close");
++    cx.run_until_parked();
++    assert!(!task.await.unwrap());
++    assert_eq!(pane.read_with(cx, |pane, _| pane.items_len()), 1);
++
++    let task = start_close(cx);
++    cx.run_until_parked();
++    cx.simulate_prompt_answer("Close");
++    cx.run_until_parked();
++    assert!(task.await.unwrap());
++    assert!(multi_workspace.read_with(cx, |mw, _| {
++        mw.workspaces().all(|candidate| candidate != workspace)
++    }));
++    assert_eq!(pane.read_with(cx, |pane, _| pane.items_len()), 0);
 +}
 +
 +#[gpui::test]
@@ -1255,6 +1665,122 @@ index d60a676228b4739c387644389c053c41996ef7c3..b986b5f52894622f43dd69bbb57e5df8
 +        })
 +        .unwrap();
 +}
+diff --git a/crates/workspace/src/pane.rs b/crates/workspace/src/pane.rs
+index 78646a7dd28eed8607b737d4203f41b615365017..f566432cc4d11ca1dc609d143bba328b97da2d72 100644
+--- a/crates/workspace/src/pane.rs
++++ b/crates/workspace/src/pane.rs
+@@ -5,7 +5,8 @@ use crate::{
+     focus_follows_mouse::FocusFollowsMouse as _,
+     invalid_item_view::InvalidItemView,
+     item::{
+-        ActivateOnClose, ClosePosition, Item, ItemBufferKind, ItemHandle, ItemSettings,
++        ActivateOnClose, ClosePosition, Item, ItemBufferKind, ItemCloseGuard, ItemHandle,
++        ItemSettings,
+         PreviewTabsSettings, ProjectItemKind, SaveOptions, ShowCloseButton, ShowDiagnostics,
+         TabContentParams, TabTooltipContent, WeakItemHandle,
+     },
+@@ -36,6 +37,7 @@ use serde::Deserialize;
+ use settings::{Settings, SettingsStore};
+ use std::{
+     any::Any,
++    cell::Cell,
+     cmp, fmt, mem,
+     num::NonZeroUsize,
+     path::PathBuf,
+@@ -104,6 +106,11 @@ pub enum SaveIntent {
+     Skip,
+ }
+ 
++pub struct DeletedTabClose {
++    pub pane_id: EntityId,
++    pub item_id: EntityId,
++}
++
+ /// Activates a specific item in the pane by its index.
+ #[derive(Clone, PartialEq, Debug, Deserialize, JsonSchema, Default, Action)]
+ #[action(namespace = pane)]
+@@ -2273,6 +2280,17 @@ impl Pane {
+         item: &dyn ItemHandle,
+         save_intent: SaveIntent,
+         cx: &mut AsyncWindowContext,
++    ) -> Result<bool> {
++        Self::save_item_with_deleted_close_receipt(project, pane, item, save_intent, None, cx).await
++    }
++
++    pub async fn save_item_with_deleted_close_receipt(
++        project: Entity<Project>,
++        pane: Entity<Pane>,
++        item: &dyn ItemHandle,
++        save_intent: SaveIntent,
++        receipts: Option<&mut Vec<DeletedTabClose>>,
++        cx: &mut AsyncWindowContext,
+     ) -> Result<bool> {
+         const CONFLICT_MESSAGE: &str = "This file has changed on disk since you started editing it. Do you want to overwrite it?";
+ 
+@@ -2343,15 +2361,30 @@ impl Pane {
+ 
+         if has_conflict && can_save {
+             if has_deleted_file && is_singleton {
+-                let answer = pane.update_in(cx, |pane, window, cx| {
++                let item_id = item.item_id();
++                let (answer, watch) = pane.update_in(cx, |pane, window, cx| {
++                    let watch = receipts.is_some().then(|| {
++                        let changed = Rc::new(Cell::new(false));
++                        let membership_changed = changed.clone();
++                        let membership = cx.subscribe_self(move |_, event: &Event, _| {
++                            if matches!(event, Event::AddItem { item } | Event::RemovedItem { item }
++                                if item.item_id() == item_id)
++                            {
++                                membership_changed.set(true);
++                            }
++                        });
++                        let edits = ItemCloseGuard::new(vec![item.boxed_clone()], window, cx);
++                        (changed, membership, edits)
++                    });
+                     pane.activate_item(item_ix, true, true, window, cx);
+-                    window.prompt(
++                    let answer = window.prompt(
+                         PromptLevel::Warning,
+                         DELETED_MESSAGE,
+                         None,
+                         &["Save", "Close", "Cancel"],
+                         cx,
+-                    )
++                    );
++                    (answer, watch)
+                 })?;
+                 match answer.await {
+                     Ok(0) => {
+@@ -2370,9 +2403,27 @@ impl Pane {
+                         .await?
+                     }
+                     Ok(1) => {
+-                        pane.update_in(cx, |pane, window, cx| {
+-                            pane.remove_item(item.item_id(), false, true, window, cx)
++                        let removed = pane.update_in(cx, |pane, window, cx| {
++                            // A stale answer must not close a tab moved, replaced, or edited during the prompt.
++                            if let Some((changed, _, edits)) = &watch
++                                && (changed.get()
++                                    || edits.changed(cx)
++                                    || pane.index_for_item_id(item_id).is_none())
++                            {
++                                return false;
++                            }
++                            pane.remove_item(item_id, false, true, window, cx);
++                            true
+                         })?;
++                        if !removed {
++                            return Ok(false);
++                        }
++                        if let Some(receipts) = receipts {
++                            receipts.push(DeletedTabClose {
++                                pane_id: pane.entity_id(),
++                                item_id,
++                            });
++                        }
+                     }
+                     _ => return Ok(false),
+                 }
 diff --git a/crates/workspace/src/persistence.rs b/crates/workspace/src/persistence.rs
 index 9f48608d552106f5f5cf1538eaf1a41a28e21873..7263f9db003b4ec0408b73ccfd16a6780540eb86 100644
 --- a/crates/workspace/src/persistence.rs
@@ -1426,7 +1952,7 @@ index a422f05a06d6b669d0a9b1ce210052c294ebafff..f9924b28bcb50809245fb2f66812669c
          SerializedProjectGroupState {
              key: ProjectGroupKey::new(host, path_list),
 diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
-index 855b64a06156ab233df67dec1b1aba77f7c2037c..acb21cccc002e7b22dacfc9122cbd3cb550704d9 100644
+index 855b64a06156ab233df67dec1b1aba77f7c2037c..5932178bc7fcc95c1e47cd98d17b0c2ff7467616 100644
 --- a/crates/workspace/src/workspace.rs
 +++ b/crates/workspace/src/workspace.rs
 @@ -70,8 +70,8 @@ use gpui::{
@@ -1440,32 +1966,154 @@ index 855b64a06156ab233df67dec1b1aba77f7c2037c..acb21cccc002e7b22dacfc9122cbd3cb
  };
  use itertools::Itertools;
  use language::{Buffer, LanguageRegistry, Rope, language_settings::all_language_settings};
-@@ -3991,6 +3991,24 @@ impl Workspace {
+@@ -1893,6 +1893,9 @@ pub enum OpenMode {
+     Activate,
+ }
+ 
++type LocalWorkspaceOpenCondition =
++    Box<dyn FnOnce(&mut MultiWorkspace, &mut Window, &mut Context<MultiWorkspace>) -> bool>;
++
+ impl Workspace {
+     pub fn new(
+         workspace_id: Option<WorkspaceId>,
+@@ -2381,6 +2384,52 @@ impl Workspace {
+         open_mode: OpenMode,
+         cx: &mut App,
+     ) -> Task<anyhow::Result<OpenResult>> {
++        let open = Self::prepare_local_open(
++            abs_paths,
++            app_state,
++            requesting_window,
++            env,
++            init,
++            open_mode,
++            None,
++            cx,
++        );
++        cx.spawn(async move |cx| Ok(open(cx).await?.expect("unconditional local open")))
++    }
++
++    /// Checks whether to open and activate a local workspace in the same
++    /// update that would create it, after preparing its project.
++    pub(crate) fn activate_local_if(
++        abs_paths: Vec<PathBuf>,
++        app_state: Arc<AppState>,
++        window: WindowHandle<MultiWorkspace>,
++        should_open: impl FnOnce(&mut MultiWorkspace, &mut Window, &mut Context<MultiWorkspace>) -> bool
++        + 'static,
++        cx: &mut App,
++    ) -> Task<Result<()>> {
++        let open = Self::prepare_local_open(
++            abs_paths,
++            app_state,
++            Some(window),
++            None,
++            None,
++            OpenMode::Activate,
++            Some(Box::new(should_open)),
++            cx,
++        );
++        cx.spawn(async move |cx| open(cx).await.map(|_| ()))
++    }
++
++    fn prepare_local_open(
++        abs_paths: Vec<PathBuf>,
++        app_state: Arc<AppState>,
++        requesting_window: Option<WindowHandle<MultiWorkspace>>,
++        env: Option<HashMap<String, String>>,
++        init: Option<Box<dyn FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) + Send>>,
++        open_mode: OpenMode,
++        should_open: Option<LocalWorkspaceOpenCondition>,
++        cx: &mut App,
++    ) -> impl AsyncFnOnce(&mut AsyncApp) -> Result<Option<OpenResult>> + 'static {
+         #[cfg(target_os = "windows")]
+         let wsl_path = abs_paths
+             .iter()
+@@ -2398,7 +2447,7 @@ impl Workspace {
+ 
+         let db = WorkspaceDb::global(cx);
+         let kvp = db::kvp::KeyValueStore::global(cx);
+-        cx.spawn(async move |cx| {
++        async move |cx| {
+             let mut paths_to_open = Vec::with_capacity(abs_paths.len());
+             for path in abs_paths.into_iter() {
+                 if let Some(canonical) = app_state.fs.canonicalize(&path).await.ok() {
+@@ -2488,6 +2537,11 @@ impl Workspace {
+                         .unwrap_or(false);
+ 
+                     let workspace = window.update(cx, |multi_workspace, window, cx| {
++                        if should_open
++                            .is_some_and(|should_open| !should_open(multi_workspace, window, cx))
++                        {
++                            return None;
++                        }
+                         let workspace = cx.new(|cx| {
+                             let mut workspace = Workspace::new(
+                                 Some(workspace_id),
+@@ -2517,8 +2571,11 @@ impl Workspace {
+                                 unreachable!()
+                             }
+                         }
+-                        workspace
++                        Some(workspace)
+                     })?;
++                    let Some(workspace) = workspace else {
++                        return Ok(None);
++                    };
+                     (window, workspace)
+                 } else {
+                     let window_bounds_override = window_bounds_env_override();
+@@ -2667,12 +2724,12 @@ impl Workspace {
+                 })
+                 .log_err();
+ 
+-            Ok(OpenResult {
++            Ok(Some(OpenResult {
+                 window,
+                 workspace,
+                 opened_items,
+-            })
+-        })
++            }))
++        }
+     }
+ 
+     pub fn project_group_key(&self, cx: &App) -> ProjectGroupKey {
+@@ -3991,8 +4048,33 @@ impl Workspace {
          close_intent: CloseIntent,
          window: &mut Window,
          cx: &mut Context<Self>,
 +    ) -> Task<Result<bool>> {
-+        self.prepare_to_close_internal(close_intent, false, window, cx)
++        self.prepare_to_close_internal(close_intent, None, window, cx)
 +    }
 +
 +    pub(crate) fn prepare_to_remove(
 +        &mut self,
++        deleted_tab_closes: Rc<RefCell<Vec<DeletedTabClose>>>,
 +        window: &mut Window,
 +        cx: &mut Context<Self>,
 +    ) -> Task<Result<bool>> {
-+        self.prepare_to_close_internal(CloseIntent::ReplaceWindow, true, window, cx)
++        self.prepare_to_close_internal(
++            CloseIntent::ReplaceWindow,
++            Some(deleted_tab_closes),
++            window,
++            cx,
++        )
 +    }
 +
 +    fn prepare_to_close_internal(
 +        &mut self,
 +        close_intent: CloseIntent,
-+        is_workspace_removal: bool,
++        deleted_tab_closes: Option<Rc<RefCell<Vec<DeletedTabClose>>>>,
 +        window: &mut Window,
 +        cx: &mut Context<Self>,
      ) -> Task<Result<bool>> {
          let active_call = self.active_global_call();
++        let is_workspace_removal = deleted_tab_closes.is_some();
  
-@@ -4056,7 +4074,7 @@ impl Workspace {
+         cx.spawn_in(window, async move |this, cx| {
+             this.update(cx, |this, _| {
+@@ -4056,7 +4138,7 @@ impl Workspace {
                          }
                      }
                  }
@@ -1474,7 +2122,14 @@ index 855b64a06156ab233df67dec1b1aba77f7c2037c..acb21cccc002e7b22dacfc9122cbd3cb
                      _ = cx.update(|_window, cx| {
                          let multi_workspace = cx
                              .windows()
-@@ -4105,9 +4123,9 @@ impl Workspace {
+@@ -4099,15 +4181,16 @@ impl Workspace {
+                     this.save_all_internal(
+                         SaveIntent::Close,
+                         allow_hot_exit_serialization,
++                        deleted_tab_closes,
+                         window,
+                         cx,
+                     )
                  })?
                  .await;
  
@@ -1487,7 +2142,63 @@ index 855b64a06156ab233df67dec1b1aba77f7c2037c..acb21cccc002e7b22dacfc9122cbd3cb
                  && !save_last_workspace
                  && save_result.as_ref().is_ok_and(|&res| res)
              {
-@@ -8188,6 +8206,27 @@ impl Workspace {
+@@ -4123,6 +4206,7 @@ impl Workspace {
+         self.save_all_internal(
+             action.save_intent.unwrap_or(SaveIntent::SaveAll),
+             true,
++            None,
+             window,
+             cx,
+         )
+@@ -4220,13 +4304,14 @@ impl Workspace {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) -> Task<Result<bool>> {
+-        self.save_all_internal(SaveIntent::Close, true, window, cx)
++        self.save_all_internal(SaveIntent::Close, true, None, window, cx)
+     }
+ 
+     fn save_all_internal(
+         &mut self,
+         mut save_intent: SaveIntent,
+         allow_hot_exit_serialization: bool,
++        deleted_tab_closes: Option<Rc<RefCell<Vec<DeletedTabClose>>>>,
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) -> Task<Result<bool>> {
+@@ -4308,6 +4393,7 @@ impl Workspace {
+                 dirty_items
+             };
+ 
++            let mut receipts = Vec::new();
+             for (pane, item) in dirty_items {
+                 let (singleton, project_entry_ids) = cx.update(|_, cx| {
+                     (
+@@ -4316,11 +4402,22 @@ impl Workspace {
+                     )
+                 })?;
+                 if (singleton || !project_entry_ids.is_empty())
+-                    && !Pane::save_item(project.clone(), pane, &*item, save_intent, cx).await?
++                    && !Pane::save_item_with_deleted_close_receipt(
++                        project.clone(),
++                        pane,
++                        &*item,
++                        save_intent,
++                        deleted_tab_closes.as_ref().map(|_| &mut receipts),
++                        cx,
++                    )
++                    .await?
+                 {
+                     return Ok(false);
+                 }
+             }
++            if let Some(deleted_tab_closes) = deleted_tab_closes {
++                deleted_tab_closes.borrow_mut().extend(receipts);
++            }
+             Ok(true)
+         })
+     }
+@@ -8188,6 +8285,27 @@ impl Workspace {
      }
  
      fn serialize_workspace_internal(&self, window: &mut Window, cx: &mut App) -> Task<()> {
@@ -1515,7 +2226,7 @@ index 855b64a06156ab233df67dec1b1aba77f7c2037c..acb21cccc002e7b22dacfc9122cbd3cb
          let Some(database_id) = self.database_id() else {
              return Task::ready(());
          };
-@@ -8282,7 +8321,7 @@ impl Workspace {
+@@ -8282,7 +8400,7 @@ impl Workspace {
                      session_id: self.session_id.clone(),
                      bookmarks,
                      breakpoints,
@@ -1524,7 +2235,7 @@ index 855b64a06156ab233df67dec1b1aba77f7c2037c..acb21cccc002e7b22dacfc9122cbd3cb
                      user_toolchains,
                      recent_navigation_history,
                      path_style,
-@@ -8302,8 +8341,14 @@ impl Workspace {
+@@ -8302,8 +8420,14 @@ impl Workspace {
              WorkspaceLocation::None => {
                  // Save dock state for empty non-local workspaces
                  let docks = build_serialized_docks(self, window, cx);
@@ -1539,7 +2250,7 @@ index 855b64a06156ab233df67dec1b1aba77f7c2037c..acb21cccc002e7b22dacfc9122cbd3cb
                      persistence::write_default_dock_state(&kvp, docks)
                          .await
                          .log_err();
-@@ -11141,7 +11186,7 @@ pub async fn apply_restored_multiworkspace_state(
+@@ -11141,7 +11265,7 @@ pub async fn apply_restored_multiworkspace_state(
          let mut resolved_groups: Vec<SerializedProjectGroupState> = Vec::new();
          for serialized in project_groups.iter().cloned() {
              let SerializedProjectGroupState { key, expanded } = serialized.into_restored_state();
@@ -1548,7 +2259,7 @@ index 855b64a06156ab233df67dec1b1aba77f7c2037c..acb21cccc002e7b22dacfc9122cbd3cb
                  continue;
              }
              let mut resolved_paths = Vec::new();
-@@ -11159,7 +11204,10 @@ pub async fn apply_restored_multiworkspace_state(
+@@ -11159,7 +11283,10 @@ pub async fn apply_restored_multiworkspace_state(
              }
              let resolved =
                  ProjectGroupKey::new(key.host().cloned(), PathList::new(&resolved_paths));
@@ -1560,7 +2271,7 @@ index 855b64a06156ab233df67dec1b1aba77f7c2037c..acb21cccc002e7b22dacfc9122cbd3cb
                  resolved_groups.push(SerializedProjectGroupState {
                      key: resolved,
                      expanded,
-@@ -13411,6 +13459,187 @@ mod tests {
+@@ -13411,6 +13538,187 @@ mod tests {
      use util::path;
      use util::rel_path::rel_path;
  

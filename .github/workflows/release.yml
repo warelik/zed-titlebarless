@@ -678,6 +678,10 @@ jobs:
           [[ "$POLICY_REF" =~ ^[0-9a-f]{40}$ ]]
           if [ -z "$REPAIR_PR" ]; then
             gh variable set ZED_TRUSTED_POLICY --repo "$GITHUB_REPOSITORY" --body "$POLICY_REF"
+            # JSON encoding preserves trailing newlines through command substitution.
+            actual_ref=$(gh variable get ZED_TRUSTED_POLICY --repo "$GITHUB_REPOSITORY" \
+              --json value --jq '.value | @json')
+            test "$actual_ref" = "\"$POLICY_REF\""
           fi
           echo "policy_ref=$POLICY_REF" >> "$GITHUB_OUTPUT"
       - name: Finish Policy-Only Maintenance Without Rebuilding The Published Application

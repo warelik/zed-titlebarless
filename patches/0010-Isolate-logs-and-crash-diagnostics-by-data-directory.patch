@@ -1,7 +1,7 @@
-From 7dcf5cb371e740d149e015394a9ec68fa957b9be Mon Sep 17 00:00:00 2001
+From d65351e2106f7ce0d0a6b10ce144fcf02ae8f240 Mon Sep 17 00:00:00 2001
 From: warelik <warelik@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 10:36:47 +0300
-Subject: [PATCH 7/7] Isolate logs and crash diagnostics by data directory
+Subject: [PATCH 10/10] Isolate logs and crash diagnostics by data directory
 
 
 diff --git a/crates/crashes/src/crashes.rs b/crates/crashes/src/crashes.rs
